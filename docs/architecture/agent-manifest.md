@@ -16,7 +16,7 @@ The manifest complements the Agent Genome:
 - skills — procedural knowledge;
 - `AGENT.yaml` — applicability, competencies, execution requirements, authorization policy, delegation, limits, review, and learning policy.
 
-Runtime state, learned content, sessions, capability grants/tickets, reservations, budget consumption, backend health, and concrete executor details are excluded.
+Runtime state, learned content, sessions, capability grants/tickets, reservations, budget consumption, recovery counters, backend health, and concrete executor details are excluded.
 
 See also:
 
@@ -25,6 +25,7 @@ See also:
 - `docs/architecture/permissions-and-capabilities.md`
 - `docs/architecture/execution-fabric.md`
 - `docs/architecture/run-and-attempt.md`
+- `docs/architecture/recovery-policy.md`
 
 ## Foundational principles
 
@@ -153,7 +154,6 @@ spec:
 
   limits:
     maxTurns: 40
-    maxRetries: 2
     wallTime: 30m
 
   review:
@@ -392,16 +392,15 @@ Backend-native subagent functionality may later be an execution optimization; Pa
 
 ## Limits
 
-`spec.limits` defines configured ceilings, not consumed runtime quota.
+`spec.limits` defines intrinsic execution ceilings that are meaningful for a Logical Agent, not consumed runtime quota or recovery policy.
 
 ```yaml
 limits:
   maxTurns: 40
-  maxRetries: 2
   wallTime: 30m
 ```
 
-Consumed retries, tokens/cost, resource reservations, and backend quota state belong to runtime subsystems.
+Retry/recovery ceilings belong to `RecoveryPolicy`, because reconnects, Attempt retries, strategy retries, and acceptance retries have different semantics. Tokens/cost, ResourceReservations, and backend quota state belong to their dedicated runtime subsystems.
 
 ## Review and learning
 
@@ -476,7 +475,7 @@ Include:
 - permission profile/rules;
 - workspace and sandbox profile;
 - delegation controls;
-- execution ceilings;
+- intrinsic execution ceilings such as turns/wall time;
 - review policy;
 - learning policy;
 - immutable Agent/Genome snapshots inside canonical Run strategy state.
@@ -494,6 +493,7 @@ Never allow:
 
 - credentials or secrets inside the manifest;
 - runtime quota/usage inside the manifest;
+- retry/recovery counters or policy inside generic Agent limits;
 - concrete provider/model/harness allowlists inside portable Agent identity;
 - backend-specific tuning fields inside portable Agent identity;
 - capability grants/tickets inside the manifest;
@@ -510,6 +510,7 @@ Never allow:
 6. Agent manifests describe portable Execution Features, not compatible harness names.
 7. Pantheon owns authorization and delegation.
 8. `AGENT.yaml` is desired configuration; runtime and learned state live elsewhere.
-9. Backend compatibility is dynamically discovered through Execution Fabric and fails closed.
-10. Backend-specific tuning lives outside Logical Agent identity.
-11. Each Run carries one immutable resolved strategy snapshot; Attempt-specific LaunchKey/attachment state lives under Attempt.
+9. Retry/recovery semantics live in RecoveryPolicy, not ambiguous generic Agent limits.
+10. Backend compatibility is dynamically discovered through Execution Fabric and fails closed.
+11. Backend-specific tuning lives outside Logical Agent identity.
+12. Each Run carries one immutable resolved strategy snapshot; Attempt-specific LaunchKey/attachment state lives under Attempt.
