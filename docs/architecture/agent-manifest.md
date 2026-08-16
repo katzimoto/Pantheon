@@ -199,6 +199,8 @@ For untrusted model-driven shell coding, `isolated-clone` is the preferred v1 re
 
 `linked-worktree` may be valid for trusted/safely projected contexts but cannot by itself satisfy `isolation.control-plane`.
 
+Task-local Git metadata remains Agent-writable/untrusted even under `isolated-clone`. The Workspace strategy does not authorize a privileged Pantheon controller to execute Git against that repository state. Controller-side Git capture/recovery must satisfy the hostile-repository boundary in `workspace-and-git-integration.md`: use controller-owned sterile Git control state when logical content is sufficient, or an equally confined helper when Agent-owned Git metadata must be interpreted.
+
 ## Sandbox
 
 `sandbox.profile` names a logical SandboxProfile from ConfigurationRevision. `sandbox.requirements` expresses hard physical guarantees the Sandbox Planner must prove, such as:
@@ -235,7 +237,7 @@ Agent source config compiles into immutable Agent snapshots within Configuration
 1. Agent identity/config is provider/model/backend independent.
 2. `accepts`, competencies, Skills, actions, execution features, permissions, Workspace strategy and Sandbox guarantees are distinct.
 3. Workspace strategy never claims security isolation.
-4. Untrusted shell requires a SandboxProfile proving control-plane isolation independently of Git/worktree strategy.
+4. Untrusted shell requires a SandboxProfile proving control-plane isolation independently of Git/worktree strategy, and Agent-writable repository state may not induce privileged Pantheon/controller execution outside that containment boundary.
 5. Agent Control operation availability does not grant authorization.
 6. Recovery retry state is not stored in Agent manifest.
 7. Run freezes exact Agent/Genome/config inputs; later edits do not mutate it.

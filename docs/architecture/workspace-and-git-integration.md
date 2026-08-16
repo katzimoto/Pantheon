@@ -106,6 +106,42 @@ An Agent Sandbox receives neither ambient push credentials nor host SSH/GPG cred
 
 A Task-local Git repository has no credential-bearing remote authority. It may retain sanitized remote URLs/history metadata where policy permits, but credentialed push/fetch requiring secrets is brokered.
 
+## Hostile repository state and controller-side Git execution
+
+Repository state writable by an Agent is **untrusted input**, even when the files are owned by the same operating-system user that runs Pantheon and even when Git would consider the repository safe by ownership policy.
+
+This includes, without limitation:
+
+```text
+working-tree .gitattributes / .gitmodules and repository control files
+.git/config and recursively included configuration
+.git/hooks/** and configured hooks paths
+.git/info/**
+index, local refs and local object database
+.git gitfiles / gitdir indirection
+commondir indirection
+objects/info/alternates and alternate-object indirection
+repository-configured filters, diff/textconv, merge drivers, fsmonitor,
+credential/transport helpers, submodule commands and equivalent extension points
+```
+
+The list is threat documentation, not a complete security blacklist. A future Git extension point remains untrusted by default.
+
+Pantheon therefore has a separate controller-side execution boundary:
+
+> **Pantheon never executes Git or another repository-configurable tool with ambient daemon/control-plane authority against Agent-writable repository control state.**
+
+Two implementation patterns satisfy this rule:
+
+1. **Sterile controller projection.** Operations that only need logical repository content, such as authoritative WorkspaceRevision/candidate capture, use controller-owned Git control state anchored to the durable immutable base. The controller may read the quiesced Workspace's permitted file bytes as untrusted data, but it does not use the Agent's `.git` as `GIT_DIR`, common directory, configuration source, hooks directory or object-store authority. A temporary index, object database or scratch repository used for capture is controller-created and sterile.
+2. **Confined hostile-repository inspection.** An operation that genuinely must interpret Agent-owned Git metadata executes inside the Agent Sandbox or an equivalently confined controller-owned helper whose ambient authority is no greater than the hostile Workspace requires. That helper has no access to Operator Control, `pantheon.db`, active configuration, raw CAS, SecretProvider/Credential Broker administration, host credential agents, runtime-management sockets, peer workspaces or unrelated authoritative repositories.
+
+Controller-owned Git execution also uses a sterile, non-interactive execution profile as defense in depth: system/global configuration is replaced by controller-owned empty configuration; repository-local configuration is controller-owned for sterile projections; hooks and external helpers are disabled unless a specific trusted controller operation explicitly requires one; interactive pager/editor/askpass/credential prompting is disabled; and remote/submodule/transport execution is unavailable unless separately brokered and authorized.
+
+These configuration controls are **defense in depth, not the security boundary**. Pantheon must remain safe if Git gains another repository-configurable execution mechanism.
+
+Pantheon does not follow an Agent-controlled `gitdir`, `commondir`, alternates path, config include, remote/helper declaration or similar indirection into a more privileged host location and then treat the target as trusted. Controller-trusted repository paths and roots come from durable Pantheon/controller state. An operation that cannot establish the required projection or confinement fails closed with `workspace.hostile-repository-state` and fences/quarantines the affected Workspace rather than executing with greater authority.
+
 ## Workspace phases
 
 Workspace lifecycle can remain small, for example:
@@ -142,7 +178,7 @@ workspaceRevision:
 
 `tree`/observed Git IDs provide immutable repository-state metadata; they are not the sole portable Artifact payload.
 
-Pantheon captures WorkspaceRevision without mutating the worker's normal staging/index workflow. For Git implementations this may use a controller-owned temporary index to construct the exact resulting tree.
+Pantheon captures WorkspaceRevision without mutating the worker's normal staging/index workflow. For Git implementations this may use a controller-owned **sterile repository projection and temporary index** anchored to the durable immutable base to construct the exact resulting tree. Agent-writable `.git` state is never the privileged controller's Git control plane for this capture.
 
 Ignored/ephemeral build output is excluded from code candidate snapshots by default unless the Task explicitly declares it as an output.
 
@@ -163,7 +199,7 @@ Canonical flow:
 ```text
 quiesce/fence Workspace mutation for submission transaction
   ↓
-capture WorkspaceRevision
+capture WorkspaceRevision through sterile projection/confined inspection
   ↓
 validate allowed path/scope changes
   ↓
@@ -228,6 +264,8 @@ Default v1 may use squash-style integration regardless of worker-local commit hi
 
 Conflict means the current target state cannot satisfy the recorded integration preconditions; it does not invalidate the accepted Artifact.
 
+Integration Git execution uses controller-owned/trusted repository state or another explicitly confined projection. Accepted Artifact bytes are data; they do not make repository-controlled configuration from a producer Workspace trustworthy.
+
 ## Git ref CAS
 
 Shared ref update uses compare-and-swap semantics equivalent to:
@@ -256,6 +294,8 @@ Crash between Git mutation and DB result is recovered by comparing expected targ
 
 If integration/materialization temporarily relies on repository Git objects, controller may create refs under a Pantheon-owned namespace to pin those objects before committing a DB obligation that assumes continued availability.
 
+Pins are created only through controller-owned/trusted Git control state. Pantheon does not obtain host authority merely by pointing a privileged Git process at an Agent-writable object database or repository configuration.
+
 Those Git pins are storage optimization/retention, not `code.changeset` identity. The canonical Artifact remains reconstructable from Pantheon CAS.
 
 ## Startup reconciliation
@@ -274,6 +314,8 @@ orphan Task-local worktree/clone without durable owner
 shared target ref differs from pending IntegrationIntent
 → integration reconciliation
 ```
+
+Reconciliation of Agent-writable Git state follows the hostile-repository rule above. It never promotes paths/configuration discovered by following Agent-controlled Git metadata into controller authority.
 
 ## Cleanup
 
@@ -294,6 +336,8 @@ host credential agents
 host container runtime socket
 ```
 
+The inverse boundary is equally mandatory: Agent-writable Workspace/repository state never causes Pantheon to execute repository-configurable behavior with ambient control-plane authority.
+
 Workspace policy and Sandbox policy jointly enforce these boundaries.
 
 ## Core invariants
@@ -309,3 +353,5 @@ Workspace policy and Sandbox policy jointly enforce these boundaries.
 9. Task success does not imply merge/push.
 10. IntegrationIntent precedes external shared-ref mutation and Git target update is CAS-protected/reconciled.
 11. Sandbox and Workspace isolation are distinct and both are required where applicable.
+12. Agent-writable repository state is untrusted input; Pantheon never executes a repository-configurable tool against it with ambient daemon/control-plane authority.
+13. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.

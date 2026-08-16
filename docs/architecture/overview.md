@@ -109,6 +109,8 @@ physical possibility
 
 Untrusted model-driven shell execution requires control-plane isolation. Agent Sandboxes cannot reach Operator Control, Pantheon DB/config/raw CAS, peer workspaces, host credential agents, authoritative Git common-dir state or host container-runtime sockets.
 
+The boundary is bidirectional: Agent-writable repository/configuration state is untrusted input and may not cause Pantheon/controller processes to execute repository-configurable behavior with ambient control-plane authority. Controller operations use controller-owned sterile control state when possible, or equivalently confined helpers when hostile repository metadata must be interpreted.
+
 Privileged operations are brokered. Raw `secret.read` is hard-denied for Agent principals in v1.
 
 ## Persistence and external effects
@@ -132,6 +134,8 @@ Ordinary content-addressed CAS is the deliberate inverse: durable immutable byte
 ## Code Workspaces / Artifacts
 
 Task Workspace is mutable execution state; it is not an Artifact. Sandboxed coding Agents normally use Task-local isolated Git state rather than writable authoritative shared Git metadata.
+
+Task-local Git state remains hostile to privileged controller execution. WorkspaceRevision/candidate capture must not use Agent-writable Git control state as the controller's repository configuration/execution authority.
 
 Pantheon seals actual Workspace state into a CAS-complete content-addressed `code.changeset`. Worker commits/staging are workflow/provenance, not Candidate identity. Only Integration Controller may mutate shared repository refs, with durable intent and Git compare-and-swap.
 

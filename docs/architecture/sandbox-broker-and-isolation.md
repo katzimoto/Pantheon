@@ -138,6 +138,18 @@ Linked worktrees remain useful where shared Git authority can be kept inaccessib
 
 Worker-local commits and branch names remain development history only. Candidate identity remains the sealed WorkspaceRevision/code.changeset, and only Integration Controller may mutate shared refs.
 
+## Controller-side execution boundary
+
+Control-plane isolation is bidirectional. It is not enough to prevent an Agent process from reaching Pantheon directly; Pantheon must also avoid acting as a confused deputy by interpreting Agent-controlled repository state with greater ambient authority.
+
+Repository configuration, hooks, attributes, Git metadata, helper declarations and repository indirections inside an Agent-writable Workspace are untrusted input. Pantheon must not execute Git or any other repository-configurable tool against that state as an ambiently privileged daemon/controller process.
+
+Where controller logic only needs logical file content, it uses controller-owned sterile repository/control state. Where it must interpret the hostile repository itself, the operation executes inside the Agent Sandbox or an equally confined controller-owned helper whose filesystem/network/credential/control-plane authority is no broader than required for that inspection.
+
+A deny-list of known Git execution surfaces is defense in depth only. The security property is the authority boundary: repository-controlled behavior can never inherit Pantheon daemon, operator, raw-CAS, secret, credential-agent, runtime-management or unrelated authoritative-repository authority.
+
+See `workspace-and-git-integration.md` for the canonical hostile-repository contract.
+
 ## Credential isolation
 
 Agent Sandboxes never receive host `SSH_AUTH_SOCK`, GPG agents, cloud credential agents, platform keychain authority or hidden credentialed Git remotes. Credentialed operations use the Secret/Credential Broker.
@@ -209,6 +221,8 @@ V1 uses factual local `SandboxVerification`; cryptographic remote attestation is
 
 Detected violations such as unexpected privileged configuration, forbidden host mount, runtime socket exposure, wrong network mode, peer Workspace access or SandboxKey mismatch are `SYSTEM` failures with namespaced codes such as `sandbox.invariant-violation`.
 
+If Pantheon cannot establish the hostile-repository execution boundary before a controller operation would interpret Agent-writable repository state, the operation fails closed as `workspace.hostile-repository-state` in the same system/security severity class. The affected Workspace/Run is fenced or quarantined rather than falling back to privileged host Git execution.
+
 Affected Runs are stopped/fenced and the SandboxBackend may be quarantined from new work. These are not normal Agent failures.
 
 ## Enforcement mapping
@@ -255,3 +269,4 @@ Do not add Kubernetes, distributed sandbox fleets, service meshes, complex SDN, 
 6. A new Run normally gets a fresh SandboxInstance; Task Workspace continuity is separate.
 7. Sandbox provisioning is durable/idempotent/reconciled like every other external side effect.
 8. Sandbox invariant violations are system/security failures and fail closed.
+9. Pantheon never executes a repository-configurable tool with ambient control-plane authority against Agent-writable repository state; hostile inspection is confined or uses controller-owned sterile control state.

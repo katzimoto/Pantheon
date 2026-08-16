@@ -501,17 +501,21 @@ For every non-RELEASED WorkspaceRecord:
 ```text
 SQLite WorkspaceRecord
         +
-git worktree inventory / filesystem observation
+confined Git/filesystem observation
         ↓
 Workspace reconciliation
 ```
+
+Workspace recovery obeys the hostile-repository boundary in `workspace-and-git-integration.md`. Agent-writable Git state is observation input, never controller authority. In particular, recovery does not derive a trusted repository/common-dir/object-store/configuration path by following an Agent-controlled `.git` gitfile, `commondir`, object alternate, configuration include, remote/helper declaration or equivalent repository indirection.
+
+Durable Pantheon Workspace/repository records define the controller-trusted roots that recovery is allowed to inspect. Any operation that must interpret Agent-owned Git metadata runs inside the Agent Sandbox or an equivalently confined controller-owned helper. Privileged controller Git is permitted only against controller-owned/trusted Git control state using the sterile execution profile; it never points the daemon's ambient authority at Agent-writable repository configuration.
 
 Possible cases:
 
 ### Expected workspace exists and is coherent
 
-- verify repository/base/worktree identity;
-- repair administrative linkage only through Git-supported repair operations where safe;
+- verify repository/base/worktree identity against durable Pantheon ownership state;
+- repair administrative linkage only through Git-supported repair operations where safe and only through the confined/sterile execution boundary appropriate to the repository state;
 - restore correct READY/FROZEN observation.
 
 ### Workspace record exists but path is missing
@@ -529,7 +533,11 @@ Possible cases:
 
 ### Git administrative state is repairable
 
-Use stable Git worktree inventory/repair interfaces rather than editing `.git/worktrees/**` directly.
+Use stable Git worktree inventory/repair interfaces rather than editing `.git/worktrees/**` directly, but only after establishing the hostile-repository confinement rule above. Git-supported repair is not by itself a privilege boundary.
+
+### Hostile repository boundary cannot be established
+
+Emit `workspace.hostile-repository-state`, fence/quarantine the Workspace, and require a safe rematerialization or operator resolution. Recovery never falls back to running Git with ambient daemon/control-plane authority merely to obtain an inventory or repair result.
 
 ## 17. Git integration recovery
 
@@ -1007,7 +1015,7 @@ Defer:
 11. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
 12. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
 13. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
-14. **Workspace recovery never silently recreates potentially lost unsealed mutable work.**
+14. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
 15. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
 16. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
 17. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
