@@ -2,58 +2,54 @@
 
 ## Status
 
-Draft design — Pantheon Agent subsystem specification.
+Canonical Pantheon Logical Agent declarative contract (`AGENT.yaml`).
 
 ## Purpose
 
-`AGENT.yaml` is Pantheon's declarative, machine-readable contract for a persistent Logical Agent. It describes desired Agent configuration independently of the concrete backend, runtime, model, or harness that executes it.
+`AGENT.yaml` describes a persistent Logical Agent independently of concrete execution provider/model/harness/runtime.
 
-The manifest complements the Agent Genome:
+It complements the static v1 Genome inputs:
 
-- `SOUL.md` — stable identity;
-- `BEHAVIOR.md` — validated adaptive heuristics;
-- memory — durable facts/context;
-- skills — procedural knowledge;
-- `AGENT.yaml` — applicability, competencies, execution requirements, authorization policy, delegation, limits, review, and learning policy.
+```text
+SOUL.md
+BEHAVIOR.md
+approved Skills
+bounded Memory
+```
 
-Runtime state, learned content, sessions, capability grants/tickets, reservations, budget consumption, recovery counters, backend health, and concrete executor details are excluded.
+Runtime state, sessions, Attempts, capability Grants/tickets, Reservations, Budget usage, backend health and concrete execution identifiers are excluded.
 
-See also:
+## Foundational distinctions
 
-- `docs/architecture/agent-genome.md`
-- `docs/architecture/logical-agent-resolution.md`
-- `docs/architecture/permissions-and-capabilities.md`
-- `docs/architecture/execution-fabric.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/recovery-policy.md`
+```text
+TASK TYPE (`accepts`)
+  what class of Task may this Agent own?
 
-## Foundational principles
+COMPETENCY
+  what semantic ability is the Agent trusted to provide?
 
-### Logical identity is execution-independent
+SKILL
+  what reusable procedure/guidance is available?
 
-An Agent is not a model, provider, CLI harness, endpoint, or local runtime configuration.
+ACTION / TOOL
+  what semantic operation may be requested?
 
-Pantheon owns the canonical Logical Agent. Agent Resolution determines semantic eligibility; the Execution Fabric later resolves eligible Agent + execution pairs.
+EXECUTION FEATURE
+  what backend mechanism is required?
 
-### Declarative desired state
+PERMISSION / GRANT
+  may the principal perform an action now?
 
-`AGENT.yaml` describes configured intent, not observed runtime state.
+WORKSPACE STRATEGY
+  how Task mutable repository state is materialized
 
-Runtime state belongs in Pantheon's state store and event log.
+SANDBOX PROFILE / GUARANTEE
+  what physical isolation the Run requires
+```
 
-### Applicability is not self-promoted
+These are not aliases.
 
-`accepts` and `competencies` define which work the Agent is configured/trusted to own. Genome learning may propose changes, but it must not silently broaden either set.
-
-### Pantheon owns authorization and delegation
-
-Backend-native permissions and subagent mechanisms are implementation details. Pantheon remains canonical for actions, resources, delegation, sandbox/workspace policy, approvals, and review gates.
-
-### Fail closed
-
-If an execution configuration cannot faithfully enforce mandatory policy, Pantheon rejects it rather than weakening policy.
-
-## Proposed v1alpha1 manifest
+## Example
 
 ```yaml
 apiVersion: pantheon/v1alpha1
@@ -64,12 +60,10 @@ metadata:
   displayName: Atlas
   labels:
     domain: software-engineering
-    tier: specialist
 
 spec:
   description: >
     Implements, debugs, refactors, and reviews software.
-    Use for Tasks that require modifying or understanding code.
 
   accepts:
     - code.implement
@@ -86,23 +80,14 @@ spec:
   genome:
     soul: SOUL.md
     behavior: BEHAVIOR.md
-
     memory:
-      namespaces:
-        - agent
-        - project
+      namespaces: [agent, project]
       retrieval:
         mode: adaptive
         maxTokens: 4000
-
     skills:
-      available:
-        - git
-        - debugging
-        - testing
-        - code-review
-      preload:
-        - git
+      available: [git, debugging, testing, code-review]
+      preload: [git]
 
   execution:
     routePolicy: coding-default
@@ -110,15 +95,13 @@ spec:
       executionFeatures:
         - session.interactive
         - tools.structured
+        - control.result-submit
+        - control.artifact-seal
+        - control.action-invoke
       minContextTokens: 64000
 
   tools:
-    bundles:
-      - filesystem
-      - git
-      - shell
-      - lsp
-
+    bundles: [filesystem, git, shell, lsp]
     actions:
       - filesystem.read
       - filesystem.write
@@ -131,24 +114,26 @@ spec:
       - action: filesystem.write
         resource: workspace://**
         effect: permit
-
       - action: git.push
         resource: repo://**
         approval: required
-
       - action: secret.read
         resource: secret://**
         effect: forbid
 
   workspace:
-    isolation: worktree
-    sandbox: developer
+    strategy: isolated-clone
+
+  sandbox:
+    profile: developer-default
+    requirements:
+      - isolation.control-plane
+      - isolation.peer-workspaces
+      - process.no-privilege-escalation
 
   delegation:
     enabled: true
-    allow:
-      - researcher
-      - reviewer
+    allow: [researcher]
     maxDepth: 1
     maxConcurrent: 2
 
@@ -156,361 +141,102 @@ spec:
     maxTurns: 40
     wallTime: 30m
 
-  review:
-    policy: code-standard
-    requiredBeforeMerge: true
-
   learning:
-    reflection: after-task
+    reflection: disabled
     promotion:
-      memory: automatic
-      skill: eval-gated
-      behavior: eval-gated
-      soul: human-approval
+      memory: disabled
+      skill: disabled
+      behavior: disabled
+      soul: disabled
 ```
 
-## Applicability: `accepts`
+## Applicability and competencies
 
-`spec.accepts` lists Task types for which this Agent may be considered.
+`accepts` and `competencies` are hard semantic eligibility inputs. Agent Resolver uses them deterministically before execution routing.
 
-Examples:
+They are operator/config controlled and cannot silently expand through Agent Genome learning.
+
+## Genome
+
+Manifest references approved/versioned Genome sources. Context Builder resolves selected immutable versions into the Run ContextPlan.
+
+V1 runtime uses static approved SOUL/BEHAVIOR/Skills/Memory. Automatic reflection/promotion is implementation-deferred; manifests should configure learning disabled for v1 deployments.
+
+## Execution requirements
+
+`execution.routePolicy` names a logical configured route policy resolved through ConfigurationRevision. Concrete providers/models/backends do not appear here.
+
+`execution.requirements.executionFeatures` names factual mechanisms an offer must support, including Agent Control semantic features when needed.
+
+`minContextTokens` is compatibility/capacity requirement, not a Budget.
+
+## Tools/actions
+
+`tools.actions` is the canonical semantic operation surface the Agent may need to request. Availability is not authorization.
+
+Actual operation flows through Agent Control/current policy/Grant redemption and the appropriate broker/controller.
+
+## Permissions
+
+Manifest permissions define part of the Agent's frozen authority ceiling/configured policy input. Current hard/config policy may further restrict it; temporary Grants may satisfy approvable actions but cannot bypass hard/frozen forbids.
+
+Agent `secret.read` is hard-denied by v1 built-in policy even if a malformed manifest attempted to permit it.
+
+## Workspace strategy is not Sandbox isolation
+
+`workspace.strategy` chooses Task mutable repository materialization:
 
 ```text
-code.implement
-code.debug
-code.review
-research.web
-security.ctf
-security.reverse-engineering
+none
+isolated-clone
+linked-worktree
+copy
 ```
 
-Task type expresses work class, not authorization or executor compatibility.
+It does **not** claim security isolation.
 
-## Competencies
+For untrusted model-driven shell coding, `isolated-clone` is the preferred v1 repository strategy so the worker can use local Git without writable access to authoritative shared `GIT_COMMON_DIR` state.
 
-`spec.competencies` lists semantic abilities this Agent is configured/trusted to provide.
+`linked-worktree` may be valid for trusted/safely projected contexts but cannot by itself satisfy `isolation.control-plane`.
 
-Examples:
+## Sandbox
+
+`sandbox.profile` names a logical SandboxProfile from ConfigurationRevision. `sandbox.requirements` expresses hard physical guarantees the Sandbox Planner must prove, such as:
 
 ```text
-code.analysis
-code.debugging
-code.editing
-test.execution
-security.analysis
-reverse-engineering
-web.research
+isolation.control-plane
+isolation.peer-workspaces
+isolation.host-credentials
+process.no-privilege-escalation
 ```
 
-A competency is distinct from a Skill, Tool/Action, Execution Feature, or authorization capability grant.
-
-```text
-TASK TYPE
-  What class of Task may this Agent own?
-
-COMPETENCY
-  What semantic ability can this Agent provide?
-
-SKILL
-  What reusable procedure does the Agent know?
-
-TOOL / ACTION
-  What canonical mechanism may be invoked?
-
-EXECUTION FEATURE
-  What mechanism must an ExecutorBackend provide?
-
-PERMISSION
-  What action is authorized?
-
-CAPABILITY GRANT / TICKET
-  What concrete temporary authorization exists?
-```
-
-Agent Resolution first performs deterministic eligibility using `accepts`, Task-required `competencies`, enabled state and hard policy. Descriptions/skills may influence ranking only among valid candidates.
-
-`accepts` and `competencies` are control-plane configuration. They cannot be silently expanded by Agent self-reflection or Skill promotion.
-
-## Genome references
-
-`spec.genome` references persistent identity/knowledge layers but does not inline them.
-
-### Memory policy
-
-The manifest configures retrieval policy, not memory contents.
-
-### Skills
-
-Pantheon uses progressive disclosure:
-
-```yaml
-skills:
-  available:
-    - git
-    - debugging
-    - postgres
-  preload:
-    - git
-```
-
-`available` means a Skill may be activated when relevant. `preload` means its instructions are loaded at execution-context construction time.
-
-Skills may improve semantic affinity/ranking but are not hard Task requirements; Tasks require competencies.
-
-## Execution policy
-
-Agents reference a provider-independent route policy:
-
-```yaml
-execution:
-  routePolicy: coding-default
-```
-
-An Agent may declare intrinsic portable requirements:
-
-```yaml
-execution:
-  requirements:
-    executionFeatures:
-      - session.interactive
-      - tools.structured
-    minContextTokens: 64000
-```
-
-Execution Features use Pantheon-defined provider-neutral semantics, for example:
-
-```text
-session.interactive
-session.interrupt
-session.resume
-session.long-running
-input.image
-output.structured
-tools.structured
-transport.streaming
-```
-
-The Agent does **not** maintain a concrete provider/harness/model allowlist. Backend compatibility is discovered dynamically.
-
-Backend-specific tuning belongs in backend or route-policy configuration, never portable Agent identity.
-
-## Canonical tools and actions
-
-Pantheon exposes canonical actions rather than backend-native tool names.
-
-Examples:
-
-```text
-filesystem.read
-filesystem.write
-filesystem.delete
-shell.execute
-process.spawn
-network.connect
-git.read
-git.commit
-git.push
-git.merge
-secret.use
-secret.read
-container.run
-mcp.call
-agent.delegate
-browser.navigate
-service.read
-service.mutate
-```
-
-Tool bundles provide ergonomic groups. `tools.actions` may explicitly enumerate canonical actions exposed through the Agent's execution context.
-
-Tool availability still does not imply authorization.
-
-## Authorization model
-
-The full security design is defined in `permissions-and-capabilities.md`.
-
-Canonical authorization outcomes are binary:
-
-```text
-PERMIT
-DENY
-```
-
-Manifest rules use either `effect: permit|forbid` or `approval: required`, never both.
-
-Approval creates a scoped capability grant; the request is then re-evaluated.
-
-Effective authority remains:
-
-```text
-system hard policy
-      ∩
-user policy
-      ∩
-project policy
-      ∩
-Agent policy
-      ∩
-Task restrictions
-      ∩
-temporary grants
-```
-
-The model's interpretation of its prompt is never an authorization boundary.
-
-## Workspace and sandbox
-
-Worktree isolation and sandboxing are separate:
-
-```yaml
-workspace:
-  isolation: worktree
-  sandbox: developer
-```
-
-Worktree isolation protects concurrent repository modification. Sandbox policy protects host/environment execution.
-
-The Execution Fabric may return only offers that can satisfy resolved workspace/isolation requirements, natively or with Pantheon-managed compensation.
+A provider/ExecutorBackend cannot self-award these guarantees. If Sandbox Planner cannot establish them, the Agent+Offer strategy is incompatible/fails closed.
 
 ## Delegation
 
-Delegation is a Pantheon control-plane operation, not a backend-native authority mechanism.
+Delegation means authority to request bounded child Tasks, not to spawn unmanaged subagents/processes outside Pantheon.
 
-```yaml
-delegation:
-  enabled: true
-  allow:
-    - researcher
-    - reviewer
-  maxDepth: 1
-  maxConcurrent: 2
-```
-
-Pantheon checks authorization, depth, concurrency, Task creation limits, Goal ownership, inherited scope ceilings and graph semantics before materializing child work.
-
-Backend-native subagent functionality may later be an execution optimization; Pantheon remains source of truth for Task identity/lineage/policy.
+V1 runtime spawn is blocking/yielding only. Child Agent is chosen later by normal Agent Resolution. `allow` constrains permitted Logical Agent/task delegation policy where used; it does not pick a concrete backend/model.
 
 ## Limits
 
-`spec.limits` defines intrinsic execution ceilings that are meaningful for a Logical Agent, not consumed runtime quota or recovery policy.
+Agent limits are ceilings such as turns/wall time. Recovery retry counters are not Agent manifest limits and belong to RecoveryPolicy.
 
-```yaml
-limits:
-  maxTurns: 40
-  wallTime: 30m
-```
+## Review
 
-Retry/recovery ceilings belong to `RecoveryPolicy`, because reconnects, Attempt retries, strategy retries, and acceptance retries have different semantics. Tokens/cost, ResourceReservations, and backend quota state belong to their dedicated runtime subsystems.
+`review` describes desired integration/review policy references where project configuration uses them; authoritative Task Acceptance is defined by Task acceptance criteria/EvaluatorVersions, not by a provider-native reviewer feature.
 
-## Review and learning
+## Configuration and freezing
 
-Review is a first-class policy gate.
+Agent source config compiles into immutable Agent snapshots within ConfigurationRevision. A Run freezes the selected Agent version and ContextPlan; later manifest/Genome edits affect future Runs only except current security policy may tighten live authority.
 
-Learning policy configures reflection and promotion behavior but never stores learned content.
+## Core invariants
 
-Reflection remains a hypothesis; permanent self-modification requires the configured evidence/promotion process.
-
-## Immutable Run execution snapshot
-
-Execution reproducibility data is system-generated and is not part of `AGENT.yaml`.
-
-Pantheon does not maintain a separate authoritative `RunManifest`. The canonical Run resource has an immutable strategy/snapshot portion recording or referencing the exact resolved execution strategy.
-
-Conceptually:
-
-```yaml
-run:
-  id: run-01J...
-  task: task-...
-
-  spec:
-    agent: agent://coder
-    agentSpecHash: sha256:...
-    soulHash: sha256:...
-    behaviorHash: sha256:...
-
-    skills:
-      debugging: sha256:...
-      testing: sha256:...
-
-    memorySnapshot:
-      - mem-123
-      - mem-198
-
-    executionBinding:
-      ref: binding_01K...
-      hash: sha256:...
-      backend: executor://a
-      descriptorRevision: 17
-
-    policyHash: sha256:...
-
-    workspace:
-      commit: ef8191...
-      ref: workspace://task-291
-```
-
-Concrete runtime/model/session information may be retained as backend-namespaced audit metadata or Attempt-scoped opaque state. Core routing/scheduling logic never depends on it.
-
-Attempt-specific LaunchKey and backend attachment state belong to Attempt, not Run.
-
-## A2A interoperability
-
-Pantheon may eventually derive an A2A Agent Card from canonical Agent/Skill metadata instead of duplicating configuration. A2A is an interoperability surface, not Pantheon's internal execution abstraction.
-
-A remote A2A system could later be wrapped behind `ExecutorBackend` if useful.
-
-## v1 scope
-
-Include:
-
-- metadata;
-- `description`;
-- explicit Task applicability (`accepts`);
-- explicit semantic `competencies`;
-- Genome references;
-- Skill availability/preload;
-- route policy and portable Execution Features;
-- canonical tool bundles/actions;
-- permission profile/rules;
-- workspace and sandbox profile;
-- delegation controls;
-- intrinsic execution ceilings such as turns/wall time;
-- review policy;
-- learning policy;
-- immutable Agent/Genome snapshots inside canonical Run strategy state.
-
-Defer:
-
-- complex manifest inheritance;
-- dynamically generated Agent manifests;
-- arbitrary inline shell hooks;
-- A2A export;
-- backend-specific execution optimizations;
-- opaque Agent quality scoring.
-
-Never allow:
-
-- credentials or secrets inside the manifest;
-- runtime quota/usage inside the manifest;
-- retry/recovery counters or policy inside generic Agent limits;
-- concrete provider/model/harness allowlists inside portable Agent identity;
-- backend-specific tuning fields inside portable Agent identity;
-- capability grants/tickets inside the manifest;
-- Agents silently expanding their own `accepts` or `competencies`;
-- backend adapters weakening mandatory security policy.
-
-## Key decisions
-
-1. Agent identity is backend/provider/model independent.
-2. `accepts` defines Task-type applicability; `competencies` defines trusted semantic abilities.
-3. Agent applicability/competencies are control-plane configuration and cannot be silently self-promoted.
-4. Skills, competencies, actions/tools, Execution Features, and permissions remain separate abstractions.
-5. Agent Resolver determines semantic eligibility before final joint Agent + ExecutionOffer selection.
-6. Agent manifests describe portable Execution Features, not compatible harness names.
-7. Pantheon owns authorization and delegation.
-8. `AGENT.yaml` is desired configuration; runtime and learned state live elsewhere.
-9. Retry/recovery semantics live in RecoveryPolicy, not ambiguous generic Agent limits.
-10. Backend compatibility is dynamically discovered through Execution Fabric and fails closed.
-11. Backend-specific tuning lives outside Logical Agent identity.
-12. Each Run carries one immutable resolved strategy snapshot; Attempt-specific LaunchKey/attachment state lives under Attempt.
+1. Agent identity/config is provider/model/backend independent.
+2. `accepts`, competencies, Skills, actions, execution features, permissions, Workspace strategy and Sandbox guarantees are distinct.
+3. Workspace strategy never claims security isolation.
+4. Untrusted shell requires a SandboxProfile proving control-plane isolation independently of Git/worktree strategy.
+5. Agent Control operation availability does not grant authorization.
+6. Recovery retry state is not stored in Agent manifest.
+7. Run freezes exact Agent/Genome/config inputs; later edits do not mutate it.
+8. V1 automatic Genome mutation/promotion is disabled/deferred.
