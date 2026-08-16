@@ -2,145 +2,53 @@
 
 ## Status
 
-Draft design — Pantheon recovery, retry, and escalation specification.
+Canonical Pantheon recovery, retry and escalation specification.
 
 ## Purpose
 
-This subsystem defines how Pantheon turns immutable failure/condition evidence into a deterministic recovery decision without allowing individual controllers or backends to invent independent retry behavior.
+Recovery converts immutable failure/condition evidence into deterministic next action. Controllers/backends record facts; Recovery Policy decides what Pantheon should do.
 
-The central rule is:
+> **Evidence records what happened. Recovery policy decides the next permitted control-plane action. UNKNOWN observation is not failure and is reconciled before replacement execution.**
 
-> **Evidence records what happened. Recovery policy decides what Pantheon should do next.**
+## FailureRecord
 
-Not every recovery trigger is a failure. Acceptance rejection, budget exhaustion, rate limiting, policy revocation, and unavailable execution routes can all require recovery decisions while representing different underlying facts.
-
-See also:
-
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/task-lifecycle.md`
-- `docs/architecture/task-acceptance-and-completion.md`
-- `docs/architecture/budget-usage-and-rate-limits.md`
-- `docs/architecture/execution-offer-routing-and-admission-handshake.md`
-- `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
-
-## 1. Recovery levels
-
-Pantheon has four increasingly broad execution-recovery scopes:
+A `FailureRecord` is immutable factual evidence. Initial normalized origins:
 
 ```text
-RECONCILE
-same Attempt / same LaunchKey / same execution lineage
-
-RETRY EXECUTION
-new Attempt / same Run / same ExecutionBinding
-
-RETRY STRATEGY
-Task returns to Ready / Scheduler creates a new Run and Binding
-
-REPLAN
-Planner mutates or extends the TaskGraph through validated GraphPatch
+PREPARATION
+EXECUTION
+BACKEND
+RESOURCE
+BUDGET
+POLICY
+ACCEPTANCE
+SCHEDULING
+WORKSPACE
+ARTIFACT
+SYSTEM
 ```
 
-Two terminal/control outcomes sit alongside them:
+Fine-grained namespaced codes carry the exact condition. FailureRecord never embeds retry conclusions.
+
+## Recovery levels
 
 ```text
-REQUEST HUMAN / APPROVAL
-FAIL TASK
+LEVEL 0  RECONCILE
+  same Attempt / same LaunchKey / same external lineage
+
+LEVEL 1  RETRY EXECUTION
+  new Attempt / same Run / same immutable Binding
+
+LEVEL 2  RETRY STRATEGY
+  Task returns Ready -> Scheduler creates new Run/new Binding
+
+LEVEL 3  REPLAN
+  Planner proposes TaskGraph changes/new or superseding Tasks
 ```
 
-Recovery policy should select the smallest safe recovery scope that can plausibly resolve the condition.
+Human approval/request and terminal Task failure are orthogonal outcomes.
 
-## 2. Failure and condition evidence are immutable facts
-
-A backend, controller, evaluator, or accounting subsystem may produce normalized evidence, but must not authoritatively decide retryability.
-
-Conceptual failure record:
-
-```yaml
-failure:
-  id: failure_123
-
-  subject:
-    kind: attempt
-    ref: attempt_456
-
-  origin: execution
-  code: execution.process-exit
-  certainty: definitive
-
-  evidence:
-    exitCode: 137
-    observation: EXITED
-
-  source:
-    backend: executor://A
-
-  occurredAt: ...
-  fingerprint: sha256:...
-```
-
-The record intentionally does not contain `retryable`, retry count, or recovery action.
-
-## 3. Normalized origins
-
-Use a small stable origin vocabulary plus namespaced codes.
-
-v1 origins:
-
-```text
-preparation
-execution
-backend
-resource
-budget
-policy
-acceptance
-scheduling
-workspace
-artifact
-system
-```
-
-Examples of namespaced codes:
-
-```text
-preparation.workspace-failed
-execution.process-exit
-execution.timeout
-backend.transport-unavailable
-backend.execution-lost
-resource.memory-exhausted
-budget.hard-limit-reached
-budget.extension-required
-policy.authority-revoked
-acceptance.required-check-failed
-scheduling.no-compatible-route
-workspace.corrupt
-artifact.missing
-system.invariant-violation
-```
-
-The code namespace remains extensible without teaching core policy concrete provider/runtime names.
-
-## 4. UNKNOWN execution is not failure
-
-`Attempt.observedExecution = UNKNOWN` means Pantheon lacks sufficient evidence to establish whether execution exists or terminated.
-
-It must therefore remain in:
-
-```text
-RECONCILE
-same Attempt
-same LaunchKey
-```
-
-A new Attempt is forbidden while continuity is unresolved.
-
-Only a definitive terminal observation/evidence may permit retry policy to create another Attempt.
-
-## 5. Canonical recovery actions
-
-v1 actions:
+## Canonical RecoveryActions
 
 ```text
 RECONCILE
@@ -151,479 +59,160 @@ REQUEST_APPROVAL
 FAIL_TASK
 ```
 
-### RECONCILE
+There is intentionally no `CREATE_RUN` RecoveryAction. The Scheduler remains the only component that creates scheduled Runs.
 
-Continue the same Attempt/LaunchKey. Used for uncertainty, reconnect, adapter restart, transient status failure, and similar continuity-preserving cases.
+## RecoveryDecision
 
-May include a `notBefore` time.
+A RecoveryDecision is immutable and binds at least:
 
-### RETRY_ATTEMPT
+- subject/failure/evidence refs;
+- relevant Task/Run/Attempt revisions;
+- current Goal/Graph context;
+- `configRevision` and exact `recoveryPolicyDigest`;
+- selected RecoveryAction;
+- charged recovery counters/backoff;
+- reason/fingerprint.
 
-Requires the current Attempt to be definitively terminal.
+Recovery policy is deterministic/fail-closed. An LLM classifier may propose a category but never becomes authority.
 
-Creates a fresh Attempt and LaunchKey under the same Run/ExecutionBinding.
+## RECONCILE and UNKNOWN
 
-Used only when repeating the exact resolved execution strategy remains appropriate.
+`UNKNOWN` means Pantheon cannot establish whether an external obligation still exists. It is not a reason to create fresh work.
 
-### REQUEUE_TASK
+While UNKNOWN:
 
-Concludes the current strategy and returns the Task to `Ready`.
+- same Attempt/LaunchKey is inspected/reattached;
+- relevant reservations/holds remain fenced;
+- replacement Attempt/Run is prohibited merely for progress;
+- timeout alone never proves absence.
 
-The normal Scheduler then performs Logical Agent Resolution, offer routing, admission, reservation, and creates a new Run/ExecutionBinding.
+The pre-launch contact marker in `run-and-attempt.md` separates definitely-never-contacted execution from may-have-crossed-the-call-boundary ambiguity.
 
-Recovery policy never directly creates a scheduled Run.
+## RETRY_ATTEMPT
 
-### REPLAN
+Allowed only when:
 
-Hands a recovery snapshot to the Planner so it can propose a validated GraphPatch. Used when changing execution strategy alone is insufficient.
+1. prior Attempt is conclusively terminal/absent;
+2. exact immutable ExecutionBinding/semantic context remains valid;
+3. policy authorizes another execution incarnation;
+4. retry ceilings/backoff allow it.
 
-### REQUEST_APPROVAL
+Creates a new Attempt/new LaunchKey under the same Run. Failed Attempts retain factual usage/cost.
 
-Creates a durable human/operator approval request, for example to increase a recovery allowance or budget.
+## REQUEUE_TASK
 
-The Agent cannot approve its own recovery authority.
+Used when semantic execution strategy/context must change, including normal Acceptance rejection.
 
-### FAIL_TASK
+Critical ownership rule:
 
-Marks the Task terminal `Failed` after all allowed recovery paths are exhausted or policy determines recovery is inappropriate.
+> **REQUEUE_TASK may not move a Task to Ready until the previous responsible Run is terminal.**
 
-## 6. RecoveryDecision
-
-Policy output is a durable, revision-bound decision.
-
-Conceptually:
-
-```yaml
-decision:
-  id: recovery_123
-
-  subject:
-    task: task_42
-    run: run_17
-    attempt: attempt_2
-
-  inputs:
-    evidence:
-      - failure://91
-    policyHash: sha256:...
-    stateRevision: 144
-
-  action: RETRY_ATTEMPT
-  notBefore: ...
-
-  accounting:
-    charge:
-      attemptRetry: 1
-
-  reason:
-    code: transient-execution-failure
-
-  createdAt: ...
-```
-
-Applying a decision rechecks all bound state/revisions. Stale decisions do not resurrect or mutate newer work.
-
-## 7. Recovery never bypasses the Scheduler
-
-For strategy replacement:
+If the RecoveryDecision is known while the producing Run is still Finalizing:
 
 ```text
-Run 1 concludes
-   ↓
-Task → Ready
-   ↓
-Scheduler
-   ↓
-Logical Agent eligibility
-   ↓
-Agent + ExecutionOffer routing
-   ↓
-Admission / budget
-   ↓
-new ExecutionBinding
-   ↓
-Run 2
+Task remains Evaluating/Active as appropriate
+condition = PriorRunFinalizing
+RecoveryDecision is durable
 ```
 
-This preserves fairness, resource accounting, routing policy, and the invariant that scheduled Runs are created only by the normal scheduler commitment path.
+Once that Run is terminal, the requeue transaction revalidates current Goal/Graph/Task/config/policy, installs Recovery/ContinuationContext where applicable, applies `notBefore`/backoff and commits `Task -> Ready`.
 
-## 8. Acceptance rejection is not Run failure
+The Scheduler later creates the new Run. This preserves `Task Ready => zero nonterminal Runs` and avoids deadlock against the unique-live-Run invariant.
 
-A Run that durably submits one valid candidate can complete successfully as a Run even if Task acceptance later rejects that candidate.
+## Acceptance rejection
+
+Acceptance rejection does not retroactively fail the producing Run. The Run normally reaches/stays `Completed` with its immutable Candidate.
+
+Rejection Evidence becomes RecoveryContext for a later Run. If policy selects `REQUEUE_TASK`, the Task waits until the old Run is terminal before Ready.
+
+## Blocking child continuation
+
+A normal blocking spawn/yield is **not Recovery**. It creates `ContinuationContext`, the old Run terminalizes `Yielded`, Task becomes Waiting, and join satisfaction later returns it Ready without charging recovery retry counters.
+
+## REPLAN
+
+Planner proposes a GraphPatch against current Goal/Graph revisions. Running/completed Task specs are never rewritten in place. Supersession follows Task `Finalizing/terminalTarget=Superseded` and must safely close any responsible Run before terminal Task state.
+
+## REQUEST_APPROVAL
+
+Used when a trusted human decision is required. Approval creates the appropriate scoped Grant/configuration decision and the original operation is re-evaluated; approval is not authorization by itself.
+
+## FAIL_TASK
+
+Moves Task toward `Finalizing/terminalTarget=Failed`. Task reaches terminal Failed only after execution/accounting/finalizer obligations are safe.
+
+## Counters and fingerprints
+
+Factual counts and policy-charged retry counters are separate. Recovery Policy may fingerprint repeated equivalent failures so repeated same-failure retries escalate instead of looping indefinitely.
+
+Counter examples:
 
 ```text
-Run 1 → Completed
-Task → Evaluating
-Acceptance → FAIL
-```
-
-Recovery may choose `REQUEUE_TASK`, producing a later Run with the acceptance evidence in recovery context.
-
-Run 1 remains `Completed`; it is not retroactively changed to `Failed`.
-
-This separates execution reliability from candidate quality.
-
-## 9. RecoveryContext
-
-TaskSpec remains immutable across retries.
-
-When recovery requeues work, Pantheon attaches a separate recovery context containing references to prior evidence.
-
-Conceptually:
-
-```yaml
-recoveryContext:
-  previousRun: run_17
-
-  evidence:
-    - failure://...
-    - acceptance://...
-
-  candidate:
-    ref: artifact://...
-
-  summary:
-    reason: acceptance-rejected
-```
-
-Agent Resolution, Context Builder, and ExecutionRequest construction may consume this context for the next Run.
-
-## 10. Factual counts and recovery charges are separate
-
-Observed execution history is immutable fact:
-
-```text
-Attempts created
-Runs created
-acceptance rejections
-```
-
-Recovery quotas count policy-charged retries:
-
-```text
+attempts observed
 attempt retries charged
 strategy retries charged
-semantic retries charged
+same-fingerprint repeats
 ```
 
-Some infrastructure/disruption failures may be configured not to consume recovery quota even though a new Attempt was factually created.
+Reconciliation loops do not consume retry count merely because inspection repeated.
 
-Never falsify Attempt or Run history to implement retry accounting.
+## Backoff
 
-## 11. Recovery limits
+V1 uses deterministic bounded/capped exponential backoff and honors authoritative/provider `retryAfter` where applicable. Random jitter is unnecessary for single-daemon local-first v1.
 
-Recovery limits are control-plane policy, not Resource Ledger or Budget Ledger capacity.
+Rate-limit waiting that preserves the same external execution continuity remains reconciliation/waiting and does not create an Attempt by itself.
 
-Conceptually:
+## Authority overrides recovery
 
-```yaml
-recoveryPolicy:
-  limits:
-    attemptRetriesPerRun: 2
-    runRetriesPerTask: 3
-    elapsedRecoveryTime: 30m
-```
+Cancellation, supersession, Goal terminalization, current hard policy and current authorization ceilings override a previously proposed recovery path. RecoveryDecision application rechecks current authority before mutation/external effect.
 
-Exact defaults remain configuration, not architecture.
+## Operator force-resolution of UNKNOWN
 
-The older ambiguous generic `maxRetries` concept should not be used as canonical recovery semantics.
+Permanently unrecoverable UNKNOWN obligations need an escape hatch, but this is **administrative override**, not an ordinary automatic RecoveryAction.
 
-## 12. Ordered deterministic policy
-
-Recovery policy is evaluated as deterministic ordered rules with a fail-closed default.
-
-Conceptually:
-
-```yaml
-recoveryPolicy:
-  rules:
-    - match:
-        certainty: unknown
-      action:
-        reconcile: {}
-
-    - match:
-        origin: backend
-        code: backend.transport-unavailable
-      action:
-        reconcile:
-          backoff: transient
-
-    - match:
-        origin: execution
-        code: execution.transient
-      action:
-        retryAttempt: {}
-
-    - match:
-        origin: acceptance
-      action:
-        requeueTask: {}
-
-    - match:
-        origin: budget
-        code: budget.extension-required
-      action:
-        requestApproval: {}
-
-  default:
-    action: failTask
-```
-
-The exact configuration language is deferred, but first-match deterministic semantics are preferred for v1.
-
-## 13. Semantic classification is advisory only
-
-A model may analyze ambiguous diagnostics and produce semantic evidence such as a proposed failure class.
-
-That output is not authoritative recovery control.
-
-Pantheon validates the classification, records it as evidence where appropriate, and the deterministic RecoveryPolicy still chooses the action.
-
-No model directly commands retry, reroute, replan, or Task failure.
-
-## 14. Failure fingerprints
-
-Normalized failure evidence should include a fingerprint derived from stable relevant dimensions such as:
+Operator Control may issue an audited `force-resolve` command against an exact unresolved obligation such as:
 
 ```text
-origin
-normalized code
-ExecutionBinding
-structured evidence subset
+Attempt/LaunchKey
+SandboxInstance/SandboxKey
+ResourceReservation
+BudgetHold linkage
+external broker operation
 ```
 
-This lets policy detect repeated equivalent failures:
+Force resolution must:
 
-```text
-same Binding
-same fingerprint
-repeated N times
-```
+1. identify the exact subject and expected revision;
+2. require explicit operator reason/risk acknowledgement;
+3. tombstone/fence the old external lineage so later callbacks cannot reacquire authority;
+4. rotate/revoke relevant AgentControlSession/control lease authority;
+5. transition Reservations/Holds through explicit administrative settlement states;
+6. append high-severity Audit Events/RecoveryFinding resolution;
+7. never fabricate factual Usage or Charge to make the ledger look settled.
 
-and escalate from Attempt retry to Task requeue or replanning.
+A `LaunchKeyTombstone` (or equivalent durable lineage tombstone) records that Pantheon will never again treat callbacks/attachments for that old LaunchKey as current execution authority.
 
-Sophisticated similarity/ML clustering is deferred.
+### Late observations after force resolution
 
-## 15. Backoff
+A late callback may still be retained as historical/anomaly evidence, but it cannot mutate current Task/Run authority. Late legitimate Usage can still be ingested under immutable backend+Attempt provenance and may create overdraw; force resolution does not make factual usage disappear.
 
-RecoveryDecision owns retry timing.
+### No automatic timeout force-release
 
-v1 uses capped deterministic exponential backoff:
+Pantheon may surface age/escalation diagnostics, but v1 does not automatically force-release UNKNOWN capacity after N minutes. That would reintroduce duplicate execution risk.
 
-```text
-baseDelay × factor^retryIndex
-capped at maxDelay
-```
+## Recovery application transaction
 
-An authoritative external `retryAfter`/reset time acts as a minimum when applicable.
+Before any external recovery effect, Pantheon durably applies/revalidates the RecoveryDecision/ownership transition in SQLite. External calls/process/Git operations remain outside the database transaction and are subsequently reconciled.
 
-Random jitter is deferred for the local single-daemon v1 because deterministic timing improves reproducibility and debugging.
+## Core invariants
 
-## 16. Rate limits do not consume retry quota when continuity remains
-
-A rate-limit/throughput condition generally produces:
-
-```text
-RECONCILE
-notBefore = retryAfter/resetAt
-```
-
-when the same Attempt remains valid.
-
-It does not create a new Attempt merely because the backend asks Pantheon to wait, and it does not consume retry quota in that case.
-
-Rate-limit state remains separate from BudgetAccount semantics.
-
-## 17. Budget exhaustion is a recovery condition
-
-Hard budget exhaustion may lead to:
-
-- `REQUEST_APPROVAL` for additional authority;
-- `REQUEUE_TASK` if policy allows a different lower-cost strategy;
-- `FAIL_TASK` if no continuation is authorized.
-
-Actual prior usage is never refunded or rewritten by recovery.
-
-## 18. Resource failures may require strategy replacement
-
-A failure such as `resource.memory-exhausted` may indicate that repeating the same Binding would simply reproduce the same condition.
-
-Policy may therefore choose `REQUEUE_TASK` rather than `RETRY_ATTEMPT` so routing/admission can produce a new Binding with a different resource footprint.
-
-The rule belongs to policy rather than hard-coded resource-name branches.
-
-## 19. Backend failure feeds observations, not provider branches
-
-Repeated backend failures may update normalized BackendHealth/RouteMetrics so future routing naturally deprioritizes or excludes that backend.
-
-Recovery policy operates on normalized evidence and never branches on provider/model/runtime names.
-
-## 20. Backend-internal retries are bounded by Attempt continuity
-
-Adapters may internally retry transport, polling, reattachment, native session inspection, or other continuity-preserving operations without creating a new Attempt.
-
-They must not secretly create a fresh logical execution after the prior execution is definitively gone.
-
-A fresh execution lineage requires Pantheon to create a new Attempt/LaunchKey so retry limits, usage, provenance, and recovery history remain visible.
-
-## 21. Current authority precedes retry policy
-
-Before applying recovery Pantheon rechecks, in order:
-
-1. cancellation/supersession;
-2. current hard authority/policy;
-3. execution certainty;
-4. RecoveryPolicy;
-5. recovery limits;
-6. backoff/timing.
-
-A stale retry decision cannot override cancellation or newly tightened hard policy.
-
-## 22. Recovery application is transactional
-
-### RETRY_ATTEMPT
-
-```text
-BEGIN
-
-recheck Run still Active
-recheck prior Attempt definitively terminal
-recheck current policy/authority
-recheck recovery limits and budget authority
-record recovery charge
-create Attempt N+1
-create immutable LaunchKey
-
-COMMIT
-
-then ExecutorBackend.ensureExecution(...)
-```
-
-External side effects occur only after durable Attempt creation.
-
-### REQUEUE_TASK after execution failure
-
-```text
-BEGIN
-
-verify old execution safely terminal
-verify RecoveryDecision current
-finalize current Run as Failed
-Task Active → Ready
-attach RecoveryContext
-record strategy-retry charge if applicable
-set scheduler notBefore if needed
-settle/release Run-scoped state when safe
-retain Task-scoped workspace/state as allowed
-
-COMMIT
-```
-
-### REQUEUE_TASK after acceptance rejection
-
-```text
-BEGIN
-
-record Acceptance FAIL
-verify RecoveryDecision current
-Task Evaluating → Ready
-attach RecoveryContext
-record semantic-retry charge
-
-COMMIT
-```
-
-The already-Completed Run is not mutated.
-
-## 23. Replanning is escalation
-
-Ordinary execution failures should not automatically invoke the Planner.
-
-Preferred escalation ladder:
-
-```text
-uncertainty
-  → RECONCILE
-
-transient execution failure
-  → RETRY_ATTEMPT
-
-resolved strategy unsuitable
-  → REQUEUE_TASK
-
-repeated semantic/structural failure
-  → REPLAN
-
-no valid authorized path
-  → REQUEST_APPROVAL or FAIL_TASK
-```
-
-## 24. Human recovery overrides are additive and scoped
-
-A human may explicitly authorize extra recovery allowance.
-
-Conceptually:
-
-```yaml
-recoveryOverride:
-  task: task_123
-  allowance:
-    additionalRunRetries: 1
-  uses: 1
-  createdBy: human
-```
-
-Historical counters are never reset or erased.
-
-Budget increases remain Budget authority changes, not recovery-counter overrides.
-
-## v1 scope
-
-Include:
-
-- immutable normalized failure/condition evidence;
-- RecoveryDecision;
-- six canonical recovery actions;
-- deterministic ordered RecoveryPolicy;
-- separate factual versus charged retry counters;
-- deterministic capped exponential backoff;
-- failure fingerprints;
-- RecoveryContext;
-- transactional application;
-- scheduler-mediated strategy retry;
-- human/operator recovery overrides.
-
-Defer:
-
-- ML-based failure similarity clustering;
-- speculative retries/racing multiple Attempts;
-- distributed recovery coordinators;
-- randomized jitter;
-- automatic policy synthesis from learned behavior;
-- provider-specific recovery branches in core.
-
-## Key decisions
-
-1. Recovery Policy is distinct from raw failure handling.
-2. Evidence is immutable fact; retryability/action is policy.
-3. Backends never author authoritative recovery actions.
-4. UNKNOWN execution remains reconciliation, not failure.
-5. Recovery scopes are reconcile, new Attempt, Task requeue/new Run, and replan.
-6. Recovery never creates scheduled Runs directly; the Scheduler remains authoritative.
-7. Canonical actions are `RECONCILE`, `RETRY_ATTEMPT`, `REQUEUE_TASK`, `REPLAN`, `REQUEST_APPROVAL`, `FAIL_TASK`.
-8. Acceptance rejection does not retroactively fail a Completed Run.
-9. RecoveryContext carries prior evidence without mutating TaskSpec.
-10. Factual Attempt/Run counts and policy-charged retries are separate.
-11. Recovery limits are not Resource/Budget Ledger units.
-12. Recovery policy is deterministic, ordered, and fail-closed.
-13. Semantic model classification is advisory evidence only.
-14. Failure fingerprints support repeated-failure escalation.
-15. v1 uses deterministic capped exponential backoff and respects authoritative retry-after times.
-16. Rate-limit waiting does not create Attempts or consume retry quota while continuity remains.
-17. Budget exhaustion is a recovery condition, not automatically terminal failure.
-18. Backend-internal retries are allowed only while preserving Attempt/LaunchKey continuity and truthful usage accounting.
-19. Cancellation/current hard authority overrides retry policy.
-20. Recovery decisions are durably and transactionally applied before external side effects.
-21. Replanning is escalation, not the default response to ordinary execution failure.
-22. Human recovery overrides are explicit, scoped, additive, and never erase history.
+1. Evidence is factual; RecoveryDecision is policy.
+2. UNKNOWN => RECONCILE same lineage; UNKNOWN never creates replacement execution automatically.
+3. RETRY_ATTEMPT => new Attempt only after old Attempt definitively ended and Binding unchanged.
+4. Binding/semantic-context change => REQUEUE_TASK/new Scheduler-created Run.
+5. REQUEUE_TASK cannot make Ready until previous Run terminal.
+6. Acceptance rejection does not rewrite producing Run outcome.
+7. Blocking yield/continuation is orchestration, not retry failure.
+8. Recovery decisions bind exact ConfigurationRevision/recovery policy digest and revalidate current authority before application.
+9. Operator force-resolution is explicit/audited lineage tombstoning, not timeout-based automatic recovery.
+10. Administrative settlement never fabricates factual Usage/Charge.
