@@ -2,128 +2,58 @@
 
 ## Status
 
-Draft design — Pantheon goal subsystem specification.
+Canonical Pantheon Goal semantic-resource specification.
 
 ## Purpose
 
-A Pantheon `Goal` is the durable, revisioned contract for the user's desired outcome. It survives multiple Tasks, TaskGraph revisions, agents, models, replans, process restarts, and context resets.
+A `Goal` is the durable revisioned contract for the user's desired outcome. It survives TaskGraph changes, multiple Tasks/Runs/Attempts, replanning, daemon restart and context resets.
 
-A Goal is not executable. Tasks and Runs are the mechanisms used to satisfy it.
+> **Goal describes the desired outcome, not an execution strategy. Task success does not imply Goal success.**
 
-## Core hierarchy
+Lifecycle/finalization authority is defined by `goal-lifecycle-and-completion-controller.md`; revision impact is defined by `goal-revision-reconciliation.md`.
+
+## Hierarchy
 
 ```text
 USER REQUEST
-    ↓
+  ↓
 GOAL
-Durable user outcome contract
-    ↓
+  ↓
 TASKGRAPH
-Current work structure
-    ↓
+  ↓
 TASK
-Bounded outcome
-    ↓
+  ↓
 RUN
-Resolved execution
-    ↓
+  ↓
 ATTEMPT
-One concrete try
-    ↓
-ARTIFACT
-Produced result
-    ↓
-EVIDENCE
-Verification
+  ↓
+ARTIFACT / CANDIDATE / EVIDENCE
 ```
 
-## Foundational principles
+Goal is not executable and never binds a provider/model/backend/session.
 
-1. **Goal is not a prompt or session.** The original request is preserved as provenance; the Goal is a normalized durable contract.
-2. **Goal has stable identity and explicit revisions.** User intent can legitimately evolve over time.
-3. **Tasks remain immutable.** Each Task records which Goal revision caused it to be materialized.
-4. **Goal describes outcome, not execution strategy.** It never binds to a model, provider, agent, queue or session.
-5. **Constraints, preferences and acceptance are distinct.** Constraints are mandatory, preferences are optimization hints, acceptance determines success.
-6. **Task success does not imply Goal success.** Goal acceptance is evaluated independently against the final accepted deliverables.
-7. **Goal acceptance is evidence-based.** It reuses the same Acceptance Engine and Evidence model used for Tasks.
-8. **Replanning reconciles revisions rather than rewriting history.** Completed and running Task specs are not silently mutated.
-9. **No nested Goal tree in v1.** One Goal owns one evolving TaskGraph.
-10. **Spawned Tasks stay under the same Goal.** A detached child is detached from its parent Task lifetime, not from the Goal.
-11. **Tasks cannot create new Goals to escape policy, budget or decomposition ceilings.** Goal creation is a separate privileged operation.
+## Identity and revisions
 
-## Goal versus source request
-
-The raw user request is immutable provenance. The Goal is a normalized contract derived from it.
+Goal ID is stable. Semantic change creates a new immutable GoalRevision:
 
 ```text
-User request
-    ↓
-source/provenance
-    ↓
-Goal revision 1
+goal_123 rev 1
+  ↓ clarification/change
+goal_123 rev 2
 ```
 
-Conceptual provenance:
+Original request/clarifications remain provenance. Tasks bind the Goal revision that caused their materialization. Planner/Graph/Scheduler/Completion work is fenced by the revision it observed.
 
-```yaml
-provenance:
-  createdBy:
-    type: user
-  sources:
-    - ref: message://conversation/123/msg/981
-  createdAt: ...
-```
+Terminal Goals never reopen; later independent/follow-up work is a new Goal with optional provenance link.
 
-Every later user clarification/change is also preserved as an immutable event/source.
+## Semantic areas
 
-## Revision model
-
-Goals are revisioned rather than immutable.
-
-```text
-Goal id: goal_123
-revision 1
-    ↓ user clarification
-revision 2
-    ↓ requirement change
-revision 3
-```
-
-The Goal ID remains stable. The contract changes only through explicit revision creation.
-
-Every planner proposal must bind to the Goal revision it observed:
-
-```yaml
-goal:
-  id: goal_123
-  revision: 4
-basedOn:
-  graphRevision: 28
-```
-
-If the current Goal revision has advanced, the proposal is stale and cannot be committed without revalidation/replanning.
-
-## Task provenance and Goal revisions
-
-Every materialized Task records the Goal revision that caused it to exist:
-
-```yaml
-provenance:
-  goal:
-    id: goal_123
-    revision: 4
-```
-
-When the Goal changes, Pantheon can distinguish work that remains valid from work that must be reviewed or superseded.
-
-## Semantic structure
-
-A Goal contains six semantic areas:
+A Goal contract contains:
 
 ```text
 OBJECTIVE
-DELIVERABLES
 INPUTS
+DELIVERABLES
 CONSTRAINTS
 PREFERENCES
 ACCEPTANCE
@@ -131,30 +61,17 @@ ACCEPTANCE
 
 ### Objective
 
-The ultimate user-level outcome.
-
-```yaml
-objective: >
-  Add provider-independent agent authorization to Pantheon
-  with deterministic policy enforcement and sandbox-aware
-  execution.
-```
-
-The objective must not prescribe agent/model/provider or orchestration steps.
+Human-level desired outcome without prescribing concrete provider/model/orchestration steps.
 
 ### Inputs
 
-Durable references relevant to the Goal:
-
-```yaml
-inputs:
-  - name: repository
-    ref: repo://Pantheon
-```
+Durable references relevant to the Goal, e.g. repository or Artifact refs.
 
 ### Deliverables
 
-Top-level outputs that represent the user's final result, not every intermediate Task artifact.
+Named top-level output slots representing user-visible final results, not every intermediate Task Artifact.
+
+Example:
 
 ```yaml
 deliverables:
@@ -166,60 +83,76 @@ deliverables:
     required: true
 ```
 
-Deliverables are slots. The evolving TaskGraph binds accepted Task outputs to them. Replanning may change which Task produces a deliverable without changing the Goal contract.
+The evolving TaskGraph binds accepted immutable Task outputs to deliverable slots. Replanning may change which Task produces a slot without rewriting old Task history.
 
 ### Constraints
 
-Requirements that must remain true while pursuing the Goal.
-
-```yaml
-constraints:
-  - id: provider-independent
-    statement: >
-      Logical agents must not be bound to one provider or concrete model.
-  - id: deterministic-authority
-    statement: >
-      Scheduling, permissions, Task state and acceptance remain owned
-      by the Pantheon control plane.
-```
-
-Constraints create ceilings for descendants. They may tighten authority but do not grant permission.
+Mandatory requirements/ceilings. Descendants may tighten but cannot turn Goal constraints into new authority.
 
 ### Preferences
 
-Optimization preferences that may be traded off when necessary.
-
-```yaml
-preferences:
-  - id: local-first
-    statement: >
-      Prefer local execution when quality and capability requirements permit it.
-```
-
-A preference such as `local-first` is distinct from a hard constraint such as `local-only`.
+Optimization hints that may be traded off when constraints/capabilities require it. Preference is not a hard constraint.
 
 ### Acceptance
 
-Goal acceptance reuses the Task Acceptance/Evidence architecture.
+Goal acceptance uses the same Evaluation/Evidence architecture as Task acceptance, applied to an immutable GoalCompletionCandidate.
 
-```yaml
-acceptance:
-  strategy: all
-  criteria:
-    - id: provider-routing
-      statement: >
-        A logical coding agent can execute through multiple compatible
-        harnesses without changing its identity.
-      evaluator:
-        ref: check://pantheon/provider-routing
-      severity: required
+A Goal may have zero explicit evaluator criteria; in that case accepted required deliverable bindings provide structural acceptance according to the Goal lifecycle contract.
+
+## Lifecycle
+
+Canonical Goal phases:
+
+```text
+Planning
+Active
+Evaluating
+Finalizing
+Succeeded
+Failed
+Cancelled
 ```
 
-Task success never automatically implies Goal success.
+Initial Goal starts Planning until the first coherent TaskGraph exists. Later replanning is an Active condition rather than a phase regression.
 
-## Goal completion candidate
+Goal Completion Controller owns phase, completion readiness, GoalCompletionCandidate, Goal-level EvaluationRound, terminalTarget and finalization.
 
-When Pantheon believes the Goal may be satisfied, it freezes an immutable completion snapshot:
+### Active
+
+Pantheon is pursuing the current Goal revision. Any mix of Task states/replanning may exist; Goal Active does not imply an executor is currently running.
+
+### Evaluating
+
+Required deliverables are structurally bound/current reconciliation is complete and Pantheon has frozen one immutable current GoalCompletionCandidate.
+
+### Finalizing
+
+A terminal target (`Succeeded|Failed|Cancelled`) is durable; new planning/spawn/Scheduler Run creation for the Goal is fenced while all Goal-owned obligations are safely quiesced.
+
+### Terminal
+
+Terminal Goals never reopen.
+
+## Deliverable binding
+
+Only accepted immutable Task outputs may satisfy a Goal deliverable.
+
+Binding records at least:
+
+```text
+Goal + revision
+deliverable slot
+Artifact digest
+producer Task
+producer Candidate digest
+Graph revision
+```
+
+Raw Run output, mutable Workspace state or Agent narration cannot bind a deliverable.
+
+## GoalCompletionCandidate
+
+When structural completion is currently valid, Goal Completion Controller freezes a content-addressed snapshot:
 
 ```yaml
 goalCompletionCandidate:
@@ -227,150 +160,75 @@ goalCompletionCandidate:
     id: goal_123
     revision: 7
   graph:
-    id: graph_123
     revision: 42
   deliverables:
     implementation:
-      ref: artifact://changeset-822
-      digest: sha256:...
-    architecture:
-      ref: artifact://doc-192
-      digest: sha256:...
-  evidence:
-    - evidence://...
+      artifact: artifact://sha256/...
+      producerCandidate: candidate://sha256/...
+  acceptanceContract:
+    digest: sha256:...
+  configRevision: cfgrev_...
 ```
 
-Goal acceptance is evaluated against this exact snapshot. If a deliverable changes, previous acceptance evidence becomes stale.
+Candidate is immutable. New Goal revision makes the old completion candidate/evidence stale for current completion.
 
-## Long-running continuity
+## Completion is not "all Tasks terminal"
 
-Pantheon does not rely on one persistent conversation to remember a Goal. Durable state is reconstructed from:
+Required deliverables plus Goal acceptance determine Goal success. Auxiliary work need not become a required output merely because it exists.
+
+During successful Goal Finalizing, residual non-required Tasks are cancelled/finalized so the Goal does not terminalize while new/active execution remains.
+
+## Terminal quiescence
+
+`Succeeded` requires both:
 
 ```text
-Goal revisions
-TaskGraph revisions
-Tasks
-Artifacts
-Evidence
-Events
-assumptions / unknowns
-acceptance state
+accepted GoalCompletionCandidate
++
+no unresolved Goal-owned execution/control obligations
 ```
 
-Fresh planners and workers receive a context snapshot built from current Pantheon state.
+UNKNOWN descendant Attempt/Sandbox/resource/budget obligations keep Goal Finalizing until reconciled or explicitly force-resolved.
+
+## Failure hierarchy
+
+```text
+Attempt failure != Run failure != Task failure != Goal failure
+```
+
+Failed Task may be replaced/replanned. Goal fails only when policy/controller determines no permitted path remains to satisfy the current Goal contract and finalization completes.
+
+## Cancellation
+
+Goal cancellation sets `Finalizing/terminalTarget=Cancelled`, fences new work, propagates cancellation to nonterminal Goal Tasks and reaches terminal Cancelled only after obligations are safely finalized.
+
+## Goal revision while Evaluating
+
+A new semantic GoalRevision invalidates the current GoalCompletionCandidate as current authority, stops/reconciles pending evaluation where safe and returns the Goal to Active reconciliation. Historical Candidate/Evidence remain immutable.
+
+Normal semantic revisions are rejected once Goal Finalizing has selected a terminal target.
 
 ## No nested Goals in v1
 
-Avoid a `Goal → SubGoal → SubGoal` hierarchy. Work decomposition belongs in the TaskGraph. If a bounded outcome contributes to a Goal, it is normally a Task. If the user wants a separately managed outcome, create a new Goal.
+One Goal owns one evolving TaskGraph. Bounded decomposition is TaskGraph work. Workers cannot create Goals to escape policy/budget/depth ceilings.
 
-## Spawn behavior
+Dynamic child Tasks stay under the same Goal.
 
-All dynamically spawned descendants remain under the same Goal by default:
+## Retention
 
-```text
-Goal G
-  └── Task A
-       └── Task B
-            └── Task C
-```
+Accepted final Goal deliverable Artifacts become retention roots before Goal reaches Succeeded so Artifact GC cannot delete the user's final result.
 
-A detached Task is Goal-owned and may outlive the parent Task, but it is not an orphan.
+Goal success does not imply Git merge/push/deployment unless the Goal contract explicitly requires that external state/deliverable; integration remains separately authorized.
 
-Normal workers may request `task.spawn`; planner agents may propose graph patches. They do not receive `goal.create` authority by default.
+## Core invariants
 
-## Goal revision impact
-
-A Goal revision does not directly rewrite the TaskGraph. It triggers reconciliation/impact analysis. Existing work is classified conceptually as:
-
-```text
-still-valid
-needs-review
-must-supersede
-new-work-needed
-```
-
-The planner then proposes a graph patch that preserves historical Tasks and adds/supersedes work as required.
-
-## Same Goal versus new Goal
-
-Use the same Goal when the user is still pursuing essentially the same real-world outcome and is clarifying/changing requirements.
-
-Create a new Goal when the new outcome is independently manageable and semantically separate.
-
-Terminal Goals do not reopen; later additional work becomes a new Goal, optionally linked to the previous one.
-
-## Proposed conceptual manifest
-
-```yaml
-apiVersion: pantheon/v1alpha1
-kind: Goal
-
-metadata:
-  id: goal_01K...
-  name: pantheon-agent-orchestrator
-  revision: 4
-  labels:
-    project: pantheon
-
-provenance:
-  createdBy:
-    type: user
-  sources:
-    - ref: message://...
-
-spec:
-  objective: >
-    Build a local-first heterogeneous multi-agent orchestrator
-    with a deterministic control plane.
-
-  inputs:
-    - name: repository
-      ref: repo://Pantheon
-
-  deliverables:
-    - name: implementation
-      kind: code.changeset
-      required: true
-    - name: architecture
-      kind: architecture.document
-      required: true
-
-  constraints:
-    - id: provider-independent
-      statement: >
-        Logical agents must not be bound to one provider or concrete model.
-
-    - id: deterministic-authority
-      statement: >
-        Scheduling, permissions, Task state and acceptance remain owned
-        by the Pantheon control plane.
-
-  preferences:
-    - id: local-first
-      statement: >
-        Prefer local execution when quality and capability requirements permit it.
-
-  acceptance:
-    strategy: all
-    criteria:
-      - id: provider-routing
-        statement: >
-          A logical coding agent can execute through multiple compatible
-          harnesses without changing its identity.
-        evaluator:
-          ref: check://pantheon/provider-routing
-        severity: required
-```
-
-## Key decisions
-
-1. Goal is a durable user-outcome contract, not a prompt/session.
-2. Goal identity is stable and the contract is explicitly revisioned.
-3. Tasks are immutable and bind to the Goal revision that created them.
-4. Constraints, preferences and acceptance are separate concepts.
-5. Task success never automatically implies Goal success.
-6. Goal completion is evaluated against an immutable completion snapshot.
-7. Replanning reconciles new Goal revisions rather than rewriting history.
-8. No nested Goal hierarchy in v1.
-9. Spawned Tasks remain under the same Goal.
-10. Tasks cannot create Goals to bypass ceilings or policy.
+1. Goal is a stable revisioned user-outcome contract, never provider/model/session strategy.
+2. Tasks are immutable and record their creating Goal revision.
+3. Objective/inputs/deliverables/constraints/preferences/acceptance are distinct.
+4. Goal phases are Planning/Active/Evaluating/Finalizing/terminal and owned by Goal Completion Controller.
+5. Task success does not imply Goal success; all-Tasks-terminal is not the completion predicate.
+6. Only accepted immutable Task outputs bind deliverables.
+7. GoalCompletionCandidate freezes exact Goal/Graph revision and deliverables before Goal evaluation.
+8. Goal revision invalidates stale completion evidence rather than rewriting history.
+9. Terminal Goal requires accepted outcome plus quiescent/fenced subordinate obligations.
+10. No nested Goals/workers creating Goals in v1.
