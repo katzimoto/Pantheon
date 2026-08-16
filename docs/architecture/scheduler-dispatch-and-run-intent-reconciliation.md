@@ -6,13 +6,13 @@ Draft design — Pantheon scheduler handoff specification.
 
 ## Purpose
 
-This document defines the final boundary of Pantheon scheduling: how a scheduler-selected, admitted, and transactionally reserved execution configuration becomes a durable Run intent and is then reconciled into actual backend execution.
+This document defines the final boundary of Pantheon scheduling: how a scheduler-selected, admitted, and transactionally reserved execution configuration becomes a durable Run intent and is then reconciled into concrete backend execution through Attempts.
 
 The core rule is:
 
 > **The Scheduler does not launch executors. Its responsibility ends when it atomically creates a durable Run intent, associated ExecutionBinding, ResourceReservations, BudgetHolds, and transitions the Task to Active. The Run Controller owns all execution after that handoff.**
 
-This keeps scheduling, execution control, and backend implementation cleanly separated.
+This keeps scheduling, execution control, retry semantics, and backend implementation cleanly separated.
 
 See also:
 
@@ -21,6 +21,7 @@ See also:
 - `docs/architecture/execution-offer-routing-and-admission-handshake.md`
 - `docs/architecture/scheduler-reservations-ownership-and-leases.md`
 - `docs/architecture/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/run-and-attempt.md`
 
 ## Architectural boundary
 
@@ -43,6 +44,9 @@ Task → Active
                 │
                 ▼
         prepare environment
+                │
+                ▼
+       create Attempt + LaunchKey
                 │
                 ▼
         ensure execution
@@ -121,11 +125,13 @@ After commit:
 - the Scheduler no longer owns the Task;
 - the SchedulingClaim no longer exists;
 - fairness accounting records successful scheduler service;
-- the Run Controller owns execution reconciliation.
+- the Run Controller owns preparation and execution reconciliation.
 
-## 3. Run desired state and observed execution are separate
+The initial Attempt is created later, after Run preparation reaches `LaunchReady=True`.
 
-A Run expresses desired execution state independently from what the backend is currently observed doing.
+## 3. Run desired state and Attempt observation are separate
+
+A Run expresses desired execution responsibility independently from what the current Attempt is observed doing.
 
 Conceptually:
 
@@ -138,119 +144,35 @@ run:
     execution: running
 
   status:
+    currentAttempt: attempt_1
+```
+
+and:
+
+```yaml
+attempt:
+  id: attempt_1
+  run: run_123
+  launchKey: launch_ABC
+
+  status:
     observedExecution: unknown
 ```
 
-The full Run schema is defined by the Run subsystem, not here.
-
-The important invariant is:
+The important invariants are:
 
 ```text
-desired execution != observed execution
+Run owns immutable execution strategy / Binding
+Attempt owns one concrete execution lineage / LaunchKey
 ```
 
-The Run Controller continually reconciles the external world toward the desired Run state.
-
-## 4. Use ensure-execution semantics, not naive launch semantics
-
-The Execution Fabric should avoid an imperative contract whose semantics are merely:
+and:
 
 ```text
-launch something now
+desired Run execution != observed Attempt execution
 ```
 
-Instead, the backend contract should provide idempotent ensure semantics:
-
-```text
-ensureExecution(binding, launchKey, attachment?)
-```
-
-Meaning:
-
-> Ensure that the execution represented by this immutable ExecutionBinding and LaunchKey exists exactly once, or return the strongest observation that can be established about it.
-
-The backend implementation may internally:
-
-- discover an existing native execution;
-- attach or reattach to it;
-- recover adapter-private state;
-- create a new native execution if absence is established;
-- inspect current native execution state.
-
-Pantheon core does not distinguish provider-specific launch, recovery, attach, or reconnect mechanisms.
-
-## 5. LaunchKey remains stable for the entire Run
-
-Each Run has an immutable LaunchKey created before execution is attempted.
-
-Every reconciliation attempt uses the same key.
-
-Conceptually:
-
-```text
-Run run_123
-   │
-LaunchKey launch_ABC
-   │
-ExecutorBackend executor://A
-   │
-opaque native execution
-```
-
-Backend behavior must be idempotent with respect to the LaunchKey.
-
-If native infrastructure does not offer such a primitive, the backend adapter is responsible for maintaining enough durable private state to provide equivalent semantics.
-
-Transport retries, daemon restart, backend-plugin restart, or reconnect attempts do not create a new Run and do not create a new LaunchKey.
-
-## 6. Backend attachment state is opaque
-
-Once native execution exists, a backend may need implementation-specific state to recover or reattach later.
-
-Pantheon may persist an opaque versioned attachment such as:
-
-```yaml
-backendAttachment:
-  backend: executor://A
-  schemaVersion: 3
-  opaqueState: ...
-```
-
-Pantheon core stores and returns this state to the owning backend but never interprets it.
-
-Concrete provider session IDs, process details, runtime handles, or transport state therefore remain below the Execution Fabric boundary.
-
-## 7. Run Controller owns every post-binding action
-
-After the scheduler transaction commits, the Run Controller owns all execution-side reconciliation.
-
-Its conceptual loop is:
-
-```text
-read desired Run state
-        ↓
-read persisted observation / attachment
-        ↓
-inspect / reconcile ExecutorBackend
-        ↓
-compare desired vs observed
-        ↓
-perform only the necessary action
-        ↓
-persist new observation
-```
-
-The Scheduler must not later:
-
-- relaunch the backend;
-- switch backend;
-- release Run reservations;
-- select another offer;
-- retry the execution itself.
-
-Those concerns belong to Run reconciliation and later retry/escalation policy.
-
-## 8. Preparation occurs after durable Run intent
+## 4. Preparation occurs before Attempt creation
 
 External preparation may include:
 
@@ -281,10 +203,14 @@ Preparation Controllers
     ↓
 LaunchReady = True
     ↓
+durably create Attempt + LaunchKey
+    ↓
 ExecutorBackend.ensureExecution(...)
 ```
 
-## 9. LaunchReady is a derived condition, not a lifecycle phase
+If preparation fails before Attempt creation, there was no backend execution Attempt.
+
+## 5. LaunchReady is a derived condition, not a lifecycle phase
 
 Preparation detail should not explode Run or Task phases.
 
@@ -307,7 +233,138 @@ conditions:
 
 This follows Pantheon's general lifecycle design: few high-level phases with rich controller-owned conditions.
 
-## 10. Current authority is checked before external side effects
+## 6. Attempt is durable before backend side effects
+
+Once `LaunchReady=True`, the Run Controller must create the Attempt and its immutable LaunchKey transactionally before contacting the backend.
+
+Correct ordering:
+
+```text
+BEGIN
+create Attempt
+assign ordinal
+assign immutable LaunchKey
+set Run.currentAttemptId
+COMMIT
+
+       ↓
+
+ExecutorBackend.ensureExecution(
+    binding,
+    attempt.launchKey,
+    attachment?
+)
+```
+
+If Pantheon crashes after Attempt commit but before the backend call, restart discovers the same nonterminal Attempt and invokes `ensureExecution` with the same LaunchKey.
+
+Pantheon must never start backend execution first and persist the Attempt afterward.
+
+## 7. Use ensure-execution semantics, not naive launch semantics
+
+The Execution Fabric should avoid an imperative contract whose semantics are merely:
+
+```text
+launch something now
+```
+
+Instead, the backend contract should provide idempotent ensure semantics:
+
+```text
+ensureExecution(binding, launchKey, attachment?)
+```
+
+Meaning:
+
+> Ensure that the execution lineage represented by this immutable ExecutionBinding and Attempt LaunchKey exists exactly once, or return the strongest observation that can be established about it.
+
+The backend implementation may internally:
+
+- discover an existing native execution;
+- attach or reattach to it;
+- recover adapter-private state;
+- create a new native execution if absence is established and this Attempt has not yet established one;
+- inspect current native execution state.
+
+Pantheon core does not distinguish provider-specific launch, recovery, attach, or reconnect mechanisms.
+
+## 8. LaunchKey remains stable for the entire Attempt
+
+The LaunchKey belongs to the Attempt, not the Run.
+
+Conceptually:
+
+```text
+Run run_123
+  Binding binding_456
+   │
+   ├─ Attempt attempt_1
+   │    LaunchKey launch_A
+   │
+   └─ Attempt attempt_2
+        LaunchKey launch_B
+```
+
+Backend behavior must be idempotent with respect to the Attempt LaunchKey.
+
+Transport retries, daemon restart, backend-plugin restart, status retries, and reattachment attempts for the same execution lineage use the same Attempt and same LaunchKey.
+
+If the native execution for an Attempt is definitively terminated and retry policy intentionally requests a fresh execution under the same immutable Binding, Pantheon creates a new Attempt with a new LaunchKey.
+
+A change to the Binding is not a new Attempt; it requires a new Run.
+
+## 9. Backend attachment state is Attempt-scoped and opaque
+
+Once native execution exists, a backend may need implementation-specific state to recover or reattach later.
+
+Pantheon may persist an opaque versioned attachment associated with the Attempt:
+
+```yaml
+backendAttachment:
+  attempt: attempt_1
+  backend: executor://A
+  schemaVersion: 3
+  opaqueState: ...
+```
+
+Pantheon core stores and returns this state to the owning backend but never interprets it.
+
+Concrete provider session IDs, process details, runtime handles, or transport state therefore remain below the Execution Fabric boundary.
+
+## 10. Run Controller owns every post-binding action
+
+After the scheduler transaction commits, the Run Controller owns all execution-side reconciliation.
+
+Its conceptual loop is:
+
+```text
+read desired Run state
+        ↓
+read preparation conditions
+        ↓
+read current Attempt / persisted attachment
+        ↓
+inspect / reconcile ExecutorBackend
+        ↓
+compare desired vs observed
+        ↓
+perform only the necessary action
+        ↓
+persist new observation
+```
+
+The Scheduler must not later:
+
+- create/recreate backend execution;
+- switch backend;
+- release Run reservations;
+- select another offer;
+- create another Attempt;
+- retry the execution itself.
+
+Attempt creation after failure belongs to Run reconciliation plus the later retry/escalation policy.
+
+## 11. Current authority is checked before external side effects
 
 ExecutionBinding records the exact routing and policy snapshot used when the Run was created, but it does not grant indefinite future authority.
 
@@ -324,7 +381,7 @@ If authority has been revoked since the Run was created, Pantheon must not launc
 
 The Binding remains immutable audit history.
 
-## 11. Minimal normalized execution observations
+## 12. Minimal normalized Attempt execution observations
 
 Pantheon core should understand only a small normalized set of external execution observations:
 
@@ -340,9 +397,11 @@ Backend adapters translate their implementation-specific states into these obser
 
 ### ABSENT
 
-The backend can positively establish that no execution exists for the Run's LaunchKey.
+The backend can positively establish that no native execution exists for the current Attempt LaunchKey.
 
-If desired state is `running`, creation or recreation may be safe.
+Before that Attempt has ever established execution, `ABSENT` can permit `ensureExecution` to create it.
+
+After an established execution has definitively terminated, the Attempt is terminal; a deliberate fresh retry requires a new Attempt rather than recreating the old Attempt under its old LaunchKey.
 
 ### STARTING
 
@@ -356,9 +415,9 @@ Execution is known to exist and is capable of performing assigned work.
 
 ### EXITED
 
-The backend can positively establish that execution terminated.
+The backend can positively establish that this Attempt's execution terminated.
 
-This is not Task success. Semantic completion still requires a candidate result and the Acceptance subsystem.
+This is not Task success and does not by itself determine whether the Run should retry. Semantic completion still requires a candidate result and the Acceptance subsystem.
 
 ### UNKNOWN
 
@@ -366,27 +425,28 @@ Pantheon cannot establish whether execution exists or what its current state is.
 
 UNKNOWN is fail-closed:
 
-- the Run remains the owner;
+- the Attempt remains nonterminal;
+- the Run remains the Task owner;
 - associated execution reservations remain charged / uncertain;
-- Pantheon must not start a duplicate replacement execution merely because observation is unavailable.
+- Pantheon must not create a replacement Attempt merely because observation is unavailable.
 
-## 12. ABSENT and UNKNOWN are fundamentally different
+## 13. ABSENT and UNKNOWN are fundamentally different
 
 This distinction must be preserved everywhere.
 
 ```text
 ABSENT
-= evidence that execution does not exist
+= evidence that this Attempt currently has no native execution
 
 UNKNOWN
 = insufficient evidence either way
 ```
 
-Only ABSENT can justify safe creation/recreation under the same Run when desired state remains running.
-
 UNKNOWN triggers requery, reattachment, backend repair, or later recovery policy, but never speculative duplicate execution in v1.
 
-## 13. ensureExecution returns structured certainty
+A new Attempt may only be created after the prior Attempt's execution lineage is established terminal and retry policy chooses a fresh incarnation.
+
+## 14. ensureExecution returns structured certainty
 
 A backend operation should expose more than generic success/error.
 
@@ -411,9 +471,9 @@ A missing executable discovered before any start side effect is an example of `D
 
 A transport failure occurring during a native start operation is an example of `UNKNOWN_OUTCOME` unless the adapter can positively determine the final state.
 
-## 14. Reconciliation retries stay within the same Run
+## 15. Reconciliation is not retry
 
-The following do not by themselves create a new Run:
+The following do not by themselves create a new Attempt or Run:
 
 - transport error;
 - timeout while checking status;
@@ -428,12 +488,15 @@ Pantheon continues reconciling:
 ```text
 same Run
 same ExecutionBinding
+same Attempt
 same LaunchKey
 ```
 
-A new Run is created only after the current Run is formally concluded and higher-level retry/escalation policy selects another execution strategy.
+A **new Attempt** is a deliberate execution-layer retry under the same Binding after prior execution continuity is conclusively ended.
 
-## 15. Backend events are hints, not lifecycle authority
+A **new Run** is required when higher-level retry/escalation changes the ExecutionBinding or supplies new semantic execution context such as acceptance-rejection feedback.
+
+## 16. Backend events are hints, not lifecycle authority
 
 Backends may provide event streams, PTY EOF, callbacks, process watchers, or other notifications.
 
@@ -442,18 +505,18 @@ Such events should trigger reconciliation:
 ```text
 backend event
     ↓
-enqueue Run reconciliation
+enqueue Run/Attempt reconciliation
     ↓
 inspect/reconcile current state
     ↓
 persist authoritative Pantheon observation
 ```
 
-Events themselves must not directly mutate authoritative Run or Task lifecycle state.
+Events themselves must not directly mutate authoritative Run, Attempt, or Task lifecycle state.
 
 Periodic reconciliation remains a safety net.
 
-## 16. Event handling must tolerate duplication and reordering
+## 17. Event handling must tolerate duplication and reordering
 
 Backend events may arrive late, more than once, or out of order.
 
@@ -471,61 +534,81 @@ EXITED
 RUNNING
 ```
 
-Pantheon must not resurrect terminated execution based on a stale event.
+Pantheon must not resurrect a terminal Attempt based on a stale event.
 
 Events are therefore hints; authoritative state follows reconciliation plus Pantheon's monotonic lifecycle invariants.
 
-## 17. Observation states are not a mandatory linear state machine
+## 18. Observation states are not a mandatory linear state machine
 
 Pantheon may first observe an execution only after it has already terminated.
 
-Therefore this is valid:
+Therefore an Attempt may be observed directly as:
 
 ```text
-ABSENT / UNKNOWN → EXITED
+UNKNOWN → EXITED
 ```
 
 without Pantheon ever observing STARTING or RUNNING.
 
 The normalized values are observations, not required sequential phases.
 
-## 18. Persist observation before consequential follow-up
+## 19. Persist observation before consequential follow-up
 
-When the Run Controller establishes a meaningful state transition, it first persists the new observation and only then performs derived actions.
+When the Run Controller establishes a meaningful Attempt observation, it first persists that state and only then performs derived actions.
 
 Example:
 
 ```text
 observe EXITED
       ↓
-persist EXITED observation
+persist Attempt EXITED observation
       ↓
-reconcile Run outcome
+record immutable termination/failure evidence
       ↓
-release eligible Run-scoped resources
+retry/finalization policy reacts
       ↓
-Task/retry/acceptance controllers react
+release resources only when their owner no longer requires them
 ```
 
-Pantheon must not release resources, trigger retries, or perform integration before recording the state that justifies those actions.
+Pantheon must not release resources, create a new Attempt, trigger a new Run, or perform integration before recording the state that justifies those actions.
 
-## 19. Backend exit is not semantic result submission
+## 20. Backend exit is not semantic result submission
 
 External execution termination and Task completion are separate facts.
 
 ```text
-backend execution exited
+backend Attempt exited
         !=
 Task candidate submitted
 ```
 
 A worker normally submits structured output through Pantheon (`task.submit_result` or equivalent) before or during executor shutdown.
 
-If execution exits without a valid candidate result, the Run may have failed even though the backend process itself terminated normally.
+If an Attempt exits without a valid candidate result, the Run may require retry or may fail according to later failure policy even if the native process itself terminated normally.
 
 Task success still requires the Acceptance subsystem to pass the candidate result.
 
-## 20. Candidate evaluation may outlive execution
+## 21. Candidate submission belongs to the Run
+
+A Run produces at most one candidate result.
+
+When a structurally valid candidate is durably submitted:
+
+```text
+candidate submitted
+      ↓
+Task Active → Evaluating
+Run Active → Finalizing
+Run desired execution → stopped
+      ↓
+current Attempt is terminated/reconciled
+```
+
+The candidate records both its producing Run and producing Attempt for provenance.
+
+If Acceptance rejects the candidate, semantic retry normally creates a new Run with a new ExecutionRequest/Binding containing the rejection evidence rather than another Attempt under the old Binding.
+
+## 22. Candidate evaluation may outlive execution
 
 A valid candidate may be submitted before the external executor terminates.
 
@@ -534,20 +617,20 @@ Then:
 ```text
 candidate submitted
       ↓
-executor exits
+Attempt exits
       ↓
 Task Evaluating
 ```
 
-Run-scoped execution resources may be released once exit is confirmed, while Task-scoped resources such as a worktree may remain reserved for evaluation, review, or finalization.
+Run-scoped execution resources may be released once the Run is finalized and their use is confirmed ended, while Task-scoped resources such as a worktree may remain reserved for evaluation, review, or finalization.
 
 This preserves the distinction between Run-scoped and Task-scoped reservations.
 
-## 21. Scheduler fairness is charged at Run-intent commit
+## 23. Scheduler fairness is charged at Run-intent commit
 
 A Goal receives scheduler service once the final Run-intent transaction successfully commits.
 
-Fairness accounting does not wait for the backend to report RUNNING.
+Fairness accounting does not wait for Attempt creation or for the backend to report RUNNING.
 
 At commitment:
 
@@ -555,9 +638,9 @@ At commitment:
 - the Task has transferred to Active;
 - a durable Run owns responsibility.
 
-Subsequent launch failure is a Run/execution outcome, not evidence that the Goal was never scheduled.
+Subsequent preparation or Attempt failure is a Run/execution outcome, not evidence that the Goal was never scheduled.
 
-## 22. SchedulingClaim is consumed at handoff
+## 24. SchedulingClaim is consumed at handoff
 
 The SchedulingClaim is a pre-Run coordination primitive only.
 
@@ -569,11 +652,11 @@ Task → Active
 Run → owner
 ```
 
-The claim does not survive until backend launch completes.
+The claim does not survive until Attempt creation or backend launch completes.
 
 The Task cannot re-enter scheduler consideration unless a later lifecycle decision returns it to Ready.
 
-## 23. Daemon restart recovers Runs directly
+## 25. Daemon restart recovers Runs and Attempts directly
 
 On daemon restart:
 
@@ -582,11 +665,13 @@ load all nonterminal Runs
         ↓
 acquire/adopt ownership epoch
         ↓
-read desired execution state
+read desired Run state
         ↓
-load BackendAttachment if any
+load current nonterminal Attempt, if any
         ↓
-ExecutorBackend inspect/ensure/reconcile
+load Attempt BackendAttachment, if any
+        ↓
+ExecutorBackend inspect/ensure/reconcile same LaunchKey
         ↓
 persist observation
 ```
@@ -595,9 +680,11 @@ Active Tasks are not returned to the scheduler merely because the daemon restart
 
 The Run Controller owns recovery of committed execution.
 
-## 24. Future dangling-execution detection
+If a Run is LaunchReady but no Attempt exists because the daemon crashed before Attempt creation, the controller may durably create the first Attempt and then proceed.
 
-A backend may eventually need to enumerate executions tagged or identifiable as Pantheon-owned so reconciliation can detect native execution that exists without a corresponding current Run record.
+## 26. Future dangling-execution detection
+
+A backend may eventually need to enumerate executions tagged or identifiable as Pantheon-owned so reconciliation can detect native execution that exists without a corresponding current Attempt record.
 
 Conceptually:
 
@@ -606,7 +693,7 @@ backend inventory
       ↓
 Pantheon-owned native executions
       ↓
-compare with durable Runs
+compare with durable Attempts
       ↓
 managed / dangling / unknown ownership
 ```
@@ -651,6 +738,8 @@ Atomic commitment
             ↓
        preparation
             ↓
+      Attempt + LaunchKey
+            ↓
       ensureExecution
             ↓
        reconciliation
@@ -662,42 +751,46 @@ Include:
 
 - atomic Task Ready → Active + Run creation handoff;
 - exactly one nonterminal Run owner per Active Task;
-- desired-vs-observed execution state;
-- immutable LaunchKey;
+- immutable ExecutionBinding per Run;
+- durable Attempt creation before backend side effects;
+- immutable LaunchKey per Attempt;
 - idempotent ensure-execution semantics;
-- opaque backend attachment state;
+- opaque Attempt backend attachment state;
 - idempotent preparation controllers;
 - LaunchReady and preparation conditions;
 - current-authority rechecks before external side effects;
-- normalized observations: ABSENT, STARTING, RUNNING, EXITED, UNKNOWN;
+- normalized Attempt observations: ABSENT, STARTING, RUNNING, EXITED, UNKNOWN;
 - structured definitive-vs-unknown backend outcomes;
-- reconciliation retries within the same Run;
+- reconciliation within the same Attempt/LaunchKey;
 - backend events as hints;
 - restart recovery through the Run Controller.
 
 Defer:
 
-- speculative duplicate Runs;
+- speculative duplicate Runs or concurrent Attempts;
 - generic dangling-execution reaping;
 - distributed Run controllers;
 - complex suspension/migration semantics;
 - backend-specific lifecycle states in core;
-- full Run/Attempt lifecycle and failure taxonomy, defined separately.
+- complete failure/retry classification policy, defined separately.
 
 ## Key decisions
 
 1. **The Scheduler ends when the atomic Run-intent transaction commits.**
 2. **Task Ready → Active occurs in that transaction, before external execution necessarily exists.**
 3. **Exactly one nonterminal Run owns an Active Task in v1.**
-4. **Desired Run state and observed backend execution state are separate.**
-5. **Backend execution uses idempotent ensure-execution semantics and an immutable LaunchKey.**
-6. **Backend reattachment state is opaque to Pantheon core.**
-7. **Run Controller owns every execution-side action after the binding commits.**
-8. **Preparation is post-commit, idempotent, and expressed through conditions rather than lifecycle phase explosion.**
-9. **Current authority is rechecked before consequential external actions.**
-10. **ABSENT and UNKNOWN are different; UNKNOWN never authorizes duplicate execution.**
-11. **Transport/recovery retries remain within the same Run.**
-12. **Backend events trigger reconciliation but do not authoritatively mutate lifecycle state.**
-13. **Executor exit does not imply Task success.**
-14. **Goal fairness is charged at successful Run-intent commitment.**
-15. **Daemon restart recovers committed Runs directly through the Run Controller, not through the Scheduler.**
+4. **A Run owns one immutable ExecutionBinding; an Attempt owns one immutable LaunchKey.**
+5. **Attempts are created durably after preparation and before any backend execution side effect.**
+6. **Backend execution uses idempotent ensure-execution semantics keyed by the current Attempt LaunchKey.**
+7. **Backend reattachment state is Attempt-scoped and opaque to Pantheon core.**
+8. **Run Controller owns every execution-side action after the binding commits.**
+9. **Preparation is post-commit, idempotent, and expressed through conditions rather than lifecycle phase explosion.**
+10. **Current authority is rechecked before consequential external actions.**
+11. **ABSENT and UNKNOWN are different; UNKNOWN never authorizes a duplicate or replacement Attempt.**
+12. **Transport/recovery retries remain within the same Attempt and LaunchKey.**
+13. **A deliberate fresh execution under the same Binding creates a new Attempt; a Binding change creates a new Run.**
+14. **Backend events trigger reconciliation but do not authoritatively mutate lifecycle state.**
+15. **Executor exit does not imply Task success.**
+16. **A Run produces at most one candidate; acceptance rejection normally creates a new Run.**
+17. **Goal fairness is charged at successful Run-intent commitment.**
+18. **Daemon restart recovers committed Runs/Attempts directly through the Run Controller, not through the Scheduler.**
