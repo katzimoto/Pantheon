@@ -6,7 +6,7 @@ Draft design — Pantheon subsystem specification.
 
 ## Purpose
 
-`AGENT.yaml` is Pantheon's declarative, machine-readable contract for a persistent logical agent. It describes the desired configuration of an agent independently of the model or harness that executes it.
+`AGENT.yaml` is Pantheon's declarative, machine-readable contract for a persistent logical agent. It describes desired agent configuration independently of the model or harness that executes it.
 
 The manifest complements the Agent Genome:
 
@@ -14,33 +14,26 @@ The manifest complements the Agent Genome:
 - `BEHAVIOR.md` — validated adaptive heuristics;
 - memory — durable facts and context;
 - skills — procedural knowledge;
-- `AGENT.yaml` — capabilities, execution compatibility, authorization, delegation, limits, review, and learning policy.
+- `AGENT.yaml` — specialties, execution compatibility, authorization policy, delegation, limits, review, and learning policy.
 
-Runtime state, learned content, usage counters, current sessions, and provider quota are deliberately excluded from the manifest.
+Runtime state, learned content, current sessions, capability grants, capability tickets, usage counters, and provider quota are deliberately excluded.
+
+See also:
+
+- `docs/architecture/agent-genome.md`
+- `docs/architecture/permissions-and-capabilities.md`
 
 ## Foundational principles
 
 ### 1. Provider- and model-independent identity
 
-An agent is not a Claude, OpenCode, Qwen, or other provider-specific configuration. Pantheon owns the agent definition and compiles it into provider-specific sessions.
-
-A coder remains the same logical agent regardless of whether a task is executed by Claude Code, OpenCode, or a local OpenAI-compatible endpoint.
+An agent is not a Claude, OpenCode, Qwen, or other provider-specific configuration. Pantheon owns the canonical agent definition and compiles it into provider-specific sessions.
 
 ### 2. Declarative desired state
 
-`AGENT.yaml` describes desired configuration, not observed state.
+`AGENT.yaml` describes configuration, not observed runtime state.
 
-Runtime state belongs in Pantheon's state store and event log. Examples that must not be stored in the manifest:
-
-- current session ID;
-- active task;
-- selected model for a particular run;
-- tokens consumed;
-- remaining provider quota;
-- last error;
-- learned memories;
-- pending reflections;
-- current health/status.
+Runtime state belongs in Pantheon's state store and event log.
 
 ### 3. Pantheon owns authorization and delegation
 
@@ -49,15 +42,15 @@ Provider-native permissions and subagent mechanisms are implementation details. 
 - what an agent may do;
 - which resources it may access;
 - which agents it may delegate to;
-- depth/concurrency limits;
+- depth and concurrency limits;
 - sandbox/workspace requirements;
 - review gates.
 
-Provider adapters may enforce these constraints, but may never broaden them.
+Provider adapters may tighten these constraints but may never broaden them.
 
 ### 4. Fail closed
 
-If an executor cannot faithfully enforce a required policy, compilation must fail rather than silently weakening the policy.
+If an executor cannot faithfully enforce a required policy, Pantheon must fail rather than silently weaken the policy.
 
 ## Proposed v1alpha1 manifest
 
@@ -123,12 +116,17 @@ spec:
   permissions:
     profile: developer
     rules:
+      - action: filesystem.write
+        resource: workspace://**
+        effect: permit
+
       - action: git.push
-        effect: ask
-      - action: filesystem.external
-        effect: deny
-      - action: secrets.read
-        effect: deny
+        resource: repo://**
+        approval: required
+
+      - action: secret.read
+        resource: secret://**
+        effect: forbid
 
   workspace:
     isolation: worktree
@@ -181,7 +179,7 @@ Optional:
 
 ### `spec.description`
 
-Human-readable summary used for agent selection and discovery. It should describe what the agent is for, not how it is implemented.
+Human-readable summary used for selection and discovery. It describes what the agent is for, not how it is implemented.
 
 ### `spec.accepts`
 
@@ -198,7 +196,7 @@ security.ctf
 security.reverse-engineering
 ```
 
-Task classes represent specialty, not authorization.
+Task classes express specialty, not authorization.
 
 ## Specialty, skills, tools, and permissions are distinct
 
@@ -211,30 +209,11 @@ TOOL        What mechanism can the agent invoke?
 PERMISSION  What action is the agent authorized to perform?
 ```
 
-For example:
-
-```yaml
-accepts:
-  - code.debug
-
-skills:
-  available:
-    - debugging
-
-tools:
-  bundles:
-    - shell
-    - filesystem
-
-permissions:
-  profile: developer
-```
-
-These must not be collapsed into a single provider-specific `tools` list.
+These must not be collapsed into a provider-specific tool list.
 
 ## Genome references
 
-`spec.genome` points to the persistent knowledge and identity layers defined by the Agent Genome subsystem.
+`spec.genome` references the persistent identity and knowledge layers defined by the Agent Genome subsystem.
 
 ### Identity
 
@@ -274,9 +253,7 @@ skills:
     - git
 ```
 
-`available` means the skill may be activated when relevant. `preload` means the full skill instructions are loaded at session start.
-
-Preloading should be uncommon because context is a scarce resource.
+`available` means the skill may be activated when relevant. `preload` means its full instructions are loaded at session start.
 
 ## Execution policy
 
@@ -289,22 +266,7 @@ execution:
   routePolicy: coding-default
 ```
 
-A separate routing configuration resolves the actual executor based on task requirements, privacy, availability, quality, cost/quota, and local resources.
-
-Example conceptually:
-
-```yaml
-routes:
-  coding-default:
-    premium:
-      harness: claude-code
-    hosted:
-      harness: opencode
-      pool: opencode-go
-    local:
-      harness: openai-compatible
-      pool: local-mlx
-```
+A separate routing subsystem resolves the concrete executor based on task requirements, privacy, availability, quality, cost/quota, and local resources.
 
 Concrete provider/model selection belongs to the router and immutable execution record, not agent identity.
 
@@ -317,7 +279,7 @@ compatibleHarnesses:
   - openai-compatible
 ```
 
-This is an allowlist of execution harnesses that can faithfully run the agent.
+This is an allowlist of harnesses that can faithfully run the agent.
 
 ### Requirements
 
@@ -330,29 +292,31 @@ requirements:
 
 Future requirements may include vision, structured output, minimum context size, MCP, browser control, or local-only execution.
 
-## Canonical tools
+## Canonical tools and capabilities
 
-Pantheon must not expose Claude/OpenCode-specific names as its canonical API.
+Pantheon does not expose Claude/OpenCode-specific tool names as its canonical API.
 
-Recommended capability names include:
+Examples:
 
 ```text
 filesystem.read
 filesystem.write
-filesystem.external.read
-filesystem.external.write
+filesystem.delete
 shell.execute
-network.http
-network.raw
+process.spawn
+network.connect
 git.read
 git.commit
 git.push
 git.merge
-secrets.read
-browser.navigate
-process.spawn
+secret.use
+secret.read
 container.run
-delegate.spawn
+mcp.call
+agent.delegate
+browser.navigate
+service.read
+service.mutate
 ```
 
 Tool bundles provide ergonomic groups:
@@ -370,96 +334,81 @@ Provider adapters translate canonical capabilities into native mechanisms.
 
 ## Authorization model
 
-Canonical permission effects:
+The full security design is defined in `permissions-and-capabilities.md`.
+
+Canonical authorization outcomes are binary:
 
 ```text
-allow
-ask
-deny
+PERMIT
+DENY
 ```
 
-`deny` is always strongest.
+Manifest rule effects are:
 
-Example:
+```text
+permit
+forbid
+```
+
+Human approval is not a third effect. An approval-gated rule uses:
 
 ```yaml
-permissions:
-  profile: developer
-  rules:
-    - action: git.push
-      effect: ask
-    - action: filesystem.external
-      effect: deny
+- action: git.push
+  resource: repo://**
+  approval: required
 ```
 
-Authorization should be enforced in layers:
+The base request is denied as approvable. If the user approves it, Pantheon creates a scoped capability grant and evaluates authorization again.
+
+A permission rule specifies either `effect` or `approval`, never both.
+
+Authorization is enforced in layers:
 
 ```text
 agent request
     ↓
 Pantheon policy engine
     ↓
+capability ticket / execution broker
+    ↓
 provider/harness permission layer
     ↓
-OS/container sandbox
+OS/container/VM sandbox
     ↓
 resource
 ```
 
-An LLM's own interpretation of a prompt is never an authorization boundary.
+The LLM's interpretation of its prompt is never an authorization boundary.
 
-## Policy merging
+## Policy hierarchy
 
-Pantheon will combine policy from multiple scopes:
-
-```text
-global
-  ↓
-project
-  ↓
-agent
-  ↓
-task
-  ↓
-temporary human grant
-```
-
-### Permissions
-
-Default rule:
+Effective policy is resolved from:
 
 ```text
-deny > ask > allow
+system hard policy
+      ↓
+user policy
+      ↓
+project policy
+      ↓
+agent policy
+      ↓
+task restrictions
+      ↓
+temporary capability grants
 ```
 
-More local configuration may tighten authority but must not silently broaden authority beyond an enclosing policy.
+Rules:
 
-### Limits
-
-The effective value is normally the lowest applicable ceiling.
-
-Example:
-
-```text
-global maxTurns = 100
-agent  maxTurns = 40
-task   maxTurns = 20
-
-effective = 20
-```
-
-### Skills
-
-Effective skill availability should be the intersection of:
-
-- project-allowed skills;
-- agent-available skills;
-- runtime compatibility;
-- task policy.
+- default deny;
+- explicit hard forbid wins;
+- lower scopes may restrict authority;
+- lower scopes may not bypass enclosing forbids;
+- temporary grants may satisfy approvable actions but not hard forbids.
 
 ## Workspace and sandbox
 
-These are separate concepts.
+Worktree isolation and sandboxing are separate concepts.
 
 ### Worktree isolation
 
@@ -479,18 +428,7 @@ workspace:
   sandbox: developer
 ```
 
-Examples of future sandbox profiles:
-
-```text
-read-only
-developer
-trusted-developer
-research
-ctf
-admin
-```
-
-A security/CTF agent might use a Git worktree for repository isolation and a disposable container/VM for process/network isolation.
+Pantheon should support progressively stronger profiles such as native/read-only, development/workspace, and isolated container/VM execution for CTF or untrusted code.
 
 ## Delegation
 
@@ -506,24 +444,20 @@ delegation:
   maxConcurrent: 2
 ```
 
-When an agent requests delegation, Pantheon must:
+Delegation itself is authorized as a canonical action such as:
 
-1. authorize the target agent;
-2. check depth and concurrency;
-3. check resource/quota policy;
-4. create a child task;
-5. create/select a workspace;
-6. select an executor;
-7. record task lineage;
-8. monitor/reconcile the child task.
+```text
+agent.delegate
+resource: agent://researcher
+```
+
+Before creating a child task Pantheon must check authorization, depth, concurrency, resource/quota policy, workspace requirements, executor availability, and record task lineage.
 
 Provider-native subagents may be used as an optimization, but Pantheon remains the source of truth.
 
-Delegation is allowlisted by default.
-
 ## Limits
 
-`spec.limits` defines execution ceilings, not live consumption:
+`spec.limits` defines ceilings, not live consumption:
 
 ```yaml
 limits:
@@ -544,11 +478,11 @@ review:
   requiredBeforeMerge: true
 ```
 
-The review policy may later select automated tests, static checks, reviewer agents, human approval, or combinations thereof.
+The review subsystem may later combine automated tests, static checks, reviewer agents, and human approval.
 
 ## Learning policy
 
-The manifest configures how learning occurs but never stores learned content.
+The manifest configures learning behavior but never stores learned content.
 
 ```yaml
 learning:
@@ -560,11 +494,11 @@ learning:
     soul: human-approval
 ```
 
-This directly implements the Agent Genome rule that reflection is a hypothesis and permanent self-modification requires evidence.
+This implements the Agent Genome rule that reflection is a hypothesis and permanent self-modification requires evidence.
 
 ## Provider extensions
 
-Provider-specific settings are permitted only as an explicit non-portable escape hatch:
+Provider-specific settings are allowed only as an explicit non-portable escape hatch:
 
 ```yaml
 extensions:
@@ -574,18 +508,17 @@ extensions:
     temperature: 0.1
 ```
 
-Portable fields must never gradually become a collection of provider-specific options. Most agents should work without `extensions`.
+Portable fields must not gradually become provider-specific options.
 
 ## Immutable Run Manifest
 
 Every execution produces a separate immutable `RunManifest`. This is not authored by the user and is not part of `AGENT.yaml`.
 
-Example:
+It should capture at least:
 
 ```yaml
 runId: run-01J...
 agent: coder
-
 agentSpecHash: sha256:...
 soulHash: sha256:...
 behaviorHash: sha256:...
@@ -609,23 +542,13 @@ workspace:
   worktree: task-291
 ```
 
-The Run Manifest enables reproducibility, auditability, regression analysis, and meaningful evaluation of self-improvement.
+The Run Manifest enables reproducibility, auditing, regression analysis, and meaningful evaluation of self-improvement.
+
+Capability grants and tickets used during the run are referenced from runtime audit events rather than embedded into the static Agent Manifest.
 
 ## A2A interoperability
 
-Pantheon should eventually derive an A2A Agent Card from canonical agent metadata, skill metadata, and exposed runtime interfaces rather than requiring duplicate configuration.
-
-Conceptually:
-
-```text
-AGENT.yaml
-   +
-skill metadata
-   +
-runtime interface
-   ↓
-A2A Agent Card
-```
+Pantheon should eventually derive an A2A Agent Card from canonical agent metadata, skill metadata, and exposed runtime interfaces instead of maintaining duplicate configuration.
 
 A2A export is not required for v1.
 
@@ -638,8 +561,8 @@ Include:
 - Genome references;
 - skill availability/preload;
 - route policy and compatible harnesses;
-- canonical tool bundles;
-- permission profile/rules;
+- canonical tool bundles/capabilities;
+- permission profile and `permit`/`forbid`/approval-gated rules;
 - workspace and sandbox profiles;
 - delegation allowlist/limits;
 - execution ceilings;
@@ -654,72 +577,23 @@ Defer:
 - dynamically generated agent manifests;
 - arbitrary inline shell hooks;
 - A2A export;
-- advanced provider-specific compilation optimizations.
+- advanced provider-specific compilation optimizations;
+- risk scoring.
 
 Never allow:
 
 - credentials or secrets inside the manifest;
 - runtime quota/state inside the manifest;
+- capability grants/tickets inside the manifest;
 - agents silently granting themselves additional authority;
 - provider adapters weakening mandatory security policy.
-
-## Object model
-
-```text
-                         AGENT
-                           │
-        ┌──────────────────┼───────────────────┐
-        │                  │                   │
-        ▼                  ▼                   ▼
-     IDENTITY          EXECUTION            POLICY
-        │                  │                   │
-     SOUL.md          compatible           permissions
-   BEHAVIOR.md         harnesses             sandbox
-        │              routing               limits
-        │                  │                   │
-        ▼                  ▼                   ▼
-     KNOWLEDGE          TOOLS            DELEGATION
-        │
-     memory
-     skills
-        │
-        ▼
-     LEARNING
-        │
-    experiences
-    reflection
-    evaluation
-```
-
-## Controller flow
-
-```text
-Pantheon Controller
-       ↓
-resolve Agent manifest
-       ↓
-resolve Task specification
-       ↓
-resolve effective policy
-       ↓
-select executor
-       ↓
-select/retrieve context
-       ↓
-create workspace/sandbox
-       ↓
-generate immutable Run Manifest
-       ↓
-┌─────────────┬──────────────┐
-▼             ▼              ▼
-Claude Code   OpenCode       Local/OpenAI-compatible
-```
 
 ## Key decisions
 
 1. **Agent identity is provider/model independent.**
 2. **Pantheon owns authorization and delegation.**
-3. **`AGENT.yaml` is stable desired configuration; runtime and learned state live elsewhere.**
-4. **Skills, tools, specialty, and permissions are distinct abstractions.**
-5. **Provider compilation is fail-closed.**
-6. **Every execution is captured by an immutable Run Manifest.**
+3. **Authorization is binary; approval creates a scoped grant.**
+4. **`AGENT.yaml` is stable desired configuration; runtime and learned state live elsewhere.**
+5. **Skills, tools, specialty, and permissions are distinct abstractions.**
+6. **Provider compilation is fail-closed.**
+7. **Every execution is captured by an immutable Run Manifest.**
