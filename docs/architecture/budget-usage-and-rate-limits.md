@@ -2,144 +2,51 @@
 
 ## Status
 
-Draft design — Pantheon accounting and consumption-control specification.
+Canonical Pantheon accounting and consumption-control specification.
 
 ## Purpose
 
-This document defines how Pantheon represents finite consumption budgets, factual execution usage, external allowance mirrors, and replenishing rate limits without collapsing them into the Resource Ledger.
-
-The central rule is:
-
-> **Context capacity, reservable resources, cumulative budgets, factual usage, and rate limits are different control-plane concepts and must remain separate.**
-
-See also:
-
-- `docs/architecture/execution-fabric.md`
-- `docs/architecture/execution-offer-routing-and-admission-handshake.md`
-- `docs/architecture/scheduler-resource-ledger-and-admission.md`
-- `docs/architecture/scheduler-reservations-ownership-and-leases.md`
-- `docs/architecture/run-and-attempt.md`
-
-## Concept separation
+Pantheon keeps compatibility capacity, reservable resources, cumulative budget authority, factual usage, accounting charges and replenishing rate limits separate.
 
 ```text
-CONTEXT CAPACITY
-  Compatibility: can this execution support the required context size?
-
-RESOURCE LEDGER
-  Reversible capacity: memory, worktrees, concurrency, sandbox capacity.
-
-BUDGET LEDGER
-  Finite cumulative allowance: tokens, currency, credits, premium units.
-
-USAGE LEDGER
-  Immutable factual metering: what was actually consumed.
-
-RATE-LIMIT SIGNALS
-  Replenishing temporary availability: requests/minute, tokens/minute, retry-after.
+Context capacity     -> compatibility
+ResourceReservation  -> reversible capacity
+BudgetAccount        -> cumulative allowance
+BudgetHold           -> reserved future spending authority
+UsageRecord          -> factual observed consumption
+ChargeRecord         -> accounting consequence of usage
+RateLimitSnapshot    -> temporary replenishing availability
 ```
 
-None of these is a substitute for another.
+No subsystem may collapse these into one generic quota object.
 
-## Context capacity is compatibility, not consumption
+## BudgetAccount / BudgetPeriod
 
-A requirement such as:
+A BudgetAccount defines an allowance domain; BudgetPeriods provide concrete limits/windows where applicable. Multiple overlapping accounts may apply to one operation and all must permit the Hold/charge.
 
-```yaml
-context:
-  minTokens: 64000
-```
+Authoritative amounts use integral base units, never floating-point accounting.
 
-means only that an execution candidate must provide at least that much usable context capacity. Context size is not reserved, depleted, or settled as a budget.
-
-Actual input/output/cache token consumption is Usage.
-
-## Usage Ledger
-
-The Usage Ledger is append-only factual accounting.
-
-A normalized UsageRecord is attributable to the control-plane entity that caused the consumption and contains one or more extensible measurements.
-
-Conceptual shape:
-
-```yaml
-usage:
-  id: usage_123
-
-  attribution:
-    goal: goal_12
-    task: task_31
-    run: run_44
-    attempt: attempt_2
-    agent: agent://coder
-    backend: executor://a
-
-  source:
-    operationId: native-or-adapter-stable-id
-    revision: 1
-
-  measurements:
-    - meter: genai.input_tokens
-      quantity: 52000
-      quality: provider-reported
-
-    - meter: genai.output_tokens
-      quantity: 8700
-      quality: provider-reported
-
-    - meter: genai.cache_read_input_tokens
-      quantity: 34000
-      quality: provider-reported
-
-  occurredAt: ...
-```
-
-Field names are conceptual; the semantic boundary is normative.
-
-### Extensible meters
-
-Tokens are important but not universal. Standard meters may include:
+Available Pantheon-authoritative budget is conceptually:
 
 ```text
-genai.input_tokens
-genai.output_tokens
-genai.cache_read_input_tokens
-genai.cache_write_input_tokens
-genai.reasoning_output_tokens
-request.count
-tool.web_search_requests
-time.wall_ms
+limit - consumed - currently held
 ```
 
-Future adapter-specific meters may use namespaced identifiers.
+subject to enforcement mode and account semantics.
 
-Missing usage is `UNKNOWN`, never zero.
+## BudgetHold
 
-## Canonical token normalization
+A BudgetHold reserves bounded future spending authority/headroom. It is not factual consumption and not a ResourceReservation.
 
-Pantheon canonical input-token totals represent total input processed, including cached input.
+Runs receive an initial bounded tranche at scheduling commit. Extensions are separate atomic transactions. Control operations such as Evaluation may use `holder: control-operation` where billable usage exists.
 
-Cache read/write counters are retained as breakdowns when available.
+Failed Attempts may consume their real usage; failure does not refund factual spend.
 
-Conceptually:
+## UsageRecord
 
-```text
-genai.input_tokens = total input presented/processed
+UsageRecord is append-only factual observation, for example tokens, seconds, bytes, requests or provider-specific normalized meters.
 
-cache_read_input_tokens
-cache_write_input_tokens
-= subsets/breakdowns where reported
-```
-
-Backend adapters normalize provider-native token semantics into this canonical form.
-
-Likewise, canonical output tokens represent total generated output; reasoning-output tokens may be exposed as a subset when available.
-
-Pantheon core never implements provider-specific tokenizer logic.
-
-## Usage quality
-
-Useful normalized qualities are:
+Usage quality is explicit:
 
 ```text
 EXACT
@@ -148,459 +55,156 @@ ESTIMATED
 UNKNOWN
 ```
 
-`UNKNOWN` must not silently become `0`.
+Usage is never clamped merely because a budget limit was exceeded. If actual usage exceeded authority, Pantheon records truthful overdraw and applies policy afterward.
 
-Budget policies may require a minimum acceptable metering quality.
+## Usage provenance and idempotency
 
-## Usage is not Charge
+An adapter-authored key is not globally authoritative by itself. Pantheon namespaces every external usage observation with control-plane provenance.
 
-A UsageMeasurement records what happened.
+Canonical idempotency identity is equivalent to:
 
-A Charge records what finite allowance that usage consumed.
+```text
+backend_id
++
+attempt_id (or explicit control-operation id)
++
+adapter_operation_key
++
+meter
+```
+
+For Attempt usage, Pantheon accepts the record only when:
+
+- the referenced Attempt exists;
+- the immutable Run Binding names the reporting backend as the backend responsible for that Attempt lineage;
+- the meter/units are valid for the reported usage contract;
+- the namespaced source identity has not already been ingested with conflicting content.
+
+The backend cannot claim usage for another backend's Attempt by choosing a colliding `adapter_operation_key`.
+
+Duplicate delivery of the same namespaced observation is idempotent. Same identity with materially different content is a structured integrity conflict, not a second charge.
+
+## Controller lease epoch is not usage truth
+
+A delayed valid UsageRecord may arrive after Pantheon controller ownership/lease rotation. Usage is a factual observation, not a stale controller command.
+
+Therefore Pantheon **does not discard otherwise valid usage merely because it carries an old control epoch**.
+
+ControlLease fencing applies to authority-bearing state transitions/callbacks. Usage ingestion instead validates immutable Attempt/backend provenance plus idempotency identity and observation quality.
+
+If a reporting protocol includes control epoch/incarnation, retain it as provenance/anomaly evidence; do not treat epoch mismatch alone as proof that factual usage is false.
+
+## ChargeRecord
+
+Usage and accounting charge are separate facts. Tariff/reconciliation logic maps UsageRecords into ChargeRecords while retaining the tariff/accounting revision used.
 
 Examples:
 
 ```text
-100k tokens
-→ may cost different currency amounts on different tariffs
-→ may consume credits on one backend
-→ may have zero incremental monetary charge on another
+Usage: 42,000 input tokens
+Charge: 42,000 token allowance units
 ```
 
-Therefore token counts are not a universal Pantheon cost currency.
+or a later monetary mapping if enabled. Tokens are not assumed to be a universal monetary cost unit.
 
-Conceptual ChargeRecord:
+V1 may simplify/omit monetary tariff conversion while retaining the Usage/Charge separation.
 
-```yaml
-charge:
-  id: charge_123
-  usage: usage_123
+## Atomic usage ingestion
 
-  unit: unit://currency/USD/micro
-  amount: 18400
-
-  tariff:
-    revision: tariff_82
-    hash: sha256:...
-
-  source: adapter-calculated
-```
-
-Alternative units may include backend-specific credit/premium-unit namespaces.
-
-Historical ChargeRecords retain the tariff revision/hash used at the time. Pantheon must never reconstruct historical cost by multiplying old usage by current pricing.
-
-## BudgetAccount
-
-A BudgetAccount represents a finite cumulative allowance for one unit and one accounting period.
-
-Conceptual shape:
-
-```yaml
-budget:
-  id: budget://goal/goal-123/tokens
-
-  unit: unit://genai/token
-
-  scope:
-    goal: goal-123
-
-  authority:
-    kind: pantheon
-
-  enforcement: hard
-
-  period:
-    type: lifetime
-
-  limit: 2000000
-
-  accounting:
-    consumed: 620000
-    held: 180000
-```
-
-For Pantheon-authoritative accounts:
+A usage ingestion transaction conceptually performs:
 
 ```text
-available = limit - consumed - held
+BEGIN IMMEDIATE
+
+validate provenance/idempotency
+insert UsageRecord if new
+compute/insert ChargeRecord(s) where applicable
+insert BudgetConsumption ledger entries
+convert/release matching Hold authority as defined
+update mutable period aggregates
+append Event
+
+COMMIT
 ```
 
-If actual usage exceeds the configured limit, Pantheon records the real consumed quantity and marks the account overdrawn. Usage is never clamped to a configured ceiling.
+Recovery/invariant checks can recompute aggregate `consumed/held` from immutable ledger facts and compare them with mutable counters.
 
-## Multiple applicable budgets
+## Unknown final usage
 
-One operation may be subject to several cumulative budgets at once, for example:
+If external execution may have consumed usage but final usage is unknown:
 
-```text
-Goal token ceiling
-Project currency ceiling
-External premium-credit allowance
-```
+- keep the Usage quality/state truthful;
+- retain/fence unresolved Hold/headroom conservatively according to policy;
+- do not invent a UsageRecord;
+- do not fabricate a ChargeRecord merely to close the ledger.
 
-All applicable hard Pantheon-authoritative budgets must permit the operation.
+An operator force-resolution may explicitly release/write off/fence unresolved spending authority as an administrative accounting decision, but it must be represented separately from factual consumption.
 
-The accounting model must not assume only one Goal-level budget exists.
+Useful concepts include an explicit unresolved/forfeited liability or administrative settlement record. It must never masquerade as provider-reported actual usage.
 
-## BudgetHold
+This corrects the dangerous shortcut of "assume the whole remaining hold was consumed" when the truth is unknown.
 
-A BudgetHold prevents concurrent work from independently observing the same remaining allowance and collectively overspending it.
+## Overdraw
 
-Example:
-
-```text
-limit = 100k
-consumed = 0
-
-Run A hold = 80k
-available = 20k
-
-Run B request = 80k
-→ denied
-```
-
-BudgetHold is not a ResourceReservation:
-
-```text
-ResourceReservation
-  all unused capacity returns after safe release.
-
-BudgetHold
-  actual spend becomes permanently consumed;
-  only unused headroom returns.
-```
-
-## Hold ownership
-
-Worker execution normally uses a Run-scoped BudgetHold shared by that Run's Attempts.
-
-```text
-Run hold = 150k
-Attempt 1 consumes 40k
-Attempt 2 consumes 60k
-Run consumed = 100k
-unused hold = 50k
-```
-
-Failed Attempts do not refund actual usage.
-
-Control-plane intelligence may also consume budget outside worker Runs, for example planning, semantic Agent selection, acceptance review, reflection, or skill evaluation.
-
-Therefore BudgetHold uses a generic holder reference, conceptually:
-
-```yaml
-holder:
-  kind: run
-  ref: run_123
-```
-
-or:
-
-```yaml
-holder:
-  kind: control-operation
-  ref: planning_456
-```
-
-This prevents orchestration overhead from becoming invisible spend.
-
-## Initial tranches and hold extension
-
-A Run should not reserve an entire Goal budget.
-
-Instead, the initial Run commitment creates an initial budget tranche sized by policy/estimate.
-
-When remaining held headroom approaches a threshold, the Run Controller may request an atomic hold extension.
-
-Conceptual flow:
-
-```text
-Run hold 100k
-consumed 92k
-      ↓
-request +50k
-      ↓
-Budget Controller
-      ↓
-recheck applicable budgets / policy / current period
-      ↓
-extend | deny | require approval
-```
-
-The worker/model cannot grant itself more budget.
-
-A denied extension is a policy/accounting fact; Failure/Retry/Escalation decides the higher-level response.
-
-## Enforcement classes
-
-Execution systems differ in how precisely Pantheon can bound future spend.
-
-Pantheon therefore distinguishes:
-
-```text
-HARD
-  Pantheon/backend can prevent further charge before violating the configured bound.
-
-GUARDED
-  Pantheon can meter/enforce at safe operation boundaries, but one bounded operation may overshoot.
-
-OBSERVATIONAL
-  Pantheon can monitor or estimate usage but cannot guarantee the ceiling.
-```
-
-If a user/operator requires a hard budget, Agent + ExecutionOffer candidates that cannot provide compatible metering/enforcement are invalid unless the requirement is explicitly relaxed.
-
-Pantheon must not claim a hard token/cost guarantee for an opaque execution path it cannot measure or stop safely.
-
-## Metering capabilities in ExecutionOffer
-
-ExecutionOffer may advertise factual normalized metering capabilities, for example:
-
-```yaml
-metering:
-  genai.input_tokens:
-    precision: provider-reported
-    enforcement: guarded
-
-  genai.output_tokens:
-    precision: provider-reported
-    enforcement: guarded
-
-  unit://currency/USD/micro:
-    precision: exact
-```
-
-These are mechanism facts, not quality or preference scores.
-
-Routing validates required budget/metering compatibility before ranking feasible candidates.
+If late/provider-reported actual usage exceeds the prior Hold or budget limit, Pantheon records the entire factual Usage/Charge and marks the account/period overdrawn. Enforcement may stop future work, request approval or otherwise react, but history is never rewritten to fit the limit.
 
 ## External allowance mirrors
 
-Some finite allowances are authoritative outside Pantheon, such as subscription credits or externally managed spend pools.
+Provider/subscription allowances may be mirrored as freshness-qualified observations. Upstream remains authority for those allowances.
 
-Pantheon may mirror them:
+A mirror records at least source, observed state/value, freshness and observation time. Stale mirrors cannot be treated as guaranteed capacity.
 
-```yaml
-budget:
-  authority:
-    kind: external
-    source: executor://a
+## RateLimitSnapshot
 
-  observed:
-    remaining: ...
-    observedAt: ...
-    sourceRevision: ...
-```
+Rate limits are temporary replenishing availability, not cumulative budgets. A rate-limited backend/offer may become temporarily unavailable with a retry-after/refresh observation without consuming retry semantics merely because Pantheon waits.
 
-For external accounts, Pantheon's snapshot is not the final billing authority.
+Where an existing backend execution remains continuous while waiting for provider rate availability, Pantheon reconciles the same Attempt rather than creating a new Attempt.
 
-Other consumers may spend the same allowance outside Pantheon, so freshness is part of the accounting state.
+## Enforcement modes
 
-Pantheon may conservatively derive effective local headroom from external observed remaining minus its own local holds, but the upstream system may still reject usage.
-
-If the external allowance cannot be measured numerically, Pantheon records factual coarse state such as:
+Accounts may use modes such as:
 
 ```text
-available
-constrained
-exhausted
-unknown
+HARD
+GUARDED
+OBSERVATIONAL
 ```
 
-It must not invent a numerical balance.
+Meaning is account-specific but must not alter factual usage recording. A HARD budget can deny new Hold authority; it cannot erase actual overdraw.
 
-## Budget periods and reset
-
-Budgets may be lifetime or periodic.
-
-A reset does not erase historical consumption.
-
-Conceptually:
+## Relationship to Resource Ledger
 
 ```text
-BudgetAccount
-  ├─ Period 17: consumed ...
-  └─ Period 18: consumed 0 ...
+RESOURCE LEDGER
+  reversible concurrency/capacity
+
+BUDGET LEDGER
+  cumulative allowance + Holds
+
+USAGE LEDGER
+  factual observations + Charges
+
+RATE-LIMIT STATE
+  temporary replenishing upstream availability
 ```
 
-External reset time/revision comes from the external authority when available rather than being guessed by Pantheon.
+All may influence scheduling feasibility but remain distinct authorities.
 
-## Idempotent usage ingestion
+## Recovery
 
-Usage events may be replayed after reconnect or adapter restart.
+UNKNOWN execution retains/fences budget headroom conservatively. Recovery never equates ControlLease expiry with safe budget release.
 
-Every normalized chargeable operation therefore needs stable source identity or equivalent monotonic checkpointing.
+Operator force-resolution is audited and can settle unresolved administrative authority, but late legitimate usage can still be ingested afterward if immutable provenance validates it. Such late usage may create overdraw; it is not rejected simply because the execution was administratively tombstoned.
 
-```text
-same source operation reported twice
-→ one accounting debit
-```
+## Core invariants
 
-Adapters that receive cumulative counters must normalize them into monotonic deltas/checkpoints so reconnect/replay does not double-charge.
-
-## Usage attribution and aggregation
-
-Normal worker usage is attributable at Attempt granularity and aggregates upward:
-
-```text
-Attempt
-  ↓
-Run
-  ↓
-Task
-  ↓
-Goal
-```
-
-The ledger may additionally retain Agent, backend, project, and control-operation dimensions for analysis.
-
-This allows Pantheon to compare retry cost, Agent efficiency, backend efficiency, rejected-candidate cost, and orchestration overhead without mutating immutable Task/Agent specs.
-
-## Atomic usage/charge accounting
-
-One actual operation may produce several charges that apply to several budgets.
-
-Pantheon records the UsageRecord once and transactionally applies all Pantheon-owned accounting debits/hold conversions that follow from it.
-
-No partial state such as "Goal charged but Project budget missing" is acceptable after an actual usage record has been accepted.
-
-Actual usage remains factual even if a budget becomes overdrawn; the overdraw blocks/changes future authority rather than rewriting history.
-
-## Hold settlement
-
-At safe Run/control-operation settlement:
-
-```text
-held allocation = 100k
-actual consumed = 63k
-
-63k → consumed permanently
-37k → released
-```
-
-If external execution remains `UNKNOWN`, unused BudgetHold headroom remains fenced/held until reconciliation can establish safe settlement according to the accounting source.
-
-## Rate limits are not budgets
-
-Rate limits are replenishing throughput constraints such as requests/minute or tokens/minute.
-
-They do not belong in BudgetAccount because consumed capacity returns over time/window reset.
-
-A normalized RateLimitSnapshot may contain:
-
-```yaml
-rateLimit:
-  key: limiter://backend/a/input-tokens
-  unit: token
-
-  limit: ...
-  remaining: ...
-
-  resetAt: ...
-  retryAfter: ...
-  observedAt: ...
-
-  replenishment: continuous
-```
-
-Possible replenishment semantics include:
-
-```text
-continuous
-fixed-window
-opaque
-```
-
-The backend adapter owns the translation from native throttling rules.
-
-A rate-limit hit is normally temporary execution availability, not budget exhaustion.
-
-If an upstream system provides only a retry-after signal, Pantheon records that fact rather than fabricating remaining quota.
-
-## Router interaction
-
-Routing uses three independent factual inputs:
-
-```text
-Resource fit
-Budget/metering compatibility
-Rate-limit / allowance availability
-```
-
-Hard incompatibilities filter candidates before preference ranking.
-
-Rate-limit exhaustion generally yields temporary unavailability with a recheck time when known.
-
-Budget exhaustion means cumulative spending authority is unavailable until a policy/period/human change occurs.
-
-Resource exhaustion means reservable capacity is unavailable.
-
-Backends report facts. Pantheon route policy derives preference/scarcity behavior from those facts plus observed history.
-
-## Run/Attempt interaction
-
-BudgetHolds are normally Run-scoped; UsageRecords are normally Attempt-scoped.
-
-```text
-Run
-  ├─ initial BudgetHold
-  ├─ Attempt 1 usage
-  ├─ Attempt 2 usage
-  └─ possible hold extensions
-```
-
-Attempt usage aggregates into the Run's consumed amount.
-
-A new Attempt under the same Run does not receive an unrelated fresh Goal budget; it consumes from the same Run allocation unless policy explicitly extends it.
-
-## v1 scope
-
-Include:
-
-- extensible append-only UsageRecords;
-- canonical normalized token meters;
-- usage quality (`EXACT`, `PROVIDER_REPORTED`, `ESTIMATED`, `UNKNOWN`);
-- separate ChargeRecords/tariff revisions where charge data is available;
-- generic BudgetAccounts and periods;
-- `limit`, `consumed`, `held`, and overdraw state;
-- overlapping budgets;
-- Run/control-operation BudgetHolds;
-- initial budget tranches and incremental extension;
-- `HARD`, `GUARDED`, `OBSERVATIONAL` enforcement classes;
-- factual ExecutionOffer metering capabilities;
-- external allowance mirrors with freshness;
-- idempotent usage ingestion;
-- Attempt → Run → Task → Goal aggregation;
-- independent RateLimitSnapshots.
-
-Defer:
-
-- predictive ML budget sizing;
-- universal cross-backend cost normalization;
-- automated financial optimization across currencies/credits;
-- complex distributed accounting authority;
-- hidden provider-specific tokenizer logic in core;
-- pretending opaque subscription allowance has exact numerical semantics when it does not.
-
-## Key decisions
-
-1. **Context capacity, ResourceReservations, budgets, Usage, and rate limits are separate concepts.**
-2. **Usage Ledger is append-only factual metering; budgets govern future consumption authority.**
-3. **Usage meters are extensible and tokens are not the only usage unit.**
-4. **Canonical input-token totals include cached input; cache counters remain available as breakdowns.**
-5. **Token counts are not a universal economic/quality currency across backends.**
-6. **Usage and Charge are separate; pricing/credit conversion records a tariff revision.**
-7. **Pantheon BudgetAccounts use `limit`, `consumed`, and `held`; actual usage can truthfully overdraw a budget.**
-8. **Multiple applicable hard budgets may constrain one operation.**
-9. **BudgetHold prevents concurrent overspend and normally belongs to Run, while control-plane intelligence may also hold budget.**
-10. **Runs receive initial budget tranches and may request controller-approved extensions.**
-11. **Actual usage is never clamped to the configured limit.**
-12. **Metering enforcement is classified as HARD, GUARDED, or OBSERVATIONAL.**
-13. **A requested hard budget requires a compatible execution/metering path.**
-14. **External allowance accounts are mirrors with freshness; the external system remains authoritative.**
-15. **Missing usage/quota data is UNKNOWN, not zero.**
-16. **Budget resets create new periods instead of erasing history.**
-17. **Usage ingestion is idempotent and replay-safe.**
-18. **Attempt usage aggregates to Run, Task, and Goal; orchestration work is also attributable.**
-19. **Unused BudgetHold headroom is released only after safe settlement.**
-20. **Rate limits are replenishing availability signals, not BudgetAccounts.**
+1. Context capacity, ResourceReservations, BudgetHolds, factual Usage, Charges and rate limits are distinct.
+2. Usage is append-only factual truth and never clamped to a budget limit.
+3. Usage source identity is Pantheon-namespaced by backend + execution/control-operation + adapter key + meter.
+4. A backend may report usage only for the execution lineage it owns in the immutable Binding.
+5. Duplicate source delivery is idempotent; conflicting duplicate content is an integrity error.
+6. Controller lease/epoch rotation does not by itself invalidate delayed factual usage.
+7. UNKNOWN final usage does not authorize fabricated consumption.
+8. Failed work still consumes real usage.
+9. Late usage after administrative force-resolution remains recordable and may create truthful overdraw.
+10. External allowance/rate observations include freshness and never become local fabricated authority.
