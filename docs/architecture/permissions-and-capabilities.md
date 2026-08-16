@@ -2,141 +2,98 @@
 
 ## Status
 
-Draft design — Pantheon security subsystem specification.
+Canonical Pantheon authorization specification.
 
 ## Purpose
 
-Pantheon must remain the canonical authorization authority regardless of which model or harness executes an agent. Claude Code, OpenCode, local models, MCP servers, shells, containers, and future providers are execution mechanisms; none of them owns the security model.
+Pantheon is the canonical authorization authority independent of execution backend/model/harness. The subsystem answers:
 
-The subsystem answers one question:
+> May principal X perform action Y on resource Z under context C **now**?
 
-> May principal X perform action Y on resource Z under context C?
+Authorization is binary: `PERMIT` or `DENY`. Approval is not a third authorization outcome; approval creates a narrowly scoped Grant and the action is re-evaluated.
 
-Authorization is binary: **PERMIT** or **DENY**.
+See also:
 
-Human approval is not a third authorization outcome. An approval creates a scoped, temporary capability grant and the request is evaluated again.
+- `agent-control-channel.md`
+- `configuration-and-policy-revisions.md`
+- `sandbox-broker-and-isolation.md`
+- `secret-store-and-credential-brokering.md`
 
 ## Foundational principles
 
-1. **Pantheon owns authorization.** Models and harnesses may never broaden authority.
-2. **Default deny.** An action is denied unless an applicable policy or capability grant permits it.
-3. **Explicit forbid wins.** Hard forbids cannot be bypassed by lower-level policy or agent requests.
-4. **Approval creates a capability grant.** It never silently changes broad trust.
-5. **Authorization and sandboxing are separate.** Policy determines what an agent may do; the sandbox limits what the process can physically do.
-6. **Fail closed.** If Pantheon cannot enforce a required policy, the task does not start.
-7. **Every privileged action is auditable.** Requests, decisions, grants, execution, and outcomes are recorded.
+1. **Pantheon owns authorization.** Models/backends may never broaden authority.
+2. **Default deny.** No applicable permit means DENY.
+3. **Hard forbid wins.** Lower scopes/Grants cannot bypass hard policy.
+4. **Approval creates a scoped Grant, not broad trust.**
+5. **Authorization and physical containment are separate.** Sandbox ambient authority must already be no broader than the semantic ceiling.
+6. **Fail closed.** If Pantheon cannot enforce required authority, work does not start/continue.
+7. **Every consequential privileged operation is auditable.**
+8. **Authorization is checked at redemption/use time, not only when a request was first proposed.**
 
-## Enforcement architecture
+## Request path
+
+For Agent-triggered operations:
 
 ```text
-Agent / model
-    │ action request
-    ▼
+Agent/model
+  ↓
+Agent Control Gateway
+  ↓ authenticate Attempt
+server derives Task/Run/Agent/current state
+  ↓
 Action Normalizer
-    │ canonical principal/action/resource/context
-    ▼
+  ↓
 Policy Decision Point
-    │ PERMIT / DENY
-    ├────────────── DENY, non-approvable ──> stop
-    │
-    └────────────── DENY, approvable
-                         │
-                         ▼
-                   Approval Broker
-                         │ human grants scope
-                         ▼
-                   Capability Grant
-                         │
-                         └──── re-evaluate
-
-PERMIT
-    │
-    ▼
-Capability Ticket
-    │
-    ▼
-Execution Broker
-    │
-    ▼
-Harness permissions
-    │
-    ▼
-OS / container / VM sandbox
-    │
-    ▼
-Resource
+  ↓
+DENY or PERMIT
+  ↓
+transactional authority redemption
+  ↓
+Execution/Credential/Integration/etc. Broker
+  ↓
+external effect
 ```
 
-The LLM never decides whether its own request is authorized.
+Agent Control credentials authenticate the Attempt only. They grant no action authority.
 
-## Policy decision point
+Operator requests use the separate Operator Control principal/surface.
 
-Pantheon should embed Cedar as the authorization engine. Cedar maps directly to Pantheon's domain:
+## Canonical actions and resources
 
-```text
-principal
-  action
-resource
- context
-```
-
-and provides the desired semantics:
-
-- implicit deny when no permit applies;
-- explicit `forbid` overrides `permit`;
-- schema validation for authorization entities and actions;
-- deterministic authorization independent of the LLM.
-
-Pantheon users should not need to write Cedar for normal use. `AGENT.yaml`, project policy, user policy, and built-in profiles compile into Cedar policies. Native Cedar files may be supported later as an advanced escape hatch.
-
-## Canonical action model
-
-Provider-specific tool names are not canonical permissions. Pantheon defines semantic actions and adapters translate them.
-
-Initial action namespaces:
+Permissions describe semantic effects rather than concrete provider APIs. Initial action families include:
 
 ```text
 filesystem.read
 filesystem.write
 filesystem.delete
-
 shell.execute
 process.spawn
-
 network.connect
 network.listen
-
 git.read
 git.commit
 git.push
-git.merge
-
+git.integrate
 secret.use
 secret.read
-
 container.run
-
 mcp.call
-
 agent.delegate
-
 browser.navigate
-
 service.read
 service.mutate
+artifact.read
+artifact.seal
+task.spawn
+task.graph.propose
+task.submit_result
 ```
 
-Actions may become more specific over time, but should describe effects rather than provider APIs.
-
-## Resource namespace
-
-Resources use typed URI-like identifiers so the policy engine can reason about them consistently.
-
-Initial families:
+Resources use typed URI-like identifiers such as:
 
 ```text
-file://
 workspace://
+file://
 repo://
 net://
 secret://
@@ -144,430 +101,211 @@ process://
 container://
 mcp://
 agent://
-browser://
 service://
-device://
+artifact://
 ```
 
-Examples:
+Provider/backend-specific tool names are adapter-private translations.
+
+## Configuration and current authority
+
+Operator-controlled policy is compiled into immutable ConfigurationRevision components. Authorization decisions record at least:
 
 ```text
-workspace://src/auth/login.rs
-file:///Users/example/.ssh/config
-repo://Pantheon/origin/main
-net://github.com:443
-secret://github/pat
-mcp://github/create_issue
-agent://security
-container://kali
-service://production/postgres
+configRevision
+currentAuthzPolicyDigest
+frozen Run authorization ceiling digest (for Run principals)
+Task/Goal restrictions
+Grant refs actually consumed
 ```
 
-## Permission rules in `AGENT.yaml`
-
-Canonical rule effects are only:
+For a live Run, effective semantic authority is bounded by:
 
 ```text
-permit
-forbid
+built-in hard policy
+∩ frozen Run authorization ceiling
+∩ current active authorization policy
+∩ current Task/Goal restrictions
++ applicable narrowly scoped Grant where the action is approvable
 ```
 
-Approval is policy metadata, not an authorization effect.
+A policy relaxation never silently broadens an existing Run. A tightening may deny future operations immediately and may require Run termination if its Sandbox cannot physically enforce the new ceiling.
 
-Example:
+## Cedar policy engine
 
-```yaml
-permissions:
-  profile: developer
-  rules:
-    - action: filesystem.write
-      resource: workspace://**
-      effect: permit
+Pantheon embeds Cedar (or an equivalent deterministic PDP matching this contract) for `principal/action/resource/context` evaluation. User/project configuration compiles into validated policy; invalid policy never activates.
 
-    - action: git.push
-      resource: repo://**
-      approval: required
+Normal users need not author raw Cedar. Configuration composition/revision semantics are defined by `configuration-and-policy-revisions.md`.
 
-    - action: secret.read
-      resource: secret://**
-      effect: forbid
-```
+## Approval and Grants
 
-An `approval: required` rule means the base request is denied as approvable. If the user approves, Pantheon creates a scoped grant; the policy is then evaluated again.
+An approvable denial produces an operator-visible ApprovalRequest. Only an appropriate trusted operator authority may create the Grant.
 
-A rule must specify either `effect` or `approval`, not both.
-
-## Why `ask` is not an authorization result
-
-Interactive harnesses often expose `allow`, `ask`, and `deny`. Pantheon is a control plane rather than an interactive tool wrapper.
-
-The security state for a push should be:
+A Grant is scoped across as many dimensions as practical:
 
 ```text
-DENY
-reason: approval-required
-approvable: true
+principal / Agent / Attempt / Run / Task
+canonical action
+resource
+argument constraints
+expiry
+maximum uses
 ```
 
-not `ASK`.
+Persistent operator decisions become explicit user/project configuration rather than an immortal runtime Grant.
 
-If the human chooses **Allow once**, Pantheon creates something conceptually equivalent to:
+## Atomic Grant use-count redemption
 
-```yaml
-grant:
-  principal:
-    agent: coder
-    run: run-921
+A `uses: N` Grant is concurrency-sensitive authority and must be consumed transactionally.
 
-  capability:
-    action: git.push
-    resource: repo://Pantheon/origin/feature/auth
-
-  constraints:
-    task: task-483
-    uses: 1
-    expiresIn: 5m
-```
-
-Authorization is evaluated again and may then return PERMIT.
-
-## Capability grants
-
-A capability grant is an explicit delegation of authority from a trusted principal, normally the human user or a higher-level policy authority.
-
-Grants should be scoped by as many dimensions as practical:
-
-- principal / agent;
-- run;
-- task;
-- action;
-- resource;
-- expiration;
-- maximum uses;
-- optional argument constraints.
-
-Expected approval scopes:
+Correct redemption for a consequential operation:
 
 ```text
-allow once
-allow for this task
-allow for this run
-allow this action on this resource
-persist for this project
+BEGIN IMMEDIATE
+
+re-read:
+  current Attempt/Run/Task authority
+  current ConfigurationRevision/authz policy
+  Grant state + scope + expiry
+  remaining uses
+  exact normalized action/resource/args hash
+
+re-evaluate authorization under current policy
+
+CAS decrement/increment Grant use accounting exactly once
+create/transition exact broker-operation authority record
+append authorization/audit Event
+
+COMMIT
+
+external effect
 ```
 
-Persistent approvals become explicit project/user policy. Short-lived approvals remain runtime grants.
+Two concurrent requests cannot both consume the last remaining use. Retries of the same idempotent operation return/reconcile the already-created broker operation rather than consuming another use.
 
 ## Capability tickets
 
-After authorization, Pantheon issues a short-lived internal capability ticket to the execution broker.
-
-Example:
-
-```yaml
-ticket:
-  id: cap-938
-  run: run-124
-  task: task-83
-  agent: coder
-  action: filesystem.write
-  resource: workspace://src/auth.rs
-  argsHash: sha256:18aa...
-  uses: 1
-  expires: 2026-08-16T04:00:00+03:00
-```
-
-The ticket binds authorization to the exact operation. Authorization for one command or argument set cannot be reused for a materially different operation.
-
-Tickets are runtime state and never belong in `AGENT.yaml`.
-
-## Secrets
-
-Pantheon distinguishes using a credential from revealing it to a model.
+Pantheon may use an internal short-lived `CapabilityTicket` as an implementation reference binding:
 
 ```text
-secret.use   authorize a broker to use a credential on the agent's behalf
-secret.read  reveal credential material to the caller
+Attempt/Run/Task
+exact action/resource
+argsHash
+Grant/decision refs
+expiry/single-use state
 ```
 
-The preferred pattern is:
+But a ticket is **not durable bearer authority that bypasses current policy**.
+
+Before redemption/external effect, the broker transaction must revalidate current authority and atomically mark/consume the ticket. A ticket issued before security tightening can therefore be denied at redemption.
+
+No Agent may mint a ticket. Ticket IDs/bytes are never equivalent to Operator Control authority.
+
+## Secret authorization
+
+Keep distinct:
 
 ```text
-agent requests git.push
-       ↓
-secret.use permitted
-       ↓
-credential broker authenticates operation
-       ↓
-secret value never enters model context
+secret.use
+  authorize a Pantheon-owned broker to use credential material on behalf of the principal
+
+secret.read
+  disclose raw secret material to principal-controlled code/context
 ```
 
-`secret.read` should be forbidden by default and reserved for exceptional workflows.
+For Agent principals, v1 built-in hard policy denies `secret.read` non-approvably. Injecting a raw secret into an arbitrary Agent-controlled shell/environment/file is therefore not permitted as `secret.use`; it would be disclosure.
 
-## Policy hierarchy
+Credential-requiring semantic actions normally trigger `secret.use` as an internal sub-authorization. Secret material remains in the SecretProvider/Credential Broker boundary.
 
-Effective policy is resolved from multiple scopes:
+## Delegation and Task spawning
+
+Delegation is canonical authority, not an unmanaged backend sub-process feature. `task.spawn`/`task.graph.propose` are authorized through Agent Control and Graph Controller.
+
+Child Tasks inherit ceilings, never privileges. A child cannot broaden access by recursion, and it does not inherit credential material.
+
+## Sandbox and ambient authority
+
+Cedar/PDP controls semantic authority; it cannot intercept arbitrary syscalls made by shell code. Therefore Sandbox enforcement is mandatory for ambient actions.
+
+For every Run:
 
 ```text
-SYSTEM HARD POLICY
-        ↓
-USER POLICY
-        ↓
-PROJECT POLICY
-        ↓
-AGENT POLICY
-        ↓
-TASK RESTRICTIONS
-        ↓
-TEMPORARY GRANTS
+physical Sandbox ambient capability
+<= effective frozen ambient authority envelope
 ```
-
-Rules:
-
-1. any applicable hard forbid wins;
-2. lower scopes may restrict authority;
-3. lower scopes may not bypass enclosing forbids;
-4. temporary grants can satisfy approvable actions but not hard forbids;
-5. absence of an applicable permit results in DENY.
-
-## Hard policy vs normal policy
-
-Hard policy protects boundaries that agents must never be able to negotiate away.
 
 Examples:
 
-```text
-forbid secret.read secret://**
-forbid filesystem.write file://~/.ssh/**
-forbid filesystem.write file://~/.pantheon/policies/**
-```
+- workspace filesystem access -> Sandbox mounts;
+- process spawning -> Sandbox process boundary;
+- direct network -> Sandbox network controls;
+- Git push/integration -> brokered;
+- secret use -> brokered;
+- Artifact seal/Task spawn -> Agent Control + controllers.
 
-A hard-policy denial is non-approvable during the run.
-
-Normal policy may mark an action approval-gated. For example, pushing to a protected branch can be denied but approvable.
-
-## Authorization vs sandboxing
-
-Authorization is the decision layer:
+Hard security exclusions for untrusted Agent Sandboxes include:
 
 ```text
-What may this agent do?
+Pantheon Operator Control socket
+pantheon.db
+raw Artifact CAS
+active policy/configuration storage
+SecretProvider administration
+peer Task workspaces
+authoritative shared Git ref/common-dir authority
+host container/hypervisor runtime socket
+host credential agents
 ```
 
-Sandboxing is the containment layer:
-
-```text
-What can this process physically do if it misbehaves?
-```
-
-Both are required.
-
-```text
-Agent request
-    ↓
-Pantheon authorization
-    ↓
-Harness-native restrictions
-    ↓
-OS/container/VM sandbox
-    ↓
-Resource
-```
-
-Provider-native security settings are defense in depth, not Pantheon's source of truth.
+Same-user filesystem permissions alone are not a sufficient Agent/operator boundary.
 
 ## Sandbox classes
 
-Pantheon should begin with three conceptual classes.
-
-### `native`
-
-For low-risk or read-only work. Runs on the host with policy enforcement and minimal additional isolation.
-
-### `workspace`
-
-For routine development. Combines:
-
-- isolated Git worktree;
-- filesystem boundary;
-- network policy;
-- process restrictions;
-- harness-native sandbox where available.
-
-### `isolated`
-
-For CTFs, untrusted code, unknown binaries, dependency experiments, or other higher-risk work. Prefer a disposable Linux container or VM with:
-
-- non-root execution;
-- no host runtime socket;
-- restricted mounts;
-- seccomp / platform sandboxing;
-- explicit network policy;
-- ephemeral writable state where practical.
-
-Worktree isolation and sandbox isolation are separate and can be combined.
-
-## Broker privileged infrastructure
-
-Agents do not receive direct control of privileged infrastructure such as Docker sockets, SSH agents, cloud control planes, Kubernetes admin credentials, or production databases.
-
-Instead:
+Canonical security classes are defined by `sandbox-broker-and-isolation.md`:
 
 ```text
-agent request
-    ↓
-canonical action
-    ↓
-Pantheon authorization
-    ↓
-privileged broker
-    ↓
-external system
+TRUSTED_HOST
+CONTAINER
+HARDENED
 ```
 
-For example, `container.run` is handled by a Container Broker. The agent does not get `/var/run/docker.sock`.
+The older `native/workspace/isolated` terminology is not a security-class contract. Worktree/Workspace isolation is separate from Sandbox isolation.
 
-## Provider compilation
+## Brokered privileged infrastructure
 
-Pantheon compiles effective policy into the strongest native controls each harness supports.
+Agents never receive direct ambient control of privileged host systems such as container runtime sockets, host SSH agents, secret stores, cloud control planes or shared Git integration authority.
 
-```text
-Canonical Pantheon policy
-         ↓
-Provider compiler
-         ↓
-Claude/OpenCode/local restrictions
-         ↓
-Pantheon/OS sandbox
-```
+They request semantic operations; Pantheon authorizes and a privileged broker performs the exact effect.
 
-Compilation rules:
+## Backend-native enforcement
 
-```text
-Can provider enforce policy directly?
-    yes → use native enforcement
-    no  → can Pantheon sandbox/broker compensate?
-              yes → launch constrained
-              no  → fail closed
-```
+Execution adapters may compile Pantheon restrictions into native harness controls as defense in depth. Adapter-native controls may tighten but never broaden Pantheon authority.
 
-Provider adapters may tighten policy but may never broaden it.
+If a required policy cannot be enforced by native controls **and** Sandbox/Broker boundaries cannot compensate, the execution configuration is incompatible and fails closed.
 
-## Delegation authorization
+## Audit
 
-Delegation is itself a privileged action:
+Audit/Event records identify, without sensitive material:
 
-```text
-agent.delegate
-resource: agent://researcher
-```
+- principal/Attempt/Run/Task where relevant;
+- normalized action/resource/argument hash;
+- decision and reason;
+- exact ConfigurationRevision/authz digest;
+- Grant/ticket/broker-operation refs actually involved;
+- redemption/use-count transition;
+- external outcome/reconciliation state.
 
-Before creating a child task Pantheon checks:
+Secrets/tokens/raw bearer material never enter Events/logs.
 
-- delegation allowlist;
-- authorization policy;
-- depth;
-- concurrency;
-- task/run budget;
-- workspace/sandbox requirements;
-- executor availability.
+## Core invariants
 
-The parent model cannot directly create an unmanaged child process that escapes Pantheon accounting.
-
-## Audit model
-
-Every authorization lifecycle transition is recorded as a structured event.
-
-Examples:
-
-```text
-authorization.requested
-authorization.denied
-approval.requested
-grant.created
-authorization.permitted
-capability.issued
-action.started
-action.completed
-action.failed
-grant.expired
-```
-
-An audit record should identify at least:
-
-- run and task;
-- principal/agent;
-- canonical action;
-- canonical resource;
-- decision;
-- reason;
-- policy identifiers/hash;
-- grant/ticket identifiers where applicable;
-- timestamps;
-- outcome.
-
-This enables a command such as:
-
-```text
-pantheon audit task-123
-```
-
-and provides ground truth for debugging and the Agent Genome learning pipeline.
-
-## Risk engine — deferred
-
-Authorization and risk are not the same thing. A permitted delete of `workspace://node_modules/**` and a permitted delete of `workspace://src/**` have different operational risk.
-
-A future Risk Engine may combine:
-
-- authorization;
-- reversibility;
-- task intent;
-- affected resource class;
-- blast radius;
-- environment criticality.
-
-Risk scoring is deliberately deferred from v1 so the initial security core remains deterministic.
-
-## v1 implementation surface
-
-The policy decision interface should remain small:
-
-```rust
-authorize(
-    principal: Principal,
-    action: Action,
-    resource: Resource,
-    context: Context,
-) -> Decision
-
-enum Decision {
-    Permit,
-    Deny(DenyReason),
-}
-```
-
-Core components:
-
-```text
-Action Normalizer
-Policy Decision Point (Cedar)
-Approval Broker
-Capability Grant Store
-Capability Ticket Issuer
-Execution Broker
-Sandbox Adapter
-Append-only Audit Log
-```
-
-## Non-negotiable invariants
-
-1. Pantheon, not the model or harness, is the authorization authority.
-2. Authorization is binary: PERMIT or DENY.
-3. Default deny and explicit forbid precedence are mandatory.
-4. Human approvals become narrowly scoped grants.
-5. Credentials should be used through brokers rather than revealed whenever possible.
-6. Provider permissions and OS sandboxing are defense-in-depth layers.
-7. Privileged host control planes are brokered, never handed directly to agents.
-8. Enforcement failure causes task startup/execution failure rather than policy weakening.
-9. Every privileged operation is auditable.
+1. Pantheon, not model/backend, is authorization authority.
+2. Authorization is `PERMIT|DENY`; approval creates a Grant then re-evaluates.
+3. Hard forbid/default deny are mandatory.
+4. Existing Runs never gain broader authority from later policy relaxation.
+5. Grants/tickets are revalidated against current authority at redemption.
+6. Grant `uses` accounting and exact operation creation are one transactional CAS boundary.
+7. Agent `secret.read` is hard-denied in v1; `secret.use` is brokered use only.
+8. Sandbox ambient capability is no broader than semantic authority and excludes Pantheon/peer/host privileged state.
+9. Provider-native security is defense in depth, never the source of truth.
+10. Failure to enforce required policy fails closed.
