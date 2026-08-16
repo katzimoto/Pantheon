@@ -2,100 +2,36 @@
 
 ## Status
 
-Draft design — Pantheon goal reconciliation subsystem specification.
+Canonical Pantheon Goal revision/reconciliation specification.
 
 ## Purpose
 
-Changing a Goal changes desired state. It does not directly mutate running work.
+A Goal revision changes desired user outcome state; it does not mutate running Tasks directly.
 
-Pantheon must preserve historical truth while reconciling Tasks, TaskGraph state, evidence, authorization, and active Runs toward the latest Goal revision.
+> **Goal revision is desired state. Reconciliation decides which existing work remains valid, which requires revalidation, which must be superseded through normal finalization, and what new work must be planned.**
 
-## Foundational principles
+See also:
 
-1. **Goal revisions are append-only immutable revisions behind a stable Goal ID.**
-2. **Goal revision is a controller command, not direct mutation.**
-3. **Revision changes use optimistic concurrency and idempotency.**
-4. **An impactful Goal revision establishes a revision fence so stale Ready work is not newly dispatched.**
-5. **Harder constraints take effect immediately for future authorization decisions.**
-6. **Existing work is classified and reconciled rather than globally discarded.**
-7. **Terminal Task history never changes.** A Succeeded Task remains Succeeded even if its contribution becomes obsolete for a later Goal revision.
-8. **Task evidence remains valid for the immutable Task; Goal-level evidence is revision-bound.**
-9. **Replanning produces GraphPatch proposals rather than rewriting historical Task specs.**
-10. **Desired reconciliation state is persisted before external Runs/processes are converged toward it.**
+- `goal-resource.md`
+- `goal-lifecycle-and-completion-controller.md`
+- `task-lifecycle.md`
+- `planner-and-task-decomposition.md`
 
-## Revision storage
+## Immutable revisions
 
-Do not overwrite the prior Goal spec in place.
+Goal ID is stable; each semantic change creates a new immutable GoalRevision. Revision creation records provenance and advances `goals.current_revision` through optimistic CAS.
 
-```text
-Goal
-  id: goal_123
-  currentRevision: 8
-
-GoalRevision
-  r1
-  r2
-  ...
-  r8
-```
-
-Each GoalRevision is immutable and links to its predecessor.
-
-Conceptual command:
-
-```yaml
-command: goal.revise
-commandId: cmd_01K...
-goal: goal_123
-expectedRevision: 7
-changes:
-  constraints:
-    add:
-      - id: local-only
-        statement: >
-          Project data must not leave the local machine.
-source:
-  ref: message://...
-```
-
-Validation occurs before revision materialization. If `expectedRevision` does not match the current revision, the update is rejected and must be reconsidered against the newer Goal.
+Terminal Goals do not reopen. Normal semantic revisions are allowed only while Goal lifecycle permits them; once Goal Finalizing/terminal, changed requirements become a new Goal.
 
 ## Revision fence
 
-After an impactful revision is committed, Pantheon records that desired Goal state is newer than reconciled execution state.
+Planner proposals, Graph patches, Scheduler decisions, completion candidates and reconciliation work bind the Goal revision they observed.
 
-```yaml
-status:
-  currentRevision: 8
-  observedRevision: 7
-  conditions:
-    - type: Reconciled
-      status: "False"
-      reason: GoalRevisionChanged
-```
+Before authoritative commit, Pantheon rechecks that the expected current Goal revision is still valid. Stale work is re-evaluated rather than blindly applied.
 
-Until reconciliation catches up, stale Ready Tasks from older revisions are not newly dispatched when their continued validity has not yet been established.
+## Reconciliation classifications
 
-This fence does not imply indiscriminate cancellation of already-running work.
-
-## Immediate security effect
-
-A Goal revision that tightens security constraints affects future authorization immediately.
-
-Example:
-
-```text
-Goal r7: network access allowed
-Goal r8: local-only
-```
-
-The authorization controller must prevent conflicting future actions, revoke conflicting temporary grants/capability tickets where applicable, and mark affected Runs for reconciliation.
-
-An old Run Manifest remains immutable evidence of how a Run started, but it does not freeze authority forever. Every privileged action remains subject to current enclosing policy at the Pantheon execution boundary.
-
-## Impact classification
-
-Existing work is classified against the new Goal revision:
+Each existing Task/work item is classified relative to the new revision as one of:
 
 ```text
 STILL_VALID
@@ -104,303 +40,130 @@ SUPERSEDE
 NEW_WORK
 ```
 
+Classification is controller/planner-owned structured state, not a model's direct lifecycle mutation.
+
 ### STILL_VALID
 
-The Task remains useful exactly as defined. It may continue or remain schedulable.
+The Task contract/result remains compatible with the revised Goal. Running/accepted work continues normally.
 
 ### REVALIDATE
 
-The Task or its output may remain useful, but its contribution to the new Goal must be reassessed.
+Existing immutable work may remain useful but one or more compatibility/acceptance assumptions need re-evaluation. Revalidation never rewrites the TaskSpec.
 
 ### SUPERSEDE
 
-The non-terminal Task is no longer the work Pantheon wants. Its immutable spec is preserved and replacement work is created.
+The old Task is no longer authoritative for the revised Goal. The Task is not deleted or rewritten; it moves through normal Task finalization.
 
 ### NEW_WORK
 
-The new Goal revision requires work that is not yet represented in the TaskGraph.
+Additional immutable Tasks/edges/bindings are materialized through a validated GraphPatch.
 
-## Phase-specific behavior
+## Critical supersession rule
 
-### Pending / Ready
+Goal reconciliation **must never terminalize an Active/Evaluating Task as `Superseded` while its responsible Run is nonterminal.**
 
-- STILL_VALID: remain Pending/Ready.
-- SUPERSEDE: transition through Finalizing to Superseded.
-
-### Active
-
-- STILL_VALID: continue.
-- SUPERSEDE: request controlled Run cancellation, then terminalize the Task as Superseded and materialize replacement work.
-
-### Waiting
-
-Re-evaluate wait/join relationships. Obsolete children or dependencies must not leave a parent permanently waiting on irrelevant work.
-
-### Evaluating
-
-If the Task contract is still relevant, evaluation may finish. If the non-terminal Task is obsolete, it may be superseded while its produced Artifacts remain durable history.
-
-### Terminal Tasks
-
-Terminal Task state never changes.
-
-A Task that previously reached `Succeeded` remains historically successful. What changes is its compatibility/contribution to the current Goal revision.
-
-## Goal compatibility condition
-
-Task provenance records the Goal revision under which the Task was created:
-
-```yaml
-provenance:
-  createdUnderGoalRevision: 4
-```
-
-Current status may separately record whether that immutable Task remains compatible with the latest Goal:
-
-```yaml
-conditions:
-  - type: GoalCompatible
-    status: "True"
-    observedGoalRevision: 9
-    reason: ReconciledStillValid
-```
-
-This preserves both historical origin and current relevance.
-
-## Evidence semantics
-
-Task evidence is bound to the immutable Task/candidate and remains valid as evidence for that Task.
-
-Goal-level evidence is bound to a specific Goal revision and completion snapshot. A Goal revision may therefore make previous Goal evidence stale without invalidating Task evidence.
+Correct path:
 
 ```text
-Task Evidence
-artifact ABC satisfies immutable Task A
-→ remains historically valid
-
-Goal Evidence
-Goal r7 satisfied by ABC + XYZ
-→ stale after Goal r8 when relevant requirements changed
+Goal revision commits
+  ↓
+reconciler classifies Task SUPERSEDE
+  ↓
+Task -> Finalizing / terminalTarget=Superseded
+  ↓
+responsible Run desiredExecution=stopped
+Run/Attempt reconciled toward safe terminal state
+Reservations/Holds/finalizers settled as required
+  ↓
+Task -> Superseded
 ```
 
-## Deterministic impact discovery
+If Run/Attempt termination is UNKNOWN, Task remains Finalizing and the unresolved obligation stays fenced. No terminal Task is manufactured around a live/unknown Run.
 
-Changes to inputs, deliverables, constraints, or bindings can be used to discover structurally impacted Tasks through the TaskGraph/dataflow graph before semantic reasoning is invoked.
-
-For example:
+This preserves:
 
 ```text
-changed Goal input
-    ↓
-Task A
-    ↓
-Task B
-    ↓
-Task C
+Task terminal => no nonterminal responsible Run
 ```
 
-The transitive consumers are candidates for REVALIDATE/SUPERSEDE. An LLM may help with semantic impact, but it is not needed to discover graph dependency structure.
+and avoids false RecoveryFindings/quarantine caused by inconsistent lifecycle state.
 
-## Preferences versus constraints
+## Security tightening
 
-Preference changes normally affect future routing/scheduling decisions without cancelling useful existing Runs.
+Security authority is special: a new active configuration/hard-policy tightening can immediately deny future brokered operations independent of Goal semantic reconciliation. If the current Sandbox cannot physically enforce the new ceiling, Run is stopped/finalized.
 
-Hard constraint changes may immediately invalidate future actions and require active Run reconciliation.
+Goal reconciliation does not weaken current security merely because an older Goal revision allowed broader behavior.
 
-This distinction is a primary reason Goal preferences and Goal constraints are separate concepts.
+## Preferences versus constraints/acceptance
 
-## Acceptance changes
+Preference-only Goal revision usually does not disrupt existing valid work. It affects future planning/routing decisions.
 
-Adding Goal acceptance requirements does not automatically invalidate implementation Tasks.
+Constraint or acceptance changes may require:
 
-Example:
+- revalidation of existing Tasks/results;
+- supersession/new Tasks;
+- invalidation of a current GoalCompletionCandidate;
+- new Goal-level evaluation work.
+
+The reconciler does not infer that every textual Goal change invalidates all Tasks.
+
+## GoalCompletionCandidate invalidation
+
+A GoalCompletionCandidate freezes exact Goal/Graph revision and deliverable bindings. If a newer Goal revision commits while Goal is Evaluating:
+
+- old completion candidate remains immutable history;
+- its pending evaluation may be stopped when safe;
+- its Evidence cannot satisfy the new revision;
+- Goal returns to Active reconciliation according to the Goal lifecycle contract.
+
+## Task immutability
+
+A running/completed TaskSpec is never edited to match the new Goal. If contract change is necessary, Planner materializes a replacement/superseding Task with provenance linking it to the old work.
+
+Outputs from old Tasks may still be reused/bound where the new Task/Goal contract explicitly accepts them.
+
+## Planner responsibility
+
+Reconciler records deterministic impact state and asks Planner for a bounded GraphPatch only where structural/semantic decomposition changes are required.
+
+Planner may not:
+
+- mutate old Task specs/status directly;
+- assign concrete backend/model;
+- bypass supersession finalization;
+- create a scheduled Run directly.
+
+## Reconciliation durability
+
+Goal revision transaction creates the immutable revision/current pointer plus a durable reconciliation obligation/Event. Reconciliation is restart-safe and revision-bound.
+
+Conceptually:
 
 ```text
-r7 acceptance: tests pass
-r8 acceptance: tests pass + security review
+GoalRevision R+1 committed
+  ↓
+GoalReconciliation(goal,R+1,state=PENDING)
+  ↓
+impact classification / GraphPatch
+  ↓
+Task finalization/new work
+  ↓
+reconciliation COMPLETE
 ```
 
-Existing implementation work may remain valid while the planner adds new validation/review Tasks and new Goal evidence is required.
+Scheduler/Goal completion readiness requires the current Goal revision to be reconciled according to the relevant fence rules.
 
-## Scope expansion and reduction
+## Cancellation/terminal Goal interaction
 
-### Expansion
+If Goal cancellation/finalization wins while revision reconciliation is in progress, enclosing Goal terminal authority fences new planning/materialization. Existing reconciliation work becomes stale and Tasks follow Goal cancellation/finalization semantics.
 
-Preserve accepted/useful existing work and add only newly required work.
+## Core invariants
 
-### Reduction
-
-- Pending/Ready obsolete Tasks: supersede.
-- Active obsolete Tasks: cancel Run and supersede Task.
-- Succeeded obsolete Tasks: remain Succeeded historically; mark their contribution obsolete for the new Goal.
-- Shared infrastructure Tasks: preserve when still useful.
-
-## Durable reconciliation record
-
-Pantheon should persist reconciliation decisions for auditability, even if this is an internal controller record rather than a user-authored resource in v1.
-
-Conceptual shape:
-
-```yaml
-GoalReconciliation:
-  id: reconcile_01K...
-  goal:
-    id: goal_123
-    fromRevision: 7
-    toRevision: 8
-  basedOn:
-    graphRevision: 42
-  taskImpact:
-    task_100:
-      action: keep
-    task_101:
-      action: supersede
-      reason: violates-local-only-constraint
-    task_102:
-      action: revalidate
-  graphPatch:
-    ref: patch_728
-```
-
-This makes future inspection possible:
-
-```text
-r7 → r8
-Added local-only constraint
-7 Tasks kept
-2 Tasks superseded
-1 Run cancelled
-3 Tasks added
-```
-
-## Controller boundary
-
-Reconciliation flow:
-
-```text
-Goal revision
-    ↓
-Deterministic impact discovery
-    ↓
-Semantic planner/reviewer where needed
-    ↓
-GraphPatch proposal
-    ↓
-Validator
-    ↓
-Controller commit
-```
-
-The LLM planner may propose the adaptation. It cannot directly cancel Runs, supersede Tasks, or mutate graph state.
-
-## Persist desired state before external convergence
-
-Database/graph changes and desired Task terminalization should be committed first.
-
-External actions such as terminating Claude Code, OpenCode, containers, or remote sessions are then reconciled toward that desired state.
-
-This allows restart-safe convergence even when external systems cannot participate in a single transaction with SQLite.
-
-## Rollover instead of stop-the-world
-
-Goal reconciliation should reuse valid work and replace only obsolete work.
-
-```text
-old plan
- ├─ useful Task A ─────────────► keep
- ├─ obsolete Task B ──X
- └─ running Task C ─────X
-
-new Goal
- ├─ reuse A
- ├─ replace B with D
- └─ replace C with E
-```
-
-Do not cancel and recreate an entire Goal/graph unless the Goal itself is fundamentally replaced.
-
-## Crash recovery
-
-`currentRevision` and `observedRevision` make reconciliation restart-safe.
-
-```text
-currentGoalRevision = 8
-observedGoalRevision = 7
-```
-
-means reconciliation is incomplete. On restart, Pantheon resumes/recomputes reconciliation until:
-
-```text
-observedGoalRevision = 8
-Reconciled = True
-```
-
-No in-memory-only reconciliation state is authoritative.
-
-## End-to-end flow
-
-```text
-USER
- │
- │ goal.revise
- ▼
-Goal r7 → r8
- │
- ▼
-Revision Fence
- │
- ├─ stale dispatch paused
- └─ tightened constraints immediately enforced
- │
- ▼
-Impact Analyzer
- │
- ├─ Goal diff
- ├─ dataflow/dependencies
- ├─ Task provenance
- ├─ active Runs
- └─ evidence
- │
- ▼
-CLASSIFY
- │
- ├─ STILL_VALID
- ├─ REVALIDATE
- ├─ SUPERSEDE
- └─ NEW_WORK
- │
- ▼
-Planner (if semantic adaptation required)
- │
- ▼
-GraphPatch Proposal
- │
- ▼
-Validator
- │
- ▼
-Controller Commit
- │
- ├─ TaskGraph rN → rN+1
- └─ desired Run/Task changes persisted
- │
- ▼
-External reconciliation
- │
- ▼
-Goal observedRevision = currentRevision
-Reconciled = True
-```
-
-## Key decisions
-
-1. Goal revisions are immutable append-only revisions behind a stable Goal ID.
-2. `goal.revise` uses idempotency and expected-revision concurrency control.
-3. Impactful revisions establish a dispatch fence until new desired state is reconciled.
-4. Tightened hard constraints affect authorization immediately.
-5. Reconciliation reuses valid work rather than rebuilding the graph from scratch.
-6. Non-terminal obsolete Tasks may be Superseded; terminal Task history never changes.
-7. Succeeded Tasks may become obsolete contributors without ceasing to be Succeeded.
-8. Task evidence remains Task-valid; Goal evidence is revision-bound.
-9. Replanning uses GraphPatch proposals and preserves immutable history.
-10. Persisted desired state drives crash-safe reconciliation of external executors.
+1. Goal changes create immutable revisions; history is never rewritten.
+2. Goal revision is desired state, not direct running-state mutation.
+3. Planner/Graph/Scheduler/Completion actions are fenced by observed Goal revision.
+4. Active/Evaluating Tasks classified SUPERSEDE pass through `Finalizing/terminalTarget=Superseded`; no direct terminalization around live Runs.
+5. Terminal Tasks remain terminal.
+6. Preference changes are generally non-disruptive; constraints/acceptance may cause revalidation/supersession/new work.
+7. GoalCompletionCandidate/Evidence are revision-bound and stale after a semantic Goal revision.
+8. Security tightening follows current Configuration/authorization authority and is not delayed by semantic Goal reconciliation.
