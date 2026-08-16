@@ -2,541 +2,195 @@
 
 ## Status
 
-Draft design — Pantheon scheduler S2 specification.
+Canonical Pantheon reservable-resource admission specification.
 
 ## Purpose
 
-Pantheon admission is a generic resource-fit engine. It operates on normalized resource claims emitted by the Execution Fabric and Pantheon infrastructure/policy controllers. It does not contain provider-, harness-, runtime-, or model-specific logic.
+The Resource Ledger answers whether a candidate workload can reserve a whole compatible set of finite capacity **now** without embedding provider/model semantics.
 
-The core rule is:
+> **Resource capacity is represented by generic namespaced resource keys and integer quantities. Reservations are authority to consume capacity; observed utilization is not admission authority.**
 
-> Admission receives a normalized resource claim set and answers whether the entire set fits the current resource ledger. It does not know why the resources are required.
-
-## Relationship to the Execution Fabric
+## Separate ledgers
 
 ```text
-ExecutionRequest
-      ↓
-ExecutorBackend
-      ↓
-ExecutionOffer
-      │
-      ├─ backend-generated resource claims
-      │
-      ▼
-Claim augmentation
-      ├─ workspace claims
-      ├─ sandbox claims
-      └─ policy/concurrency claims
-              │
-              ▼
-     Effective ResourceClaimSet
-              │
-              ▼
-        Admission Engine
-              │
-              ▼
-      AdmissionAssessment
-              │
-              ▼
-   Atomic reservation (S5)
+RESOURCE LEDGER    reversible capacity/concurrency
+BUDGET LEDGER      cumulative allowance + Holds
+USAGE LEDGER       factual consumption/Charges
+RATE-LIMIT STATE   temporary replenishing upstream availability
 ```
 
-Admission evaluates an `ExecutionOffer`, not the semantic Task directly. Backend-specific resource estimation and implementation knowledge remain behind the Execution Fabric boundary.
+They may jointly affect scheduling but are never one generic quota object.
 
-## Resource keys
+## Resource model
 
-A `ResourceKey` is opaque to Admission.
-
-Examples:
+A resource descriptor contains at least:
 
 ```text
-resource://host/default/cpu
-resource://host/default/memory
-resource://workspace/default/worktree
-resource://sandbox/isolated/instance
-resource://backend/executor-17/concurrency
-resource://limit/global/runs
-resource://limit/goal/goal-123/runs
-```
-
-Pantheon core must not branch on the semantic identity of backend-owned resource keys.
-
-## Resource descriptors
-
-Resource meaning and accounting properties are declared by a resource descriptor rather than hard-coded into Admission.
-
-Conceptual example:
-
-```yaml
-resource:
-  key: resource://workspace/default/worktree
-  owner:
-    ref: controller://workspace
-  quantity:
-    unit: count
-    granularity: 1
-  allocation:
-    mode: discrete
-  capacity: 8
-  allocatable: 8
-  reserved: 5
-  health: available
-  revision: 42
-```
-
-A divisible resource might look like:
-
-```yaml
-resource:
-  key: resource://host/default/memory
-  owner:
-    ref: controller://host
-  quantity:
-    unit: bytes
-    granularity: 1Mi
-  allocation:
-    mode: divisible
-  capacity: 48Gi
-  allocatable: 36Gi
-  reserved: 18Gi
-  health: available
-  revision: 103
-```
-
-These serializations are conceptual and are not yet frozen as public schemas.
-
-## Allocation modes
-
-v1 supports only two allocation modes:
-
-```text
-DIVISIBLE
-DISCRETE
-```
-
-### Divisible
-
-The resource is allocated in quantities subject to a declared granularity.
-
-Typical examples are host memory, CPU accounting capacity, or temporary storage.
-
-### Discrete
-
-The resource is allocated in integer units.
-
-Typical examples are worktree capacity, isolated-environment capacity, backend concurrency, and synthetic concurrency limits.
-
-An exclusive resource is represented as a discrete resource with `allocatable = 1` and a claim of `1`; no separate exclusive-resource primitive is needed.
-
-## Capacity and allocatable
-
-Admission uses `allocatable`, never raw physical/configured `capacity`.
-
-```text
+ResourceKey
+allocationMode = DIVISIBLE | DISCRETE
+unit
 capacity
-  - owner/system reserve
-  = allocatable
-
 allocatable
-  - active reservations
-  = available
+health
+revision
+observedAt
 ```
 
-Resource owners decide how much of their underlying capacity is exposed to Pantheon.
+Core treats ResourceKey as namespaced/opaque. Examples may include host CPU/memory, Workspace disk/slot, Sandbox slot, backend concurrency and synthetic global/Goal Run concurrency.
 
-## Resource publishers
+No scheduler branch is keyed to a concrete provider/model/harness name.
 
-Admission does not probe external systems itself. Resource-owning components publish normalized descriptors into the Resource Ledger.
+## Effective desired claim set
 
-Examples:
+For one Agent+ExecutionOffer candidate Pantheon computes the desired effective claims from all layers:
 
 ```text
-Host controller
-  → host resources
-
-Workspace controller
-  → workspace resources
-
-Sandbox controller
-  → isolation resources
-
-ExecutorBackend
-  → backend-owned resources
-
-Scheduler/policy controller
-  → synthetic concurrency-limit resources
+Task/Agent requirements
++ ExecutionOffer factual resource needs
++ Workspace requirements
++ SandboxPlan requirements
++ scheduler/policy synthetic limits
 ```
 
-The Resource Ledger is the normalized control-plane view of allocatable capacity.
+This is the **desired ownership state**, not automatically the set of new Reservations to create.
 
-## Resource claims
+## Incremental claim set
 
-A normalized claim is intentionally small:
+Before admission, Pantheon subtracts compatible capacity already durably owned by the same legitimate holder scope.
 
-```yaml
-claim:
-  resource: resource://host/default/memory
-  quantity: 12Gi
-```
-
-The resource-producing component is responsible for translating implementation knowledge and uncertainty into a safe concrete quantity before the claim reaches Admission.
-
-Admission does not apply provider/model-specific estimation formulas or safety factors.
-
-## Complete resource footprint
-
-An `ExecutionOffer` must expose its complete resource footprint that is relevant to Pantheon allocation.
-
-If an executor consumes both backend-owned capacity and shared host capacity, it claims both:
-
-```yaml
-resourceClaims:
-  - resource: resource://backend/executor-17/concurrency
-    quantity: 1
-  - resource: resource://host/default/memory
-    quantity: 12Gi
-```
-
-Pantheon core must never infer hidden backend resource requirements from backend identity.
-
-## Claim augmentation
-
-Backend claims are only part of the effective allocation requirement.
-
-Pantheon controllers may add generic claims for infrastructure and policy requirements:
+For a Task with an existing Task-scoped Workspace reservation:
 
 ```text
-backend claims
-+ workspace claims
-+ sandbox claims
-+ scheduler/policy claims
-= Effective ResourceClaimSet
+incremental claims
+  = desired effective claims
+    - compatible Task-scoped reservations already held by this Task
 ```
 
-Example:
+If desired quantity increases, request only the positive delta or perform an explicit resize. If identity/semantics are incompatible, Admission cannot silently treat old capacity as satisfying new requirements.
 
-```yaml
-claims:
-  - resource: resource://backend/executor-17/concurrency
-    quantity: 1
-  - resource: resource://workspace/default/worktree
-    quantity: 1
-  - resource: resource://limit/global/runs
-    quantity: 1
-  - resource: resource://limit/goal/goal-123/runs
-    quantity: 1
-```
+This prevents requeue/new Runs from reserving another Workspace slot each time.
 
-This preserves boundaries: a backend does not need to know Goal concurrency policy, and the scheduler does not need to understand backend internals.
+Run-scoped claims are normally fresh for the new Run because backend/Sandbox/concurrency strategy may differ.
 
-## Concurrency limits as synthetic resources
+## Holder scopes
 
-Concurrency limits reuse the generic resource ledger and reservation mechanism.
-
-Examples:
+ResourceReservations may be owned by:
 
 ```text
-resource://limit/global/runs
-  allocatable = 8
-
-resource://limit/goal/goal-123/runs
-  allocatable = 3
-
-resource://limit/agent/researcher/runs
-  allocatable = 2
+Task
+Run
+control-operation
 ```
 
-Each matching Run claims `1` unit.
+Task scope is for durable capacity deliberately surviving Runs. Run scope is execution-strategy capacity. Evaluation and similar bounded control work use control-operation scope.
 
-These remain semantically policy limits, not physical resources; only the accounting/reservation machinery is shared.
+## Whole-set admission
 
-## No overcommit in v1
+Admission is all-or-nothing for the incremental claim set. Pantheon never commits a partially reserved Run intent that assumes missing capacity will appear later.
 
-Pantheon v1 does not model strict/soft/burstable/overcommit admission classes.
-
-For every claimed resource:
-
-```text
-reserved + requested <= allocatable
-```
-
-must hold before a candidate can be admitted.
-
-Runtime enforcement and actual usage are separate from admission accounting.
-
-## Admission is pure
-
-Admission does not mutate the Resource Ledger and does not reserve resources.
-
-Conceptually:
-
-```text
-assess(ResourceSnapshot, ResourceClaimSet)
-  → AdmissionAssessment
-```
-
-This makes admission deterministic and easy to test.
-
-The later reservation subsystem is the authority that atomically commits capacity.
-
-## Resource snapshot
-
-Admission operates against an immutable snapshot:
-
-```yaml
-snapshot:
-  revision: 731
-  resources:
-    resource://host/default/memory:
-      allocatable: 36Gi
-      reserved: 18Gi
-    resource://workspace/default/worktree:
-      allocatable: 8
-      reserved: 5
-    resource://limit/global/runs:
-      allocatable: 8
-      reserved: 6
-```
-
-The assessment records the snapshot revision it observed.
-
-## All-or-nothing assessment
-
-All required claims must fit together.
-
-If one claim fails, the ExecutionOffer is not admissible. Admission never performs partial reservations.
-
-## Admission outcomes
-
-v1 has three semantic outcomes:
+Pure assessment result:
 
 ```text
 ADMITTABLE
-TEMPORARILY_UNAVAILABLE
+TEMP_UNAVAILABLE
 UNSATISFIABLE
 ```
 
 ### ADMITTABLE
 
-Every claim fits the current snapshot.
+Current descriptor revisions/allocatable capacity can satisfy all incremental claims.
 
-### TEMPORARILY_UNAVAILABLE
+### TEMP_UNAVAILABLE
 
-The resource exists and its total allocatable capacity can satisfy the claim, but current reservations/availability prevent admission now.
+Claims are semantically satisfiable but currently occupied/unhealthy/freshness-fenced. Task stays Ready; scheduler waits/retries when state changes.
 
 ### UNSATISFIABLE
 
-The claim cannot fit even if competing reservations disappear, or a required resource is structurally unavailable for this offer.
+No allowed current configuration/resource shape can satisfy the hard claim; this feeds structured scheduling/recovery rather than busy retry.
 
-The Router/scheduling policy may immediately discard an unsatisfiable offer and consider another one.
+## Capacity arithmetic
 
-## Structured failure details
-
-Admission results include resource-level reasons rather than only a boolean.
-
-Example:
-
-```yaml
-result: temporarily-unavailable
-failures:
-  - resource: resource://workspace/default/worktree
-    required: 1
-    available: 0
-    allocatable: 8
-    reason: capacity-reserved
-```
-
-or:
-
-```yaml
-result: unsatisfiable
-failures:
-  - resource: resource://sandbox/isolated/instance
-    required: 2
-    allocatable: 1
-    reason: exceeds-allocatable-capacity
-```
-
-These details drive routing feedback, scheduler wakeups, diagnostics, and observability.
-
-## Assessment versus reservation
-
-An AdmissionAssessment is advisory and snapshot-bound.
-
-A candidate can fit at snapshot revision 731 and lose the race before reservation.
-
-The reservation subsystem therefore rechecks current ledger state and atomically commits all claims or none:
+For each resource key, admission considers non-released Reservations, not utilization estimates:
 
 ```text
-AdmissionAssessment: ADMITTABLE
-        ↓
-reservation transaction
-        ├─ verify current state/revisions
-        ├─ verify all claims still fit
-        ├─ reserve all claims
-        └─ commit
+reserved + incremental_requested <= allocatable
 ```
 
-On conflict, the candidate is reassessed.
+subject to allocation mode/discrete identity rules.
 
-## Reservation versus runtime enforcement
+V1 has no overcommit. If later overcommit exists it must be an explicit separate policy, not accidental arithmetic.
 
-A reservation means Pantheon will not allocate the same accounted capacity to another Run.
+## Capacity publishers
 
-It does not inherently guarantee that the OS/runtime prevents a Run from exceeding its reservation.
+Resource facts may be published by controller-owned observers such as:
 
 ```text
-Resource Ledger / Reservations
-  → allocation correctness
-
-Sandbox / ExecutorBackend
-  → runtime enforcement
+host
+Workspace Controller
+Sandbox Controller
+ExecutionBackend registry/adapter
+scheduler synthetic policy
 ```
 
-The two are intentionally separate, analogous to Pantheon's authorization-versus-sandbox separation.
+Publishers report factual capacity/health/revision. A backend cannot grant itself authorization or a favorable routing score by publishing "quality" as a resource.
 
-## Resource health
+## Capacity shrink
 
-Resource health is separate from quantity/capacity.
+If allocatable shrinks below existing Reservations, current Reservations remain charged. New admission is blocked; Pantheon does not revoke live capacity merely to restore arithmetic.
 
-v1 health states:
+Recovery/operator action may later drain/stop work explicitly.
+
+## Reservation transaction boundary
+
+Assessment itself is side-effect-free. T3 Scheduler commit re-reads current resource revisions and existing Task reservations, then atomically creates/activates only the required incremental Reservations together with Binding/Run/Holds/Task Active.
+
+Race between two candidate admissions is therefore resolved by serialized authoritative write/revalidation, not optimistic in-memory accounting.
+
+## Evaluation/control operations
+
+EvaluationOperation uses the same Ledger rather than creating unaccounted verification work. Its controller requests control-operation claims and commits Reservations before external verification Sandbox/process provisioning.
+
+It does not use Agent Resolution/Task fairness merely because it uses the same capacity ledger.
+
+## Sandbox resources
+
+SandboxPlan contributes factual resource claims such as:
 
 ```text
-Available
-Degraded
-Unavailable
-Unknown
+sandbox.container.slot
+sandbox.vm.slot
+sandbox.disk.bytes
+memory.bytes
+cpu.*
 ```
 
-`Unavailable` and `Unknown` fail closed for new reservations.
+The Sandbox cannot be provisioned outside accounted capacity simply because it is "preparation" rather than the executor itself.
 
-A degraded resource may remain usable according to owner policy, but the health state must be visible in the ledger and assessment.
+## UNKNOWN
 
-## Capacity shrinkage
+Reservations protecting UNKNOWN external obligations remain consumed/UNCERTAIN. Lease expiry, timeout or daemon restart does not make capacity free.
 
-Allocatable capacity may decrease after Runs are already reserved.
+Exceptional operator force-resolution may explicitly tombstone/fence the old lineage and settle/release capacity with a high-severity Audit record; this is not automatic admission behavior.
 
-If:
+## Persistence invariants
+
+Where a resource family defines one logical Task reservation per key, persistence enforces at most one non-released Task reservation for:
 
 ```text
-reserved > allocatable
+(task_id, resource_key)
 ```
 
-Pantheon marks the resource oversubscribed and blocks new admission.
+Controller logic additionally validates quantity and resource revision/identity compatibility.
 
-v1 does not automatically preempt or terminate existing Runs. Recovery/resource-policy logic handles the condition separately.
+Run live-concurrency/resources are separately keyed to Run ownership.
 
-## No automatic preemption in v1
+## Core invariants
 
-Higher-priority pending Tasks do not kill already-admitted Runs merely to free capacity.
-
-Priority affects which pending Task is considered next. Existing Runs continue unless another explicit lifecycle/policy mechanism cancels them.
-
-Preemption may be investigated later after Run checkpoint/resume semantics are mature.
-
-## Token accounting is deliberately separate
-
-Model-token concepts do not belong in the Resource Ledger because ordinary resource reservations are released when a Run finishes, while token consumption is permanently charged to a budget/accounting period.
-
-Pantheon distinguishes three token concepts:
-
-```text
-CONTEXT CAPACITY
-  execution compatibility
-
-TOKEN BUDGET
-  spending ceiling
-
-TOKEN USAGE
-  metering/accounting
-```
-
-### Context capacity
-
-Context window requirements are ExecutionRequest compatibility constraints, for example:
-
-```yaml
-context:
-  minTokens: 64000
-```
-
-They are not reservable resources.
-
-### Token budget
-
-Goal/Task/Run token ceilings belong to a future Budget Ledger rather than the Resource Ledger.
-
-Conceptually:
-
-```text
-Goal budget
-  ↓
-Run spending
-  ↓
-remaining budget decreases permanently
-```
-
-Budgets may later include normalized token units, monetary cost units, premium/scarce execution allowance, or other non-releasable consumption ceilings.
-
-### Token usage
-
-ExecutorBackends normalize native usage into Pantheon usage telemetry:
-
-```yaml
-usage:
-  inputTokens: 42000
-  outputTokens: 8700
-  cachedInputTokens: 18000
-  accuracy: exact
-```
-
-When exact counts are unavailable, a backend may report estimated usage with provenance/accuracy metadata.
-
-Pantheon core does not need to know the concrete tokenizer/model internals.
-
-### Backend scarcity/quota
-
-Backend/provider-specific rate limits or subscription scarcity are not exposed as concrete provider concepts to core policy. Backends normalize their current state into generic availability/scarcity signals or ExecutionOffer attributes.
-
-Routing may use those normalized signals without provider-specific branches.
-
-## Separate ledgers
-
-The architecture intentionally separates:
-
-```text
-RESOURCE LEDGER
-  releasable allocation
-  CPU / memory / workspace / execution capacity / concurrency
-
-BUDGET LEDGER
-  consumptive ceilings
-  tokens / cost units / premium usage / other spending
-
-USAGE TELEMETRY
-  actual input/output/cache tokens
-  wall time
-  calls
-  resource observations
-```
-
-These systems interact at Run admission and runtime, but their accounting semantics remain distinct.
-
-## Key invariants
-
-1. Admission understands only opaque resource keys, normalized quantities, descriptors, health, and revisions.
-2. Concrete execution backends translate private requirements into normalized claims.
-3. Infrastructure and policy controllers can augment backend claims.
-4. Resource owners publish normalized capacity; Admission never probes implementation-specific systems directly.
-5. v1 supports divisible and discrete allocation modes only.
-6. v1 performs conservative allocation accounting without overcommit.
-7. Admission uses allocatable capacity, not raw total capacity or instantaneous utilization.
-8. All claims for one ExecutionOffer must fit as a unit.
-9. Admission is a pure snapshot-based assessment; reservation is a later atomic mutation.
-10. Admission distinguishes temporary shortage from structural unsatisfiability.
-11. Concurrency limits reuse the resource ledger as synthetic discrete resources.
-12. Estimation uncertainty is resolved by the resource-producing component before normalization.
-13. Reservations provide allocation correctness; runtime enforcement remains separate.
-14. Capacity shrinkage blocks new admission but causes no automatic preemption in v1.
-15. Context tokens are compatibility, token ceilings are Budget Ledger concerns, and token counts are usage telemetry; none are ordinary Resource Ledger reservations.
+1. Resource Ledger contains generic resources, not provider-specific business logic.
+2. Desired effective claims and incremental claims are distinct.
+3. Existing compatible Task-scoped Reservations satisfy the corresponding desired claim and are not recreated on every Run.
+4. Whole incremental claim set must fit before authoritative Run admission.
+5. Reservation authority, utilization, Budget, Usage and Rate Limits are different concepts.
+6. Capacity shrink keeps existing reservations charged and blocks incompatible new admission.
+7. Evaluation/Sandbox capacity is accounted through the same Ledger.
+8. UNKNOWN capacity remains reserved until reconciled or explicitly force-resolved.
