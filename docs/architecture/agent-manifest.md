@@ -23,6 +23,7 @@ See also:
 - `docs/architecture/agent-genome.md`
 - `docs/architecture/permissions-and-capabilities.md`
 - `docs/architecture/execution-fabric.md`
+- `docs/architecture/run-and-attempt.md`
 
 ## Foundational principles
 
@@ -532,44 +533,53 @@ learning:
 
 Reflection remains a hypothesis; permanent self-modification requires the configured evidence/promotion process.
 
-## Immutable Run Manifest
+## Immutable Run execution snapshot
 
-Every execution produces a separate immutable `RunManifest`. It is system-generated and is not part of `AGENT.yaml`.
+Execution reproducibility data is system-generated and is **not** part of `AGENT.yaml`.
+
+Pantheon does not maintain a separate authoritative `RunManifest` object. The canonical Run resource contains an immutable specification/snapshot portion that records or references the exact resolved execution strategy.
 
 It should capture at least:
 
 ```yaml
-runId: run-01J...
-agent: coder
-agentSpecHash: sha256:...
-soulHash: sha256:...
-behaviorHash: sha256:...
+run:
+  id: run-01J...
+  task: task-...
 
-skills:
-  debugging: sha256:...
-  testing: sha256:...
+  spec:
+    agent: coder
+    agentSpecHash: sha256:...
+    soulHash: sha256:...
+    behaviorHash: sha256:...
 
-memorySnapshot:
-  - mem-123
-  - mem-198
+    skills:
+      debugging: sha256:...
+      testing: sha256:...
 
-executor:
-  backend: executor://local-primary
-  binding: binding_01K...
-  descriptorRevision: 17
+    memorySnapshot:
+      - mem-123
+      - mem-198
 
-policyHash: sha256:...
+    executionBinding:
+      ref: binding_01K...
+      hash: sha256:...
+      backend: executor://local-primary
+      descriptorRevision: 17
 
-workspace:
-  commit: ef8191...
-  worktree: task-291
+    policyHash: sha256:...
+
+    workspace:
+      commit: ef8191...
+      ref: workspace://task-291
 ```
 
-Concrete runtime/model/session information may be retained as backend-namespaced audit metadata or adapter-private state for reproducibility and diagnostics. Core scheduling/routing logic must not depend on those values.
+Concrete runtime/model/session information may be retained as backend-namespaced audit metadata or Attempt-scoped adapter-private state for reproducibility and diagnostics. Core scheduling/routing logic must not depend on those values.
 
-The Run Manifest enables auditing, regression analysis and meaningful evaluation of self-improvement while preserving executor abstraction.
+The immutable Run snapshot enables auditing, regression analysis and meaningful evaluation of self-improvement while preserving executor abstraction.
 
 Capability grants/tickets used during the Run are referenced from runtime audit events rather than embedded into the static Agent Manifest.
+
+Attempt-specific execution identity and LaunchKey belong to the Attempt, not this Run snapshot.
 
 ## A2A interoperability
 
@@ -596,7 +606,7 @@ Include:
 - execution ceilings;
 - review policy;
 - learning policy;
-- immutable Run Manifest generation using `executor://` backend bindings.
+- immutable execution snapshot as part of the canonical Run resource.
 
 Defer:
 
@@ -627,4 +637,4 @@ Never allow:
 6. **Skills, tools/actions, specialty, Execution Features, and permissions are distinct abstractions.**
 7. **Backend compatibility is dynamically discovered through the Execution Fabric and fails closed.**
 8. **Backend-specific tuning lives outside logical Agent identity.**
-9. **Every execution is captured by an immutable Run Manifest referencing an abstract `executor://` binding.**
+9. **Each Run carries the immutable execution snapshot for one resolved strategy; Attempt-specific LaunchKey/attachment state lives under Attempt.**
