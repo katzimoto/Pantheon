@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pantheon.local/schemas/agent-v1alpha1.schema.json",
+  "title": "Pantheon Agent Manifest v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "const": "pantheon/v1alpha1"
+    },
+    "kind": {
+      "const": "Agent"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "spec": {
+      "$ref": "#/$defs/spec"
+    }
+  },
+  "$defs": {
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "execution", "permissions"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
+          }
+        },
+        "genome": {
+          "$ref": "#/$defs/genome"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution"
+        },
+        "tools": {
+          "$ref": "#/$defs/tools"
+        },
+        "permissions": {
+          "$ref": "#/$defs/permissions"
+        },
+        "workspace": {
+          "$ref": "#/$defs/workspace"
+        },
+        "delegation": {
+          "$ref": "#/$defs/delegation"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "review": {
+          "$ref": "#/$defs/review"
+        },
+        "learning": {
+          "$ref": "#/$defs/learning"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "genome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "soul": {
+          "type": "string"
+        },
+        "behavior": {
+          "type": "string"
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "namespaces": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            },
+            "retrieval": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "enum": ["adaptive", "always", "disabled"]
+                },
+                "maxTokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "skills": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "available": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            },
+            "preload": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routePolicy", "compatibleHarnesses"],
+      "properties": {
+        "routePolicy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compatibleHarnesses": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["claude-code", "opencode", "openai-compatible", "shell"]
+          }
+        },
+        "requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "toolUse": {"type": "boolean"},
+            "vision": {"type": "boolean"},
+            "structuredOutput": {"type": "boolean"},
+            "mcp": {"type": "boolean"},
+            "localOnly": {"type": "boolean"},
+            "minContextTokens": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
+          }
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile"],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action", "effect"],
+            "properties": {
+              "action": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
+              },
+              "resource": {
+                "type": "string"
+              },
+              "effect": {
+                "enum": ["allow", "ask", "deny"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "isolation": {
+          "enum": ["none", "worktree", "copy"]
+        },
+        "sandbox": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "delegation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "allow": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTurns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wallTime": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:ms|s|m|h)$"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "type": "string"
+        },
+        "requiredBeforeMerge": {
+          "type": "boolean"
+        }
+      }
+    },
+    "learning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reflection": {
+          "enum": ["after-task", "on-failure", "manual", "disabled"]
+        },
+        "promotion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "memory": {
+              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
+            },
+            "skill": {
+              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
+            },
+            "behavior": {
+              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
+            },
+            "soul": {
+              "enum": ["human-approval", "disabled"]
+            }
+          }
+        }
+      }
+    }
+  }
+}
