@@ -2,411 +2,231 @@
 
 ## Status
 
-Draft design — Pantheon task subsystem specification.
+Canonical Pantheon Task acceptance specification.
 
 ## Purpose
 
-Pantheon must distinguish an executor claiming that work is finished from the system determining that the Task contract has actually been satisfied.
+> **Workers submit immutable CandidateResults. Only Pantheon may determine that the Task contract is accepted and later terminalize the Task.**
 
-The executor may submit a candidate result. Only Pantheon may declare a Task accepted and later complete.
+See also:
+
+- `artifact-model.md`
+- `evaluation-and-evaluator-registry.md`
+- `task-lifecycle.md`
+- `recovery-policy.md`
 
 ## Foundational principles
 
-1. **Workers submit results; they do not complete Tasks.**
-2. **Prefer outcome verification over transcript inspection.**
-3. **Acceptance evidence is independent and bound to the exact candidate/state being judged.**
-4. **Deterministic checks are preferred; model and human judgment are used where deterministic verification is insufficient.**
-5. **Required criteria all pass or the Task is not accepted.**
-6. **Evaluator errors fail closed.**
-7. **Changing the candidate invalidates stale evidence and approvals.**
-8. **Acceptance determines success; retry, escalation and replanning belong to later subsystems.**
+1. Workers submit results; they never complete Tasks directly.
+2. Prefer outcome/state verification over transcript narration.
+3. Evidence is bound to the exact immutable subject + criterion + EvaluatorVersion.
+4. Deterministic verification is preferred where practical.
+5. V1 acceptance requires every required criterion to PASS.
+6. Evaluator ERROR never counts as PASS.
+7. Candidate/evaluator-version change makes prior evidence stale for the new subject/contract.
+8. Acceptance decides satisfaction; Recovery decides retry/requeue/replan.
+9. Producing Agent self-checks are development signals, not authoritative Acceptance evidence.
 
-## Result submission
+## CandidateResult
 
-Workers use a semantic operation such as `task.submit_result`, never `task.complete`.
+`task.submit_result` creates one immutable content-addressed Candidate per Run.
 
-Conceptual payload:
+Example:
 
 ```yaml
-result:
+candidate:
+  task: task_123
+  run: run_17
   outputs:
-    changeset: artifact://change-938
-    diagnosis: artifact://report-939
-  summary: >
-    Timeout was caused by connection pool exhaustion.
+    changeset: artifact://sha256/...
+    diagnosis: artifact://sha256/...
+  summary: ...
 ```
 
-The submission creates a candidate for evaluation.
+Candidate identity is `candidate://sha256/...` over canonical content. Old opaque examples such as `artifact://change-938` are obsolete.
+
+Submission/cancellation race semantics are defined by `task-lifecycle.md`: authoritative cancellation/supersession committed first causes submission conflict; Candidate committed first remains immutable history even if cancellation follows.
 
 ## Acceptance contract
 
-A Task may define human-readable criteria plus evaluator references:
+TaskSpec defines human-readable criteria plus trusted evaluator refs/versions, conceptually:
 
 ```yaml
 acceptance:
   strategy: all
-
   criteria:
-    - id: checkout-tests
-      statement: Checkout integration tests pass.
+    - id: tests
+      statement: Required tests pass.
       evaluator:
-        ref: check://project/checkout-integration
-      severity: required
-
-    - id: payment-regression
-      statement: Existing payment tests remain green.
-      evaluator:
-        ref: check://project/payment-regression
-      severity: required
-
-    - id: root-cause-quality
-      statement: >
-        Diagnosis explains the actual root cause, supporting
-        evidence, and why the fix addresses it.
-      evaluator:
-        ref: rubric://engineering/root-cause-analysis
+        ref: check://project/tests
+        version: sha256:...
       severity: required
 ```
 
-The statement is understandable to humans/models. The evaluator reference identifies an executable or reviewable acceptance mechanism.
+Task materialization resolves logical Evaluator refs through the operator-governed Evaluator Registry and pins exact immutable EvaluatorVersions. A Task may not embed arbitrary executable commands.
 
-## Evaluator classes
+## V1 evaluator kinds
 
-Pantheon should normalize evaluators into a small set of classes:
-
-```text
-check       deterministic executable validation
-assertion   structured environment/state assertion
-schema      output-shape validation
-policy      security/governance validation
-rubric      qualitative model-assisted judgment
-review      independent specialist review
-human       explicit human authority/judgment
-```
-
-The first four should be deterministic whenever practical.
-
-## Evidence first
-
-Pantheon should prefer actual outcome/state verification over trusting worker narration.
-
-Preferred order:
+Authoritative v1 evaluator kinds are:
 
 ```text
-actual environment state
-        ↓
-deterministic executable check
-        ↓
-structural/static verification
-        ↓
-independent model judgment
-        ↓
-human judgment
+check
+schema
+human
 ```
 
-The ordering is about automation and verifiability, not the intrinsic value of human review.
+`check` is a deterministic registered executable validation in an independent verification Sandbox. `schema` is trusted structural validation. `human` is explicit human judgment bound to the Candidate.
 
-## Evidence object
+Model-based `rubric`/`review` evaluators are architecture-reserved but implementation-deferred from v1. They are not silently executed through an unaccounted model path.
 
-Acceptance results are durable evidence records bound to immutable subjects.
+Assertions/policy-style deterministic criteria compile to `check`/`schema` or current control-plane policy validation rather than requiring separate evaluator machinery.
 
-Conceptual form:
+## EvaluationRound
 
-```yaml
-kind: Evidence
-
-metadata:
-  id: evidence_01K...
-
-subject:
-  kind: artifact
-  ref: artifact://changeset-938
-  digest: sha256:abc...
-
-criterion:
-  task: task_123
-  id: checkout-tests
-
-evaluator:
-  ref: check://project/checkout-integration
-  version: sha256:9292...
-
-result:
-  verdict: pass
-  details:
-    testsPassed: 37
-    testsFailed: 0
-
-provenance:
-  run: run_384
-  startedAt: ...
-  completedAt: ...
-```
-
-The evidence binds:
+When Candidate becomes current, Acceptance Controller creates/reuses an EvaluationRound freezing:
 
 ```text
-immutable candidate/state
-+
-criterion
-+
-evaluator/policy version
-+
-verdict
-+
-provenance
+Task/Candidate digest
+acceptance contract digest
+criterion set
+exact EvaluatorVersions
+relevant ConfigurationRevision
 ```
 
-## Staleness
+Each external deterministic criterion creates an accounted `EvaluationOperation` using control-operation ResourceReservations/BudgetHolds where required. Human criteria create HumanEvaluationRequests.
 
-Evidence applies only to the exact subject it evaluated.
+## Independent verification
 
-If a candidate digest changes, earlier evidence and approvals become stale and may not satisfy acceptance.
+Executor-run tests are useful feedback but not authoritative acceptance proof.
+
+Preferred path:
 
 ```text
-candidate sha256:abc
-        ↓ tests pass
-        ↓ candidate changes
-candidate sha256:xyz
-        ↓
-previous PASS = STALE
-```
-
-This rule applies equally to deterministic checks, model reviews and human approvals.
-
-## Verdicts
-
-Criterion evaluation and evaluator health are separate facts.
-
-Minimum v1 verdicts:
-
-```text
-PASS     criterion satisfied
-FAIL     criterion not satisfied
-ERROR    evaluator could not determine outcome
-PENDING  evaluation not finished
-```
-
-`ERROR` must never be interpreted as `PASS`.
-
-## Required and advisory criteria
-
-V1 supports two blocking classes:
-
-```text
-required   failure/error blocks acceptance
-advisory   recorded but does not block acceptance
-```
-
-Avoid additional severity hierarchies until a real need appears.
-
-## Aggregation
-
-V1 acceptance strategy is deliberately simple:
-
-> Every required criterion must PASS.
-
-Advisory criteria do not block acceptance.
-
-Future versions may add `any`, threshold, weighted or quorum aggregation, but v1 should not depend on them.
-
-## Trusted evaluator registry
-
-Tasks must not embed arbitrary executable verification hooks such as:
-
-```yaml
-acceptance:
-  command: npm test
-```
-
-Instead Tasks reference trusted, versioned evaluators:
-
-```yaml
-evaluator:
-  ref: check://project/test-suite
-```
-
-A separately governed evaluator definition may describe the command or verifier:
-
-```yaml
-kind: Evaluator
-metadata:
-  name: project/test-suite
-spec:
-  type: command
-  command:
-    executable: cargo
-    args: [test]
-  sandbox: verification
-  timeout: 5m
-```
-
-This prevents dynamically generated Tasks from becoming a shell-execution injection surface.
-
-## Independent verification context
-
-Executor-run tests are useful development feedback but are not automatically authoritative acceptance evidence.
-
-Preferred flow:
-
-```text
-executor produces candidate
-        ↓
-Pantheon freezes candidate
-        ↓
-verification workspace/container
-        ↓
-Pantheon-controlled evaluator
-        ↓
+Agent edits Task Workspace
+  ↓
+Pantheon seals immutable Candidate/code.changeset
+  ↓
+independent verification Sandbox
+  ↓
+registered EvaluatorVersion
+  ↓
 Evidence
 ```
 
-Acceptance evaluators should run under their own permissions and verification sandbox where practical.
+Verification receives immutable Candidate input + disposable writable scratch. It does not operate authoritatively on the producer's mutable Task Workspace.
 
-## Model graders
+## Evidence
 
-Model-assisted rubrics are appropriate for criteria that require qualitative judgment.
-
-They should:
-
-- use explicit structured rubrics;
-- produce structured findings and verdicts;
-- be independent from the executor where practical;
-- never override deterministic failure;
-- be calibrated against human/expert judgments for high-impact uses.
-
-Self-certification by the same executor is not authoritative acceptance evidence.
-
-## Structured rubric example
-
-```yaml
-rubric:
-  dimensions:
-    - id: correctness
-      required: true
-      definition: >
-        Design satisfies the stated architectural constraints.
-
-    - id: maintainability
-      definition: >
-        Responsibilities are separated and interfaces are explicit.
-
-    - id: unnecessary-complexity
-      inverse: true
-      definition: >
-        Penalize abstractions without a current architectural need.
-```
-
-The grader returns structured scores/findings rather than a free-form impression.
-
-## Human approval
-
-Human decisions are represented as evidence and are bound to the exact candidate/state being approved.
-
-```yaml
-- id: production-approval
-  statement: User approves production deployment.
-  evaluator:
-    type: human
-    authority: owner
-  severity: required
-```
-
-Changing the candidate after approval invalidates the approval unless policy explicitly says otherwise.
-
-## Rejection feedback
-
-Acceptance failure should produce structured feedback that later lifecycle/recovery logic can consume.
-
-```yaml
-acceptance:
-  verdict: rejected
-  failures:
-    - criterion: root-cause
-      evidence: evidence_738
-      feedback: >
-        The proposed fix does not address the diagnosed
-        connection-pool exhaustion.
-```
-
-Acceptance does not decide whether to continue the same Run, create a new Attempt, escalate, replan or spawn more Tasks.
-
-## Acceptance versus completion
-
-Pantheon should distinguish successful acceptance from final terminal completion.
+Evidence is immutable and binds at least:
 
 ```text
-execution finished
-      ↓
-acceptance satisfied
-      ↓
-finalization
-  ├─ seal artifacts
-  ├─ persist audit trail
-  ├─ release workspace/resources
-  ├─ notify graph joiners
-  └─ perform authorized final integration actions
-      ↓
-Task complete
+Candidate/Artifact subject digest
+Task criterion
+Evaluator ref + immutable version digest
+EvaluationOperation/HumanEvaluation provenance
+verdict
+bounded structured details
+output Artifact refs where needed
 ```
 
-Exact lifecycle states are defined by the Task lifecycle subsystem.
+Large logs/reports become Artifacts referenced by Evidence.
 
-## Immutability
-
-The acceptance contract is part of the immutable Task specification.
-
-Runs bind to at least:
+## Verdicts
 
 ```text
-taskSpecHash
-acceptanceSpecHash
+PASS
+FAIL
+ERROR
+PENDING
 ```
 
-Changing acceptance requirements creates a new Task revision or explicit superseding Task rather than mutating the criteria under an active Run.
+`FAIL` means the evaluator ran correctly and the criterion was not satisfied. `ERROR` means authoritative evaluation could not determine the criterion (sandbox failure, timeout without valid result, parser failure, etc.).
 
-## Learning integration
+Required FAIL/ERROR prevents PASS aggregation.
 
-Agent Genome learning should consume objective acceptance evidence rather than worker self-report.
+## Required versus advisory
 
-Useful outcome signals include:
+V1 supports:
 
 ```text
-required criteria pass/fail
-review scores/findings
-number of attempts
-evaluator errors
-user acceptance/rejection
-rollback occurrence
-stale evidence events
+required
+advisory
 ```
 
-This gives the self-improvement subsystem evidence tied to actual outcomes.
+All required criteria must PASS. Advisory results are recorded but do not block acceptance.
 
-## v1 scope
+No weighted/quorum/threshold strategy in v1.
 
-V1 should implement:
+## Human acceptance versus authorization approval
 
-- result submission rather than self-completion;
-- immutable acceptance contracts;
-- evaluator references;
-- evaluator classes: check, assertion, schema, policy, rubric, review, human;
-- required/advisory criteria;
-- `all required must pass` aggregation;
-- PASS/FAIL/ERROR/PENDING verdicts;
-- immutable Evidence objects with subject/evaluator digests;
-- automatic evidence staleness when the subject changes;
-- Pantheon-controlled verification context;
-- structured rejection feedback.
+Human Task evaluation and permission Approval are different authority domains.
 
-Defer:
+```text
+HumanEvaluationRequest -> PASS/FAIL Evidence
+ApprovalRequest -> scoped capability Grant -> authorization re-evaluation
+```
 
-- weighted scoring;
-- quorum/threshold acceptance;
-- probabilistic aggregation;
-- automatic model-grader calibration;
-- sophisticated partial-credit semantics.
+Neither substitutes for the other.
 
-## Core invariant
+## Staleness
 
-> An executor may claim that it is finished. Only Pantheon, using evidence bound to the exact candidate and acceptance contract, may determine that the Task succeeded.
+Evidence applies only to the exact immutable Candidate/criterion/EvaluatorVersion it judged.
+
+Changing Candidate or semantic Goal/Task acceptance revision creates a new subject/contract; old Evidence remains historical but cannot be reused as current PASS unless an explicit compatibility rule says it evaluates the same immutable subject/criterion/version.
+
+## Acceptance aggregation
+
+Acceptance Controller, not Evaluator, owns aggregation. Evaluators only return evidence/verdict.
+
+When every required criterion PASSes:
+
+```text
+Task Evaluating -> Finalizing / terminalTarget=Succeeded
+```
+
+through the Task lifecycle transaction, after rechecking current Task/Goal authority and cancellation/supersession fences.
+
+Evaluator cannot directly set Task phase.
+
+## Rejection
+
+A definitive required FAIL produces AcceptanceResult FAIL and immutable Evidence. It does not retroactively mark producing Run Failed.
+
+Recovery Policy decides whether to:
+
+```text
+REQUEUE_TASK
+REPLAN
+REQUEST_APPROVAL/HUMAN where appropriate
+FAIL_TASK
+```
+
+If REQUEUE is selected while the producing Run still Finalizing, Task remains Evaluating with `PriorRunFinalizing` until that Run terminalizes. Only then may T9 move Task Ready.
+
+## Evaluator infrastructure error
+
+EvaluationOperation may have bounded infrastructure retry/reconciliation separate from Task execution retry. Genuine criterion FAIL is not retried as though it were sandbox noise.
+
+UNKNOWN evaluator process/sandbox state follows the same durable external-effect reconciliation discipline; duplicate verification execution is avoided while prior state is ambiguous.
+
+## Cancellation/current authority
+
+Cancellation/supersession can stop pending EvaluationOperations. Completed Evidence remains immutable history, but Acceptance cannot transition a cancelled/superseded Task to Succeeded because the aggregation commit re-reads current Task authority/revision.
+
+## Goal acceptance reuse
+
+GoalCompletionCandidate uses the same EvaluationRound/Evidence machinery with a different immutable subject type. There is no separate Goal evaluator execution architecture.
+
+## Core invariants
+
+1. Worker submits Candidate; Pantheon declares acceptance/success.
+2. Candidate/Artifact refs are content-addressed canonical identifiers.
+3. Task pins registered immutable EvaluatorVersions; arbitrary Task commands are forbidden.
+4. V1 authoritative evaluator kinds are check/schema/human; model review is deferred.
+5. Evaluation consumes accounted Resources/Budget where applicable.
+6. Authoritative checks run independently against immutable Candidate materialization.
+7. Evidence is immutable and exact-subject/evaluator-version bound.
+8. ERROR never means PASS; all required criteria must PASS.
+9. Producing Agent self-checks are never authoritative acceptance evidence.
+10. Acceptance rejection does not fail the producing Run and cannot requeue until that Run is terminal.
+11. Evaluators produce Evidence only; Task Controller owns lifecycle.
