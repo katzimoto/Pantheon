@@ -2,847 +2,310 @@
 
 ## Status
 
-Draft design — Pantheon workspace and Git integration subsystem specification.
+Canonical Pantheon Workspace/Git specification.
 
 ## Purpose
 
-This document defines how Pantheon gives Tasks isolated mutable repository state, how Runs and Attempts operate inside that state, how code candidates are sealed into immutable Artifacts, and how accepted code is later integrated without allowing workers to mutate shared repository history directly.
+> **A Task owns mutable Workspace state. Runs/Attempts operate inside it. Pantheon seals immutable candidate state into CAS-complete Artifacts, and only Integration Controller may mutate authoritative shared repository refs.**
 
-The central rule is:
-
-> **A Task owns mutable workspace state. Runs and Attempts operate inside it. Pantheon alone seals immutable candidate state, and only an authorized Integration Controller may mutate shared repository refs.**
+Worktree isolation and security Sandbox isolation are distinct.
 
 See also:
 
-- `docs/architecture/task-object.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/artifact-model.md`
-- `docs/architecture/task-acceptance-and-completion.md`
-- `docs/architecture/recovery-policy.md`
-- `docs/architecture/scheduler-reservations-ownership-and-leases.md`
-- `docs/architecture/permissions-and-capabilities.md`
+- `artifact-model.md`
+- `sandbox-broker-and-isolation.md`
+- `run-and-attempt.md`
+- `global-recovery-and-crash-reconciliation.md`
 
-## Architectural boundary
+## Workspace ownership
 
-```text
-Repository
-    │
-    ▼
-Task Workspace
-mutable / isolated
-    │
-    ├── Run 1
-    │    ├── Attempt 1
-    │    └── Attempt 2
-    │
-    └── Run 2
-         └── Attempt 1
-                │
-                ▼
-             SEAL
-                │
-                ▼
-       code.changeset Artifact
-                │
-                ▼
-          CandidateResult
-                │
-                ▼
-           Acceptance
-                │
-                ▼
-      optional IntegrationIntent
-```
-
-Task success and repository integration are intentionally separate.
-
-## 1. Workspace ownership is Task-scoped
-
-A normal code Task has one durable mutable Workspace that may survive multiple Runs and Attempts.
+A normal code Task owns one durable mutable Workspace that may survive multiple Runs/Attempts:
 
 ```text
 Task
-  └── Workspace
-        ├── Run 1
-        │    ├── Attempt 1
-        │    └── Attempt 2
-        └── Run 2
-             └── Attempt 1
+  └─ Workspace
+       ├─ Run A / Attempt(s)
+       └─ Run B / Attempt(s)
 ```
 
-This allows execution retry and semantic retry to preserve useful work rather than discarding it automatically.
+A fresh/reset Workspace is explicit Recovery/project policy, not an automatic consequence of a new Run.
 
-A fresh/reset workspace is an explicit Recovery decision or project policy choice, not the default consequence of creating a new Run.
+Workspace capacity is therefore normally Task-scoped and reused across Runs rather than re-reserved each time.
 
-Workspace reservation is therefore normally Task-scoped, as defined by the scheduler reservation model.
+## Immutable base
 
-## 2. Workspace pins an immutable repository base
-
-Workspace creation distinguishes the requested human/project ref from the resolved immutable Git object.
-
-Conceptually:
+Workspace records both requested human/project ref and resolved immutable base commit:
 
 ```yaml
 workspace:
-  id: workspace_123
-  task: task_456
-
   repository: repo://Pantheon
-
-  requestedBase:
-    ref: refs/heads/main
-
-  resolvedBase:
-    commit: 7d882a...
-
-  isolation:
-    kind: git-worktree
+  requestedBase: refs/heads/main
+  resolvedBase: <immutable commit OID>
 ```
 
-`requestedBase.ref` expresses intent. `resolvedBase.commit` is execution truth.
+The Workspace does not silently follow movement of `main` or another requested ref.
 
-Once materialized, the workspace does not automatically follow movement of the requested branch/ref. If `main` advances after workspace creation, the Task workspace remains pinned to its resolved base until explicit recovery/rebase/re-materialization policy changes it.
+## Workspace strategies
 
-## 3. Detached HEAD is the default linked-worktree mode
-
-For normal Git repositories, Pantheon should create linked worktrees in detached-HEAD mode at the resolved base commit.
-
-Conceptually:
+Pantheon supports at least:
 
 ```text
-git worktree add --detach --lock <workspace-path> <baseCommit>
+isolated-clone
+linked-worktree
+copy/other repository-safe materialization
 ```
 
-Detached mode permits normal file editing and commits without giving the worker ownership of a named shared branch.
+The Workspace/Sandbox planners choose only strategies capable of satisfying the actual security/integration requirements.
+
+### Isolated Git state is preferred for untrusted shell
+
+For strongly sandboxed model-driven coding Agents that need direct Git commands, v1 prefers a Task-scoped isolated clone/repository state.
+
+The Task owns writable:
 
 ```text
-shared main ref
-     │
-     X     worker does not own this ref
-
-Task worktree
-HEAD detached at base
-     │
-     ├── optional worker commit
-     └── optional worker commit
+working tree
+index
+local HEAD/local refs
+Task-local Git metadata
 ```
 
-Worker commits are development history and checkpoints. They are not the authoritative semantic identity of a candidate.
-
-## 4. Shared repository refs are Pantheon-controlled
-
-Executors may receive canonical Git/file actions needed to work inside their Task workspace, but they must not obtain unrestricted authority over shared repository refs or remotes.
-
-The effective boundary is:
+but does not own:
 
 ```text
-Task working tree
-  writable when Workspace = READY
-
-Task-specific Git state
-  writable where required
-
-shared repository refs
-  controller-owned
-
-push credentials / remote mutation
-  separately authorized
+authoritative repository shared refs
+credentialed remote mutation
+host repository common-dir
 ```
 
-A worker must not be able to bypass Pantheon's control plane merely by using a shell command such as `git update-ref`, directly editing shared Git metadata, or using hidden credentials.
+The worker may commit locally for development/checkpointing. Those commits/branch names are not semantic Candidate identity.
 
-This requires filesystem/sandbox enforcement in addition to prompt/tool-level policy.
+### Linked worktrees
 
-Canonical actions should distinguish worker actions from integration authority, for example:
+Linked worktrees remain useful for trusted controller operations, trusted-host workloads, verification/materialization and future safe projections.
+
+However Git linked worktrees share administrative/common-dir state. An untrusted Sandbox **must never receive writable access to the authoritative shared Git common directory/ref store**. Therefore a plain linked worktree bind-mounted with its shared common-dir writable is not an acceptable security boundary for an arbitrary shell Agent.
+
+Worktree lock is defensive Git housekeeping metadata, not Pantheon ownership truth; SQLite remains authority.
+
+## Shared refs and remote mutation
+
+Worker actions may include local Git read/commit behavior inside Task-owned state. Shared repository mutations remain broker/controller operations:
 
 ```text
-git.read
-git.commit
-filesystem.write
+git.read / git.commit       may be worker-local
 
-versus
-
-git.update-ref
 git.integrate
-git.push
+git.update-ref shared target
+git.push                    controller/broker authority
 ```
 
-The latter remain broker/controller operations unless explicitly and safely delegated.
+An Agent Sandbox receives neither ambient push credentials nor host SSH/GPG credential agents.
 
-## 5. Git worktree lock is defensive metadata, not ownership truth
+## Remote configuration
 
-Pantheon should normally lock active linked worktrees so Git housekeeping cannot prune them accidentally.
+A Task-local Git repository has no credential-bearing remote authority. It may retain sanitized remote URLs/history metadata where policy permits, but credentialed push/fetch requiring secrets is brokered.
 
-However:
+## Workspace phases
 
-> **Git worktree lock state is not Pantheon authority.**
-
-SQLite/Pantheon durable state remains canonical for Workspace identity, ownership and lifecycle. Git worktree inventory is observed external state reconciled against it.
-
-## 6. Isolation strategy may vary by repository
-
-Linked worktrees are the preferred v1 strategy for normal repositories because they cheaply isolate working trees while sharing object storage.
-
-Some repository structures may be unsafe or operationally awkward under linked worktrees. Repositories with problematic submodule semantics are an important example.
-
-Pantheon therefore supports at least:
+Workspace lifecycle can remain small, for example:
 
 ```text
-workspace isolation = worktree
-workspace isolation = copy / isolated clone
+REQUESTED
+MATERIALIZING
+READY
+FROZEN
+RELEASING
+RELEASED
+ERROR
 ```
 
-The Workspace Controller selects or validates a strategy capable of satisfying the Task/Agent/project requirement. It must not silently choose a known-unsafe layout.
+`READY` allows the current Task execution owner to mutate within the Workspace. `FROZEN` is used while authoritative candidate/yield/finalization state must not change without a new controller transition.
 
-## 7. Worker staging state is not authoritative candidate state
+Task Waiting after blocking yield normally keeps the Task-scoped Workspace reservation but freezes mutation authority until a later Run becomes responsible.
 
-Workers may edit, stage, unstage and commit according to their workflow.
+## WorkspaceRevision
 
-Pantheon must not define the candidate as:
-
-```text
-whatever happens to be staged
-```
-
-or:
-
-```text
-HEAD only
-```
-
-because valid final edits may remain unstaged or uncommitted.
-
-Pantheon instead captures the actual working-tree state through an immutable `WorkspaceRevision`.
-
-## 8. WorkspaceRevision
-
-A `WorkspaceRevision` is an immutable checkpoint describing the exact Git tree state observed in a Task workspace at a specific control-plane boundary.
+A `WorkspaceRevision` is an immutable controller checkpoint of exact logical repository state at a control-plane boundary.
 
 Conceptually:
 
 ```yaml
 workspaceRevision:
-  id: workspace-rev_01K...
+  id: workspace-rev_...
   workspace: workspace_123
-
-  baseCommit: 7d882a...
-  tree: a8193c...
-
-  observedHead: f902ab...
+  baseCommit: ...
+  tree: <Git tree OID when applicable>
+  observedHead: ...
   createdAt: ...
 ```
 
-The Git `tree` is the important immutable content state. `observedHead` is provenance/debug information and may or may not correspond to the final working-tree content.
+`tree`/observed Git IDs provide immutable repository-state metadata; they are not the sole portable Artifact payload.
 
-## 9. WorkspaceRevision capture must not mutate the worker's index
+Pantheon captures WorkspaceRevision without mutating the worker's normal staging/index workflow. For Git implementations this may use a controller-owned temporary index to construct the exact resulting tree.
 
-Pantheon should use a temporary, controller-owned Git index when constructing a checkpoint.
+Ignored/ephemeral build output is excluded from code candidate snapshots by default unless the Task explicitly declares it as an output.
 
-Conceptually:
+## Candidate sealing
 
-```text
-create temporary GIT_INDEX_FILE
-      ↓
-load baseline/index state
-      ↓
-overlay current working-tree additions/modifications/deletions
-      ↓
-write-tree
-      ↓
-immutable Git tree OID
-```
-
-The worker's ordinary staging/index state remains untouched.
-
-This allows Pantheon to capture actual workspace content without imposing a Git workflow on the Agent.
-
-## 10. Ignored files are excluded from code snapshots by default
-
-Code WorkspaceRevisions and `code.changeset` candidates normally include:
+Workers may edit/stage/commit however they prefer. Candidate identity is never simply:
 
 ```text
-tracked files
-non-ignored new files
-tracked deletions
+HEAD
+whatever is staged
+last worker commit
 ```
 
-Ignored files are excluded unless an explicit project/output policy says otherwise.
+On `task.submit_result`, Pantheon captures the actual permitted Workspace state and seals a `code.changeset` Artifact.
 
-This avoids silently packaging build output, dependencies, caches, local environment state, or potential secrets into code candidates.
-
-If an ignored/generated file is a genuine deliverable, it should normally be sealed explicitly as its own Artifact.
-
-## 11. Checkpoint boundaries
-
-Pantheon need not snapshot the workspace after every file edit.
-
-Useful immutable checkpoints include:
+Canonical flow:
 
 ```text
-workspace materialized
-Run starts
-Attempt starts where useful
-Attempt terminates where useful
-candidate sealing
-explicit recovery/reset
-```
-
-At minimum every Run records its starting WorkspaceRevision, allowing later audit and learning to establish what code state the Run inherited.
-
-## 12. Worker commits do not define the final candidate
-
-A worker may create multiple commits or no commits at all.
-
-Example:
-
-```text
-commit A
-commit B
-uncommitted final edit C
-```
-
-Candidate sealing includes C.
-
-Therefore:
-
-> **Pantheon seals the actual Task workspace tree, not merely HEAD or staged state.**
-
-Worker commits may still be useful for debugging, recovery checkpoints, human review and provenance, but they are not required for candidate validity.
-
-## 13. Candidate sealing requires a settled Git state
-
-Before Pantheon creates a final `code.changeset`, the workspace must not contain unresolved repository operations that make its semantic state ambiguous.
-
-Examples include:
-
-- unresolved merge conflicts / unmerged index entries;
-- unfinished rebase/cherry-pick state where result semantics are unresolved;
-- other repository states that the Workspace Controller cannot safely represent as a settled candidate.
-
-If the workspace is unsettled, sealing fails closed and execution/recovery must resolve or explicitly abandon the state.
-
-## 14. Scope is revalidated at seal time
-
-Runtime permissions are not the only guard.
-
-Pantheon also computes the effective change set between the immutable base and final result tree and validates it against the Task's scope/effects.
-
-Conceptually:
-
-```text
-baseCommit / base tree
-        ↓
-     diff
-        ↓
-resultTree
-        ↓
-changed paths/effects
-        ↓
-Task scope validation
-```
-
-A candidate modifying paths outside the Task's allowed scope is rejected at sealing even if runtime isolation failed to prevent the mutation.
-
-This provides deterministic defense in depth:
-
-```text
-runtime sandbox
-+
-sealed-result scope validation
-```
-
-## 15. `code.changeset` Artifact semantics
-
-Pantheon represents the immutable code candidate as a `code.changeset` Artifact.
-
-Conceptually:
-
-```yaml
-artifactKind: code.changeset
-
-git:
-  repository: repo://Pantheon
-  baseCommit: 7d882a...
-  resultTree: a8193c...
-
-contents:
-  - name: changes.patch
-    mediaType: application/x-git-diff
-    digest: sha256:...
-    size: ...
-```
-
-The semantic core is:
-
-```text
-repository
-baseCommit
-resultTree
-```
-
-A stable patch representation is included for transport/review/materialization convenience.
-
-Pantheon should invoke Git with controlled options/configuration so user-local diff settings do not alter canonical Artifact construction.
-
-Worker commit history is not required in the Artifact identity and may be recorded separately in production/provenance metadata.
-
-## 16. Candidate submission freezes mutable output
-
-For a code Task:
-
-```text
-Task Workspace
-     │
-     ▼
-capture final resultTree
-     │
-scope validation
-     │
-seal code.changeset Artifact
-     │
-     ▼
-CandidateResult
-     │
-     ▼
-Task → Evaluating
-Workspace → FROZEN
-Run → Finalizing
-```
-
-When the Workspace is `FROZEN`, worker mutation is prohibited while the submitted candidate is under evaluation.
-
-If Acceptance later rejects the candidate and Recovery chooses `REQUEUE_TASK`, the same Task workspace may be made writable again for the next Run.
-
-## 17. Acceptance verifies the sealed candidate, not a live workspace
-
-Acceptance evaluators must operate against immutable candidate state.
-
-Incorrect:
-
-```text
-submit candidate
-→ run tests in still-mutable producer workspace
-```
-
-Preferred:
-
-```text
-code.changeset Artifact / resultTree
-        ↓
-verification workspace/container
-        ↓
-Pantheon-controlled evaluator
-        ↓
-Evidence
-```
-
-This ensures that Evidence binds to the exact Candidate/Artifact digest and cannot be invalidated by concurrent producer edits.
-
-## 18. Downstream Tasks need not wait for shared-branch integration
-
-TaskGraph data dependencies and Git integration are separate.
-
-An accepted `code.changeset` Artifact may become a downstream Task input even if it has not yet been merged into a shared branch.
-
-```text
-Task A
-  ↓ accepted changeset Artifact
-Task B input binding
-```
-
-The Workspace Controller may materialize accepted upstream changes into Task B's pinned workspace according to dependency/materialization policy.
-
-Therefore:
-
-> **Task dependency is not equivalent to shared-branch merge dependency.**
-
-Complex multi-changeset composition policy is deferred, but this separation is fundamental.
-
-## 19. Acceptance and integration are separate contracts
-
-A Task may succeed because its `code.changeset` candidate passed Acceptance.
-
-That does not by itself authorize:
-
-- advancing `main` or another shared ref;
-- pushing to a remote;
-- opening/merging a pull request;
-- deploying anything.
-
-Shared repository mutation is represented by a separate `IntegrationIntent` under explicit policy/authorization.
-
-## 20. IntegrationIntent
-
-Conceptually:
-
-```yaml
-integration:
-  id: integration_123
-
-  candidate: candidate://sha256/...
-  changeset: artifact://sha256/...
-
-  target:
-    repository: repo://Pantheon
-    ref: refs/heads/main
-
-  expectedTarget: 83ca12...
-
-  policyHash: sha256:...
-  desired: applied
-```
-
-An IntegrationIntent may be created by Goal/project finalization policy or explicit human/controller action.
-
-The worker does not create authoritative integration simply by claiming success.
-
-## 21. Integration uses three-way semantics against the current target
-
-A candidate is defined relative to its immutable base:
-
-```text
-base B
+quiesce/fence Workspace mutation for submission transaction
   ↓
-result tree C
+capture WorkspaceRevision
+  ↓
+validate allowed path/scope changes
+  ↓
+compare immutable base to final logical state
+  ↓
+copy changed-file payload bytes into Pantheon CAS
+  ↓
+build canonical ordered code.changeset manifest
+  ↓
+optional controller-owned Git object pins for efficiency
+  ↓
+commit Artifact + Candidate + Task/Run lifecycle transition
 ```
 
-Meanwhile the target may have advanced:
+The authoritative changeset payload is CAS-complete as defined by `artifact-model.md`; it does not rely solely on Task Git ODB objects that later GC could prune.
+
+## Path/scope validation
+
+Before sealing, Pantheon validates that changed paths/effects fit Task/Run authority and repository rules. A worker cannot submit changes outside the Task Workspace by naming arbitrary host paths.
+
+Repository-submodule layouts or other Git structures that make isolation ambiguous may require isolated clone/copy or may be rejected/fail closed; Pantheon does not silently choose a known-unsafe layout.
+
+## Workspace settle/quiescence
+
+Candidate/yield checkpointing requires a settled Workspace boundary. Pantheon prevents new semantic Agent actions and ensures the controller observes a stable filesystem state before computing the WorkspaceRevision/changeset.
+
+This is a controller/Sandbox responsibility, not a request that the model promise it stopped writing.
+
+## Acceptance independence
+
+Acceptance evaluates immutable Candidate/Artifact materialization in an independent verification Sandbox. It never trusts the producer's still-mutable Workspace as authoritative evidence.
+
+## Blocking yield
+
+A blocking child yield retains Task Workspace state but releases Run-scoped execution/Sandbox resources.
+
+Before committing `Run -> Yielded` / `Task -> Waiting`, Pantheon captures a WorkspaceRevision and freezes mutation authority. Later continuation creates a new Run/ContextPlan against that Task Workspace checkpoint.
+
+## IntegrationIntent
+
+Task success and repository integration are separate.
+
+After accepted `code.changeset`, an authorized operation may create immutable/durable IntegrationIntent containing at least:
 
 ```text
-B → X → Y
+candidate/changeset digest
+repository
+target ref
+expected target OID
+intended result/result commit identity where known
+current integration policy/config digest
+state/revision
 ```
 
-Pantheon must not overwrite Y with C.
+IntegrationIntent is persisted before mutating shared Git refs.
 
-Integration evaluates a three-way merge:
+## Controlled integration
+
+Integration Controller materializes the accepted CAS-complete changeset and computes a controlled three-way/application result against the intended repository state.
+
+Default v1 may use squash-style integration regardless of worker-local commit history. Worker commits remain provenance/development checkpoints, not authoritative branch history.
+
+Conflict means the current target state cannot satisfy the recorded integration preconditions; it does not invalidate the accepted Artifact.
+
+## Git ref CAS
+
+Shared ref update uses compare-and-swap semantics equivalent to:
 
 ```text
-             candidate C
-            /
-base B ----
-            \
-             X → Y current target
+update target only if current OID == expected_target_oid
 ```
 
-Git plumbing such as `merge-tree --write-tree` is a strong fit because it can calculate a merge result without mutating an ordinary worktree/index.
+No silent target drift.
 
-## 22. Synthetic candidate commits are integration mechanics only
-
-When Git merge machinery needs a commit object, Pantheon may construct an internal synthetic candidate commit:
+Correct ordering:
 
 ```text
-SyntheticCandidate
-  tree = candidate resultTree
-  parent = baseCommit
+commit IntegrationIntent in SQLite
+  ↓
+external Git operation/ref CAS
+  ↓
+inspect/reconcile actual ref
+  ↓
+persist integration result/Event
 ```
 
-using Git plumbing.
+Crash between Git mutation and DB result is recovered by comparing expected target, intended result and actual current ref.
 
-This object exists for merge computation and does not redefine the `code.changeset` Artifact or require that the synthetic commit appear in final user-facing history.
+## Git object retention
 
-## 23. Integration conflict does not invalidate accepted work
+If integration/materialization temporarily relies on repository Git objects, controller may create refs under a Pantheon-owned namespace to pin those objects before committing a DB obligation that assumes continued availability.
 
-An Artifact can be correct and accepted yet conflict with a target that moved later.
+Those Git pins are storage optimization/retention, not `code.changeset` identity. The canonical Artifact remains reconstructable from Pantheon CAS.
 
-Therefore:
+## Startup reconciliation
+
+Workspace Controller reconciles SQLite inventory with actual Workspace/Git materialization. Host paths/PIDs/Git worktree lists are observations, not authority.
+
+Examples:
 
 ```text
-Acceptance = PASS
-Integration = CONFLICT
+DB Workspace active + materialization missing
+→ RecoveryFinding / reconcile/rematerialize if safe
+
+orphan Task-local worktree/clone without durable owner
+→ quarantine, not silently adopt
+
+shared target ref differs from pending IntegrationIntent
+→ integration reconciliation
 ```
 
-is valid.
+## Cleanup
 
-The accepted candidate remains immutable and accepted. The IntegrationIntent records conflict evidence/status.
+Workspace cleanup occurs only after required Candidate/Artifact/Integration data is durably preserved. Releasing the Workspace never deletes the only copy of accepted Task output.
 
-Recovery/Planner/human policy may create conflict-resolution work or leave the accepted candidate unapplied.
+Task terminalization, explicit reset/recovery and retention policy decide Workspace release. Run terminalization alone normally does not release a Task Workspace if Task may continue.
 
-The original Task is not retroactively marked failed merely because later integration conflicts.
+## Security exclusions
 
-## 24. v1 integration history is controlled and squash-style
-
-V1 should not automatically preserve arbitrary worker-created commit history when integrating.
-
-Given:
+Untrusted Sandbox never receives ambient access to:
 
 ```text
-current target = Y
-clean merged tree = M
+Pantheon operator socket/DB/config
+raw CAS
+peer Task workspaces
+authoritative repository common-dir/ref store
+host credential agents
+host container runtime socket
 ```
 
-Pantheon creates one controlled integration commit:
+Workspace policy and Sandbox policy jointly enforce these boundaries.
 
-```text
-IntegrationCommit
-  tree = M
-  parent = Y
-```
+## Core invariants
 
-This preserves deterministic/shared history while allowing Agents to use whatever local commit style helps them reason.
-
-Preserving curated worker commit history can be added later as an explicit integration policy.
-
-## 25. Shared ref updates use compare-and-swap
-
-Integration is computed against an exact target OID.
-
-Before advancing a ref, Pantheon verifies that it still points to the expected old OID.
-
-Conceptually:
-
-```text
-compute merge against Y
-      ↓
-create integration commit Z
-      ↓
-CAS update:
-refs/heads/main Y → Z
-      │
-      ├── success → APPLIED
-      └── ref moved → STALE; recompute/reconcile
-```
-
-Git `update-ref` with an expected old OID provides the necessary compare-and-swap semantics.
-
-No integration may blindly overwrite a ref that changed since the merge calculation.
-
-## 26. Never move a branch behind an unmanaged checked-out worktree
-
-Pantheon must not silently advance a branch that is currently checked out in a user/unmanaged worktree where moving the ref would make that worktree's index/working tree inconsistent.
-
-Before target mutation, the Integration Controller reconciles Git worktree inventory and determines whether the target ref is safe/managed for automatic update.
-
-If not, v1 should stage the result under a Pantheon-controlled integration ref such as:
-
-```text
-refs/pantheon/integration/<integration-id>
-```
-
-and report a handoff-ready state, or use an explicitly configured managed/remote integration surface.
-
-Core safety rule:
-
-> **Pantheon never modifies the user's ordinary working checkout behind their back.**
-
-## 27. Parallel Tasks remain isolated until composition/integration
-
-Example:
-
-```text
-main = B
-
-Task A workspace ← B
-Task B workspace ← B
-Task C workspace ← B
-```
-
-Each worker edits only its own mutable workspace and produces an immutable changeset Artifact.
-
-Integration then serializes/refences actual target movement:
-
-```text
-integrate A → target A'
-integrate B against A' → clean/conflict
-integrate C against latest target → clean/conflict
-```
-
-Agents do not share mutable working directories as a synchronization mechanism.
-
-## 28. Workspace recovery and reconciliation
-
-SQLite/Pantheon state is authoritative; Git filesystem/worktree state is external observed state.
-
-On startup/reconciliation:
-
-```text
-load non-released WorkspaceRecords
-        ↓
-query Git worktree inventory
-        ↓
-compare durable intent vs observed state
-```
-
-Representative outcomes:
-
-```text
-expected workspace exists
-→ inspect/recover
-
-DB workspace exists, path/Git registration missing
-→ workspace.missing / recovery policy
-
-Git/Pantheon-looking worktree exists without durable owner
-→ dangling/quarantine
-```
-
-Pantheon must not blindly prune all apparently stale Git worktrees. Ownership and durable output preservation are established before destructive cleanup.
-
-## 29. Workspace cleanup occurs after durable preservation
-
-Before removing a Task workspace, Pantheon verifies that all state policy requires to survive has been sealed or otherwise durably recorded.
-
-Checks may include:
-
-- candidate Artifacts sealed;
-- required diagnostic WorkspaceRevisions retained;
-- Acceptance/finalization no longer needs mutable workspace state;
-- Integration/recovery no longer depends on the workspace;
-- retention policy permits removal.
-
-Then:
-
-```text
-Workspace → RELEASING
-      ↓
-remove Git worktree/copy
-      ↓
-verify Git/admin state
-      ↓
-release Task-scoped reservation
-      ↓
-Workspace → RELEASED
-```
-
-Forced removal is permitted only after Pantheon has explicitly decided how to handle any unsealed local state.
-
-## 30. Workspace lifecycle
-
-V1 phases:
-
-```text
-REQUESTED
-    ↓
-PREPARING
-    ↓
-READY
-    ↕
-FROZEN
-    ↓
-RELEASING
-    ↓
-RELEASED
-
-exception:
-ERROR
-```
-
-Semantics:
-
-- `REQUESTED` — durable workspace intent exists;
-- `PREPARING` — external Git/filesystem materialization is being reconciled;
-- `READY` — worker mutation is permitted according to policy;
-- `FROZEN` — workspace retained but producer mutation is prohibited;
-- `RELEASING` — cleanup is desired/in progress;
-- `RELEASED` — workspace reservation/external state has been safely released;
-- `ERROR` — controller cannot currently satisfy/reconcile the desired workspace state.
-
-Detailed observations belong in conditions rather than phase explosion, for example:
-
-```text
-GitRegistered
-BaseMaterialized
-SandboxReady
-CandidateSealed
-Missing
-Corrupt
-```
-
-## Git safety model
-
-```text
-                  SHARED REPOSITORY
-                refs / remote authority
-                         ▲
-                         │
-                 Integration Controller
-                         │
-             ┌───────────┴────────────┐
-             │                        │
-          Task A                   Task B
-       detached worktree        detached worktree
-             │                        │
-          mutable                   mutable
-             │                        │
-           seal                     seal
-             │                        │
-             ▼                        ▼
-       Changeset A              Changeset B
-             │                        │
-             └──────────┬─────────────┘
-                        ▼
-                    Acceptance
-                        │
-                        ▼
-                IntegrationIntent
-                        │
-               three-way / CAS
-                        │
-                        ▼
-                 controlled ref
-```
-
-## v1 scope
-
-Include:
-
-- Task-scoped Workspace resource;
-- immutable base commit pinning;
-- detached linked worktrees by default;
-- clone/copy fallback where linked worktrees are unsuitable;
-- protection of shared refs/remotes from worker mutation;
-- immutable WorkspaceRevision checkpoints;
-- candidate capture from actual working-tree state using controller-owned index state;
-- ignored-file exclusion by default;
-- settled-state and scope validation before sealing;
-- `code.changeset` Artifact based on base commit + result tree;
-- Workspace freezing during Acceptance;
-- verification against immutable sealed state;
-- separate IntegrationIntent;
-- three-way integration;
-- controlled squash-style integration commit;
-- compare-and-swap ref updates;
-- protection of unmanaged checked-out branches;
-- startup/recovery reconciliation;
-- safe cleanup after output preservation.
-
-Defer:
-
-- preserving arbitrary worker commit history during integration;
-- advanced stacked-branch/patch-stack semantics;
-- complex automatic composition of many independent changesets;
-- distributed multi-host Git workspace ownership;
-- automatic destructive cleanup of ambiguous dangling worktrees;
-- specialized large-monorepo virtual filesystem integrations;
-- arbitrary SCM systems other than Git.
-
-## Key decisions
-
-1. **A Git Workspace is Task-owned and normally survives multiple Runs and Attempts.**
-2. **Workspace creation resolves a requested ref to an immutable base commit and never automatically follows later ref movement.**
-3. **Linked worktrees use detached HEAD by default.**
-4. **Git worktree locks are defensive; SQLite remains ownership truth.**
-5. **Shared Git refs/remotes are controller-owned and protected from executor mutation at the enforcement layer.**
-6. **Worker Git commits may be used for development but do not define candidate identity.**
-7. **Repositories unsuitable for safe linked worktrees use clone/copy isolation.**
-8. **WorkspaceRevision captures immutable Git tree state without changing the worker's actual staging index.**
-9. **Ignored files are excluded from code snapshots by default and explicit deliverables are sealed separately.**
-10. **Every Run records its starting WorkspaceRevision; additional checkpointing is policy-driven.**
-11. **The authoritative candidate is sealed from actual worktree state, not merely HEAD or staged files.**
-12. **Candidate sealing requires settled Git state and revalidates the complete changeset against Task scope.**
-13. **A `code.changeset` Artifact binds repository, base commit and result tree, with a stable patch representation.**
-14. **Candidate submission freezes worker mutation; Acceptance verifies immutable sealed state in an independent verification context.**
-15. **Accepted changesets may feed downstream Tasks without first being merged into a shared branch.**
-16. **Acceptance and Git integration are separate; Task success does not inherently mutate repository refs or remotes.**
-17. **Shared repository mutation is expressed through a separately authorized IntegrationIntent.**
-18. **Integration uses three-way semantics against the current target rather than overwriting it.**
-19. **Integration conflict does not invalidate an already accepted candidate Artifact.**
-20. **V1 integrates using a controlled squash-style commit rather than arbitrary worker commit history.**
-21. **Target refs are advanced using compare-and-swap against the exact target OID used for calculation.**
-22. **Pantheon does not silently advance a branch currently checked out by an unmanaged worktree.**
-23. **Parallel Tasks never share mutable working trees; conflicts are handled at Artifact composition/integration boundaries.**
-24. **Workspace recovery reconciles durable Pantheon state against Git/worktree reality and quarantines ambiguous dangling state before cleanup.**
-25. **Workspace cleanup occurs only after immutable outputs and required diagnostics are durably preserved.**
-
-## Core invariant
-
-> **Agents may freely reason and edit inside their authorized Task workspace, but only Pantheon can turn those edits into an immutable candidate and only an authorized integration transaction can affect shared repository history.**
+1. Task owns mutable Workspace; Runs/Attempts use it.
+2. Workspace base commit is immutable unless explicit Recovery/rematerialization changes the Workspace.
+3. Untrusted shell does not get writable authoritative shared Git common-dir/ref authority.
+4. Isolated Task Git state is preferred for sandboxed coding Agents in v1.
+5. Worker commits/staging are not Candidate identity.
+6. WorkspaceRevision captures exact logical state without mutating worker staging semantics.
+7. `code.changeset` is CAS-complete and remains valid even if Task Git objects are later GC'd.
+8. Acceptance uses immutable sealed content, not live producer Workspace.
+9. Task success does not imply merge/push.
+10. IntegrationIntent precedes external shared-ref mutation and Git target update is CAS-protected/reconciled.
+11. Sandbox and Workspace isolation are distinct and both are required where applicable.
