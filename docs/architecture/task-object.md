@@ -2,45 +2,55 @@
 
 ## Status
 
-Draft design — Pantheon task subsystem specification.
+Draft design — Pantheon Task subsystem specification.
 
 ## Purpose
 
-A Pantheon `Task` is an immutable, provider-independent contract describing one bounded outcome. It defines what must be accomplished, what inputs are relevant, what outputs are expected, how success is judged, and what boundaries constrain the work.
+A Pantheon `Task` is an immutable, execution-independent contract describing one bounded outcome. It defines what must be accomplished, relevant inputs, expected outputs, acceptance criteria, semantic competencies required, and the maximum scope of work.
 
-A Task does **not** define who performs the work or how it is executed.
+A Task does **not** define which Logical Agent performs the work or how/where that Agent executes.
 
-## Core resource distinctions
+See also:
+
+- `docs/architecture/taskgraph-dependencies.md`
+- `docs/architecture/task-lifecycle.md`
+- `docs/architecture/task-acceptance-and-completion.md`
+- `docs/architecture/logical-agent-resolution.md`
+- `docs/architecture/run-and-attempt.md`
+
+## Core hierarchy
 
 ```text
 GOAL
 What the user ultimately wants
     ↓
+TASKGRAPH
+Relationships between bounded outcomes
+    ↓
 TASK
 One bounded outcome that must be produced
     ↓
 RUN
-A resolved execution of that Task
+One immutable resolved execution strategy
     ↓
 ATTEMPT
-One concrete try by one executor
+One logical backend-execution lineage
     ↓
-ARTIFACT
-Evidence or result produced by execution
+ARTIFACT / EVIDENCE
+Produced outputs and proof
 ```
-
-The Task remains unchanged when execution moves from a local model to OpenCode or Claude Code.
 
 ## Foundational principles
 
-1. **Outcome, not trajectory.** A Task describes the desired result rather than prescribing implementation steps.
-2. **Immutable after materialization.** Running work always references a stable Task spec hash.
-3. **Provider independent.** Agent, model, harness, session, quota and runtime details belong to Run/Attempt state.
-4. **Bounded and verifiable.** A valid Task should represent one meaningful outcome that can be independently understood and evaluated.
-5. **Typed inputs and outputs.** Large content is referenced through resources/artifacts rather than embedded into the Task.
-6. **Acceptance is separate from production.** Producing an output does not itself prove the Task succeeded.
-7. **Task scope is a ceiling.** A Task may narrow the authority available to execution but may not widen enclosing policy.
-8. **Graph relationships are external.** Dependencies, joins and dynamic spawn relationships belong to TaskGraph state, not the Task spec.
+1. **Outcome, not trajectory.** Task describes the desired result rather than prescribing implementation steps.
+2. **Immutable after materialization.** Active work always references a stable Task spec hash.
+3. **Execution independent.** Logical Agent, backend, model/runtime details, session identity and routing belong below Task.
+4. **Bounded and verifiable.** A valid Task represents one meaningful outcome that can be independently understood and evaluated.
+5. **Typed inputs and outputs.** Large content is referenced through resources/artifacts rather than embedded into Task.
+6. **Acceptance is separate from production.** Producing an output does not prove Task success.
+7. **Task scope is a ceiling.** Task may narrow authority but never broaden enclosing policy.
+8. **Graph relationships are external.** Dependencies, joins and spawn lineage belong to TaskGraph/runtime graph state.
+9. **Semantic competencies are not execution features.** Task says what ability is needed; Agent resolution and Execution Fabric separately determine who can do it and how it can run.
 
 ## Proposed shape
 
@@ -70,10 +80,11 @@ spec:
       ref: artifact://checkout-timeout-report
 
   requirements:
-    capabilities:
-      - code-analysis
-      - code-editing
-      - test-execution
+    competencies:
+      - code.analysis
+      - code.debugging
+      - code.editing
+      - test.execution
 
   scope:
     resources:
@@ -113,7 +124,7 @@ spec:
         statement: The result identifies the root cause of the timeout.
 ```
 
-Field names are still draft. The conceptual boundaries are the important part.
+Field names remain draft until schema freeze; the conceptual boundaries are normative.
 
 ## Objective
 
@@ -128,12 +139,12 @@ objective: Fix the checkout timeout.
 Bad:
 
 ```yaml
-objective: Open src/checkout.ts, change line 72, use Claude, then run npm test.
+objective: Open a specific file, use a specific executor, change line 72, then run one command.
 ```
 
-The second form mixes desired outcome, implementation procedure and executor choice. Pantheon must preserve room for an agent to discover that the initial implementation assumption was wrong.
+The second form mixes desired outcome, assumed implementation procedure, and execution strategy. Pantheon must preserve room to discover that an initial implementation assumption is wrong.
 
-A Task must also be more bounded than a broad Goal. `Improve the website` is a Goal; `Reduce checkout failures caused by the payment callback timeout` can be a Task.
+A Task is more bounded than a Goal. `Improve the website` is a Goal; `Reduce checkout failures caused by the payment callback timeout` can be a Task.
 
 ## Inputs
 
@@ -147,13 +158,13 @@ inputs:
     ref: artifact://feature-spec-123
 ```
 
-A Context Builder resolves these references into executor-specific context later.
+A later Context Builder resolves these references into an immutable Run execution snapshot and backend-specific presentation.
 
-Input relevance does not imply write permission.
+Input relevance does not imply read or write authority.
 
 ## Outputs
 
-Expected outputs are typed contracts, not the actual produced artifacts.
+Expected outputs are typed contracts, not produced artifacts themselves.
 
 Example kinds:
 
@@ -170,65 +181,63 @@ diagnosis
 patch
 ```
 
-After execution, a Run binds output names to concrete ArtifactRefs.
+A candidate result binds output names to immutable ArtifactRefs.
 
 ```text
-TaskSpec.outputs        expected contract
-TaskRun.outputs         actual ArtifactRefs
+TaskSpec.outputs     expected contract
+Candidate.outputs    actual ArtifactRefs
 ```
 
 ## Acceptance
 
-Acceptance criteria define what success means. They are distinct from output existence.
+Acceptance criteria define what success means and are separate from output existence.
 
-A code changeset may exist while tests fail. A report may exist while failing to answer the requested question.
+A code changeset may exist while tests fail. A report may exist while failing to answer the required question.
 
-Executor-declared completion therefore transitions a run only to a candidate-complete state; Pantheon-owned acceptance logic determines whether the Task is actually satisfied.
+A Run may submit one candidate result, but only Pantheon-owned acceptance logic may declare the Task satisfied.
 
-Acceptance mechanisms are specified separately in the Acceptance & Completion Contracts design.
+## Requirements and competencies
 
-## Requirements
-
-Requirements describe execution capabilities the Task needs without naming a concrete executor.
-
-Examples:
+Task requirements describe **semantic abilities** needed to achieve the outcome.
 
 ```yaml
 requirements:
-  capabilities:
-    - vision
-    - browser
-    - code-analysis
-  locality: local-only
+  competencies:
+    - vision.analysis
+    - web.research
+    - code.analysis
 ```
 
-The router later resolves an executor that satisfies these constraints.
+A competency is not:
 
-## Scope as least-privilege envelope
+- a concrete Agent;
+- an Agent Skill;
+- a backend/provider/model;
+- an Execution Feature;
+- a tool/action permission;
+- an authorization capability grant/ticket.
 
-Task scope narrows the maximum authority needed for this Task.
+The Agent Resolver first uses Task type and competencies to determine which Logical Agents are eligible.
 
-Effective authority is the intersection of enclosing policy and Task scope.
+For each eligible Agent, Pantheon then constructs an Agent-specific `ExecutionRequest` whose execution requirements are evaluated by the Execution Fabric.
+
+This produces the intended separation:
 
 ```text
-System Policy
-    ∩
-User Policy
-    ∩
-Project Policy
-    ∩
-Agent Policy
-    ∩
-Task Envelope
-    ∩
-Temporary Grants
+Task competencies
+      ↓
+Logical Agent eligibility
+      ↓
+Agent-specific ExecutionRequest
+      ↓
+Execution Features / placement / isolation / resources
+      ↓
+ExecutorBackend offers
 ```
 
-A Task may narrow authority but cannot broaden it.
+## Task type
 
-## Task types
-
-Task types are namespaced and used for agent discovery and defaults/policy selection.
+Task types are namespaced and used for Agent discovery and policy/default selection.
 
 Examples:
 
@@ -248,41 +257,64 @@ ops.diagnose
 design.architecture
 ```
 
-Task type must not dictate a concrete agent/model/harness.
+Task type must not dictate a concrete Agent or backend.
+
+## Scope as least-privilege envelope
+
+Task scope narrows the maximum authority needed for this Task.
+
+Effective authority remains the intersection of enclosing policy and Task scope:
+
+```text
+System Policy
+    ∩
+User Policy
+    ∩
+Project Policy
+    ∩
+Agent Policy
+    ∩
+Task Envelope
+    ∩
+Temporary Grants
+```
+
+A Task may narrow authority but cannot broaden it.
+
+Scope does not itself grant authority.
 
 ## Immutability
 
-A Task becomes immutable when materialized for execution. Requirement changes produce a new revision or superseding Task rather than mutating the contract underneath active Runs.
+A Task becomes immutable when materialized for execution.
 
-Each Run records a `taskSpecHash` so execution and evaluation remain reproducible.
+Requirement changes produce a new/superseding Task or appropriate graph/reconciliation action rather than mutating the contract beneath active Runs.
 
-Results never mutate the Task definition.
+Every Run records/references the immutable Task spec hash used for its strategy.
+
+Results never mutate Task definition.
 
 ## IDs and names
 
-Task IDs should be opaque, durable identifiers such as UUIDv7/ULID-style IDs.
+Task IDs are opaque durable identifiers. Human-readable names are metadata and must not be used as execution identity.
 
-Human-readable names are metadata and may evolve independently.
-
-## What a Task must not contain
+## What Task must not contain
 
 ```text
-Agent assignment
-Model
-Provider/harness
-Credentials or API keys
-Session IDs
-Runtime status
-Retry counters consumed
-Token/quota usage
-Worktree path
+Logical Agent assignment
+backend/provider/model/runtime assignment
+credentials or API keys
+session IDs / LaunchKeys
+runtime status
+consumed retry counters
+token/quota usage
+worktree path
 PID/process state
-Dependency edges
-Mutable child-task IDs
-Raw result bodies
-Arbitrary executable hooks
+dependency edges
+mutable child-task IDs
+raw result bodies
+arbitrary executable hooks
 Agent memory
-Private reasoning traces
+private reasoning traces
 ```
 
 ## Resource relationships
@@ -294,20 +326,20 @@ TaskGraph
   ├── Task
   │     └── Run
   │          ├── Attempt
-  │          └── Artifact refs
+  │          └── candidate ArtifactRefs
   └── Task
 ```
 
-TaskGraph owns dependency/order relationships. Dynamic Task creation and lineage are described in `task-spawn-and-dynamic-graphs.md`.
+TaskGraph owns dependency/order relationships. Dynamic Task creation and provenance are defined separately.
 
-## Core invariant
+## Core invariants
 
-> Task = immutable statement of required outcome.
+> **Task = immutable statement of required bounded outcome.**
 >
-> Run = resolved execution of that statement.
+> **Competency = semantic ability the Task requires, not an execution or authorization mechanism.**
 >
-> Attempt = one worker trying to satisfy it.
+> **Logical Agent selection and backend routing are deliberately excluded from Task.**
 >
-> Artifact = evidence/result produced by execution.
+> **Run = one immutable resolved strategy for pursuing the Task.**
 >
-> TaskGraph = relationships among Tasks.
+> **Attempt = one logical backend-execution lineage under that Run.**
