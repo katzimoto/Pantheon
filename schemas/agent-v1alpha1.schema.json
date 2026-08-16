@@ -21,16 +21,27 @@
     "spec": {"$ref": "#/$defs/spec"}
   },
   "$defs": {
+    "qualifiedName": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
+    },
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["description", "execution", "permissions"],
+      "required": ["description", "accepts", "competencies", "execution", "permissions"],
       "properties": {
         "description": {"type": "string", "minLength": 1},
         "accepts": {
           "type": "array",
+          "minItems": 1,
           "uniqueItems": true,
-          "items": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"}
+          "items": {"$ref": "#/$defs/qualifiedName"}
+        },
+        "competencies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/qualifiedName"}
         },
         "genome": {"$ref": "#/$defs/genome"},
         "execution": {"$ref": "#/$defs/execution"},
@@ -87,10 +98,7 @@
             "executionFeatures": {
               "type": "array",
               "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
-              }
+              "items": {"$ref": "#/$defs/qualifiedName"}
             },
             "minContextTokens": {"type": "integer", "minimum": 0}
           }
@@ -102,10 +110,10 @@
       "additionalProperties": false,
       "properties": {
         "bundles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
-        "capabilities": {
+        "actions": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"}
+          "items": {"$ref": "#/$defs/qualifiedName"}
         }
       }
     },
@@ -126,7 +134,7 @@
       "additionalProperties": false,
       "required": ["action"],
       "properties": {
-        "action": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"},
+        "action": {"$ref": "#/$defs/qualifiedName"},
         "resource": {"type": "string", "minLength": 1},
         "effect": {"enum": ["permit", "forbid"]},
         "approval": {"const": "required"}
