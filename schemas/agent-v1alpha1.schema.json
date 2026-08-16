@@ -6,37 +6,19 @@
   "additionalProperties": false,
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "properties": {
-    "apiVersion": {
-      "const": "pantheon/v1alpha1"
-    },
-    "kind": {
-      "const": "Agent"
-    },
+    "apiVersion": {"const": "pantheon/v1alpha1"},
+    "kind": {"const": "Agent"},
     "metadata": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name"],
       "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9-]{0,62}$"
-        },
-        "displayName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "labels": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
-        }
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+        "displayName": {"type": "string", "minLength": 1, "maxLength": 128},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
       }
     },
-    "spec": {
-      "$ref": "#/$defs/spec"
-    }
+    "spec": {"$ref": "#/$defs/spec"}
   },
   "$defs": {
     "spec": {
@@ -44,85 +26,41 @@
       "additionalProperties": false,
       "required": ["description", "execution", "permissions"],
       "properties": {
-        "description": {
-          "type": "string",
-          "minLength": 1
-        },
+        "description": {"type": "string", "minLength": 1},
         "accepts": {
           "type": "array",
           "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
-          }
+          "items": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"}
         },
-        "genome": {
-          "$ref": "#/$defs/genome"
-        },
-        "execution": {
-          "$ref": "#/$defs/execution"
-        },
-        "tools": {
-          "$ref": "#/$defs/tools"
-        },
-        "permissions": {
-          "$ref": "#/$defs/permissions"
-        },
-        "workspace": {
-          "$ref": "#/$defs/workspace"
-        },
-        "delegation": {
-          "$ref": "#/$defs/delegation"
-        },
-        "limits": {
-          "$ref": "#/$defs/limits"
-        },
-        "review": {
-          "$ref": "#/$defs/review"
-        },
-        "learning": {
-          "$ref": "#/$defs/learning"
-        },
-        "extensions": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object"
-          }
-        }
+        "genome": {"$ref": "#/$defs/genome"},
+        "execution": {"$ref": "#/$defs/execution"},
+        "tools": {"$ref": "#/$defs/tools"},
+        "permissions": {"$ref": "#/$defs/permissions"},
+        "workspace": {"$ref": "#/$defs/workspace"},
+        "delegation": {"$ref": "#/$defs/delegation"},
+        "limits": {"$ref": "#/$defs/limits"},
+        "review": {"$ref": "#/$defs/review"},
+        "learning": {"$ref": "#/$defs/learning"},
+        "extensions": {"type": "object", "additionalProperties": {"type": "object"}}
       }
     },
     "genome": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "soul": {
-          "type": "string"
-        },
-        "behavior": {
-          "type": "string"
-        },
+        "soul": {"type": "string"},
+        "behavior": {"type": "string"},
         "memory": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "namespaces": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string"
-              }
-            },
+            "namespaces": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
             "retrieval": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "mode": {
-                  "enum": ["adaptive", "always", "disabled"]
-                },
-                "maxTokens": {
-                  "type": "integer",
-                  "minimum": 0
-                }
+                "mode": {"enum": ["adaptive", "always", "disabled"]},
+                "maxTokens": {"type": "integer", "minimum": 0}
               }
             }
           }
@@ -131,20 +69,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "available": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string"
-              }
-            },
-            "preload": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string"
-              }
-            }
+            "available": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+            "preload": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
           }
         }
       }
@@ -154,17 +80,12 @@
       "additionalProperties": false,
       "required": ["routePolicy", "compatibleHarnesses"],
       "properties": {
-        "routePolicy": {
-          "type": "string",
-          "minLength": 1
-        },
+        "routePolicy": {"type": "string", "minLength": 1},
         "compatibleHarnesses": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {
-            "enum": ["claude-code", "opencode", "openai-compatible", "shell"]
-          }
+          "items": {"enum": ["claude-code", "opencode", "openai-compatible", "shell"]}
         },
         "requirements": {
           "type": "object",
@@ -175,10 +96,7 @@
             "structuredOutput": {"type": "boolean"},
             "mcp": {"type": "boolean"},
             "localOnly": {"type": "boolean"},
-            "minContextTokens": {
-              "type": "integer",
-              "minimum": 0
-            }
+            "minContextTokens": {"type": "integer", "minimum": 0}
           }
         }
       }
@@ -187,20 +105,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "bundles": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "type": "string"
-          }
-        },
+        "bundles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
         "capabilities": {
           "type": "array",
           "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
-          }
+          "items": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"}
         }
       }
     },
@@ -209,43 +118,34 @@
       "additionalProperties": false,
       "required": ["profile"],
       "properties": {
-        "profile": {
-          "type": "string",
-          "minLength": 1
-        },
+        "profile": {"type": "string", "minLength": 1},
         "rules": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["action", "effect"],
-            "properties": {
-              "action": {
-                "type": "string",
-                "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"
-              },
-              "resource": {
-                "type": "string"
-              },
-              "effect": {
-                "enum": ["allow", "ask", "deny"]
-              }
-            }
-          }
+          "items": {"$ref": "#/$defs/permissionRule"}
         }
       }
+    },
+    "permissionRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": {"type": "string", "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$"},
+        "resource": {"type": "string", "minLength": 1},
+        "effect": {"enum": ["permit", "forbid"]},
+        "approval": {"const": "required"}
+      },
+      "oneOf": [
+        {"required": ["effect"], "not": {"required": ["approval"]}},
+        {"required": ["approval"], "not": {"required": ["effect"]}}
+      ]
     },
     "workspace": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "isolation": {
-          "enum": ["none", "worktree", "copy"]
-        },
-        "sandbox": {
-          "type": "string",
-          "minLength": 1
-        }
+        "isolation": {"enum": ["none", "worktree", "copy"]},
+        "sandbox": {"type": "string", "minLength": 1}
       }
     },
     "delegation": {
@@ -253,76 +153,41 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {"type": "boolean"},
-        "allow": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "type": "string"
-          }
-        },
-        "maxDepth": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "maxConcurrent": {
-          "type": "integer",
-          "minimum": 0
-        }
+        "allow": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "maxDepth": {"type": "integer", "minimum": 0},
+        "maxConcurrent": {"type": "integer", "minimum": 0}
       }
     },
     "limits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "maxTurns": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "maxRetries": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "wallTime": {
-          "type": "string",
-          "pattern": "^[0-9]+(?:ms|s|m|h)$"
-        }
+        "maxTurns": {"type": "integer", "minimum": 1},
+        "maxRetries": {"type": "integer", "minimum": 0},
+        "wallTime": {"type": "string", "pattern": "^[0-9]+(?:ms|s|m|h)$"}
       }
     },
     "review": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "policy": {
-          "type": "string"
-        },
-        "requiredBeforeMerge": {
-          "type": "boolean"
-        }
+        "policy": {"type": "string"},
+        "requiredBeforeMerge": {"type": "boolean"}
       }
     },
     "learning": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "reflection": {
-          "enum": ["after-task", "on-failure", "manual", "disabled"]
-        },
+        "reflection": {"enum": ["after-task", "on-failure", "manual", "disabled"]},
         "promotion": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "memory": {
-              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
-            },
-            "skill": {
-              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
-            },
-            "behavior": {
-              "enum": ["automatic", "eval-gated", "human-approval", "disabled"]
-            },
-            "soul": {
-              "enum": ["human-approval", "disabled"]
-            }
+            "memory": {"enum": ["automatic", "eval-gated", "human-approval", "disabled"]},
+            "skill": {"enum": ["automatic", "eval-gated", "human-approval", "disabled"]},
+            "behavior": {"enum": ["automatic", "eval-gated", "human-approval", "disabled"]},
+            "soul": {"enum": ["human-approval", "disabled"]}
           }
         }
       }
