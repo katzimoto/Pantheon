@@ -12,6 +12,10 @@ The central rule is:
 
 > **Lease expiry may transfer control authority, but it never proves that external execution stopped. Resource capacity is released only after reconciliation establishes that release is safe.**
 
+See also:
+
+- `docs/architecture/run-and-attempt.md`
+
 ## Ownership primitives
 
 Pantheon distinguishes three different concepts.
@@ -92,10 +96,10 @@ Only `RELEASED` returns capacity to the Resource Ledger.
 
 Communication loss, daemon restart, timeout, or backend uncertainty do not imply executor death.
 
-If Pantheon cannot prove that a Run's external execution stopped:
+If Pantheon cannot prove that a Run's current Attempt stopped:
 
 ```text
-Run execution = uncertain
+Attempt execution = uncertain
 ResourceReservations = retained
 Budget state = fenced/reconciled conservatively
 ```
@@ -118,6 +122,8 @@ Examples:
 
 Released after the Run no longer uses them and safe release is confirmed.
 
+A Run-scoped reservation can therefore span multiple sequential Attempts under the same immutable ExecutionBinding.
+
 ### Task-scoped reservation
 
 Examples:
@@ -130,6 +136,8 @@ A Task may therefore retain its workspace while replacing execution Runs:
 Task
  ├── Task-owned workspace reservation
  ├── Run 1 execution reservations
+ │    ├── Attempt 1
+ │    └── Attempt 2
  └── Run 2 execution reservations
 ```
 
@@ -164,6 +172,8 @@ Failure at any step rolls back the entire transaction.
 
 There are no network/backend calls inside this transaction.
 
+The initial Attempt is **not** required to exist in this scheduler transaction. After Run preparation is complete and `LaunchReady=True`, the Run Controller durably creates an Attempt with its immutable LaunchKey before contacting the backend.
+
 ## External execution begins after durable intent
 
 Correct ordering:
@@ -173,27 +183,29 @@ DB commit
   ↓
 Run intent durable
   ↓
-Run Controller observes intent
+Run Controller prepares Run
   ↓
-ExecutorBackend launch/reconcile
+Attempt + LaunchKey durable
+  ↓
+ExecutorBackend ensure/reconcile
 ```
 
-Pantheon must never start an external executor first and hope to persist it afterward.
+Pantheon must never start an external executor first and hope to persist either its Run or Attempt afterward.
 
 This ensures a daemon crash cannot erase knowledge that execution was intended/committed.
 
-## Idempotent launch key
+## Idempotent Attempt LaunchKey
 
-There is still a crash window after sending a launch request but before recording its acknowledgement.
+There is still a crash window after sending a backend start/ensure request but before recording its acknowledgement.
 
-Every Run therefore receives an immutable `LaunchKey` before external launch.
+Every **Attempt** therefore receives one immutable `LaunchKey` before external execution is attempted.
 
-All retries of backend launch for the same Run use the same key.
+All retries, reconnects, adapter restarts, daemon restarts, and reconciliation operations for that same Attempt use the same LaunchKey.
 
 Required semantic contract:
 
 ```text
-launch(launchKey = X)
+ensureExecution(launchKey = X)
 first invocation  → create/attach execution E
 retry invocation  → return/attach execution E
 ```
@@ -206,16 +218,20 @@ retry invocation → create independent execution F
 
 If the native backend has no idempotency primitive, its adapter must provide the behavior using backend-private durable state where possible.
 
+A fresh execution after the prior execution is definitively terminated creates a **new Attempt with a new LaunchKey**. The Run and its immutable ExecutionBinding may remain the same if retry policy intentionally retries the same strategy.
+
 The LaunchKey is distinct from the backend's opaque execution/session identifier.
 
 ## Backend execution identity
 
-After launch/reconciliation, the backend may return an opaque execution reference.
+After ensure/reconciliation, the backend may return an opaque execution reference or attachment state.
 
 Pantheon treats it as adapter-owned identity:
 
 ```text
 Run
+  ↓
+Attempt
   ↓
 LaunchKey
   ↓
@@ -259,7 +275,7 @@ Correct flow:
 ```text
 termination desired
   ↓
-backend terminate/reconcile
+backend terminate/reconcile current Attempt
   ↓
 confirmed stopped
   ↓
@@ -292,7 +308,7 @@ Budget hold:
 
 ```text
 hold 100k tokens
-Run consumes 63k
+Attempts under Run consume 63k total
 Run ends
 → 63k remains consumed
 → unused 37k returns to available budget
@@ -308,30 +324,34 @@ On daemon restart:
 load nonterminal Runs
 load associated Reservations/BudgetHolds
 for each Run:
-    reconcile with ExecutorBackend
+    load current nonterminal Attempt, if any
+    reconcile that Attempt with ExecutorBackend
 ```
 
 Possible outcomes:
 
 ### Confirmed running
 
+- current Attempt remains active;
 - reservations remain ACTIVE;
 - controller ownership/epoch is adopted/refreshed;
 - Run continues reconciliation.
 
 ### Confirmed stopped
 
-- reconcile terminal/attempt outcome;
-- release appropriate Run-scoped reservations when safe;
-- settle BudgetHolds.
+- persist terminal Attempt observation/evidence;
+- higher-level failure/retry policy may finalize the Run or create another Attempt under the same Binding;
+- release appropriate Run-scoped reservations only when the Run no longer requires them;
+- settle BudgetHolds when the Run is finalized.
 
 ### Unknown
 
+- current Attempt remains nonterminal;
 - reservations become/remain UNCERTAIN;
 - capacity stays charged;
-- do not launch replacement execution until higher-level recovery policy permits it.
+- do not create a replacement Attempt while execution continuity is unresolved.
 
-All durable reservation state lives in SQLite, never only in scheduler memory.
+All durable reservation and Attempt ownership state lives in SQLite, never only in scheduler memory.
 
 ## Capacity shrinkage
 
@@ -354,7 +374,7 @@ Defer:
 - external consensus/lease service;
 - multi-daemon active-active scheduling;
 - automatic resource preemption;
-- speculative duplicate Runs;
+- speculative concurrent Attempts or duplicate Runs;
 - arbitrary reservation holder scopes;
 - releasing capacity based solely on heartbeat timeout.
 
@@ -367,10 +387,11 @@ Defer:
 5. v1 supports Run-scoped and Task-scoped ResourceReservations.
 6. Reservation lifecycle is `HELD`, `ACTIVE`, `RELEASING`, `UNCERTAIN`, `RELEASED`; only `RELEASED` stops counting against capacity.
 7. ResourceReservations, BudgetHolds, ExecutionBinding, Run intent, and SchedulingClaim consumption commit atomically.
-8. External execution begins only after durable intent exists.
-9. Every Run has an immutable LaunchKey; backend launch is idempotent with respect to it.
-10. Run ownership uses a monotonic epoch to reject stale controller operations.
-11. v1 remains single-daemon/SQLite and requires no external distributed lease system.
-12. Cancellation does not free capacity until termination is confirmed.
-13. Budget Holds and Resource Reservations share transactional machinery but have distinct accounting semantics.
-14. All release/reconciliation operations are idempotent.
+8. External execution begins only after durable Run intent and durable Attempt/LaunchKey state exist.
+9. Every Attempt has one immutable LaunchKey; backend ensure/reconciliation is idempotent with respect to it.
+10. A new Attempt receives a new LaunchKey; reconnect/recovery of the same execution lineage does not.
+11. Run ownership uses a monotonic epoch to reject stale controller operations.
+12. v1 remains single-daemon/SQLite and requires no external distributed lease system.
+13. Cancellation does not free capacity until termination is confirmed.
+14. Budget Holds and Resource Reservations share transactional machinery but have distinct accounting semantics.
+15. All release/reconciliation operations are idempotent.
