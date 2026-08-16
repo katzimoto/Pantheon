@@ -167,7 +167,6 @@
       "additionalProperties": false,
       "properties": {
         "maxTurns": {"type": "integer", "minimum": 1},
-        "maxRetries": {"type": "integer", "minimum": 0},
         "wallTime": {"type": "string", "pattern": "^[0-9]+(?:ms|s|m|h)$"}
       }
     },
