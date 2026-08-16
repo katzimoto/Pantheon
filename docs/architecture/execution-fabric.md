@@ -12,9 +12,17 @@ The core schedules and routes against normalized execution contracts. Concrete e
 
 The central rule is:
 
-> **Pantheon core may reason about semantic work, execution features, policy, placement, resources, and observed performance. It must not contain business logic keyed to a concrete provider, harness, runtime, or model name.**
+> **Pantheon core may reason about semantic work, Logical Agents, execution features, policy, placement, resources, budgets, and observed performance. It must not contain business logic keyed to a concrete provider, harness, runtime, or model name.**
 
-Concrete names may appear in backend configuration, adapter-private state, audit metadata, and diagnostics, but not in core scheduling/routing branches.
+Concrete names may appear in backend configuration, adapter-private state, audit metadata, diagnostics and adapter-specific tests, but not in core scheduling/routing branches.
+
+See also:
+
+- `docs/architecture/logical-agent-resolution.md`
+- `docs/architecture/execution-offer-routing-and-admission-handshake.md`
+- `docs/architecture/run-and-attempt.md`
+- `docs/architecture/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
 
 ## Architectural boundary
 
@@ -22,23 +30,22 @@ Concrete names may appear in backend configuration, adapter-private state, audit
 PANTHEON CORE
 ────────────────────────────────────
 Goal
-Task
+Task / TaskGraph
 Logical Agent
-TaskGraph
-Scheduler
-Router
-Admission
+Agent Resolver
+Scheduler / Router / Admission
 Policy
-Run
+Run / Attempt
 Artifact / Evidence
 
 understands:
-  semantic task capabilities
+  Task types and competencies
+  Logical Agent identity
   canonical actions/tools
-  execution features
-  placement constraints
-  isolation requirements
+  Execution Features
+  placement/isolation requirements
   generic resource claims
+  budget/usage contracts
   policy constraints
   normalized historical metrics
 
@@ -51,7 +58,7 @@ Backend Registry
 ExecutionRequest
 ExecutionOffer
 ExecutionBinding
-ExecutorBackend interface
+ExecutorBackend contract
 
               │
               ▼
@@ -60,9 +67,9 @@ BACKEND / ADAPTER PRIVATE WORLD
 ────────────────────────────────────
 provider APIs
 CLI harnesses
-local model runtimes
+local runtimes
 model identifiers
-provider session identifiers
+native session/process identifiers
 runtime flags
 provider-specific configuration
 remote worker protocols
@@ -75,25 +82,19 @@ core → abstract execution contracts
 backend adapters → implement those contracts
 ```
 
-Never:
-
-```text
-core scheduler/router → provider-specific branches
-```
-
-A practical code-review invariant is that provider/model/runtime names should not appear in core routing or scheduling decision logic.
+A branch such as `if backend == <concrete-runtime>` inside core scheduler/router/admission should normally be treated as an architecture violation.
 
 ## Terminology
 
-Pantheon deliberately separates four terms that are easy to overload:
+Pantheon deliberately separates:
 
 ```text
-TASK CAPABILITY
-  Semantic ability needed to achieve an outcome.
-  Example: code-analysis, security-analysis.
+COMPETENCY
+  Semantic ability required by Task / provided by Logical Agent.
+  Example: code.analysis, security.analysis.
 
 EXECUTION FEATURE
-  Mechanism an executor backend can provide.
+  Mechanism an ExecutorBackend can provide.
   Example: session.resume, input.image, tools.structured.
 
 ACTION / TOOL
@@ -101,18 +102,28 @@ ACTION / TOOL
   Example: filesystem.write, shell.execute.
 
 CAPABILITY GRANT / TICKET
-  Authorization object allowing a principal to perform an action.
+  Authorization object permitting a concrete action/resource.
 ```
 
-Backend mechanics are therefore called **Execution Features**, not authorization capabilities.
+Backends never evaluate semantic competencies as self-authorization. Agent Resolution handles competency matching before backend routing.
 
 ## ExecutorBackend
 
-An `ExecutorBackend` is an adapter that can convert a normalized Pantheon execution request into one or more executable offers and manage the resulting backend session.
+An `ExecutorBackend` is an adapter for one class of execution system. A configured backend **instance** is addressed by a stable opaque ID such as:
 
-Examples of implementations are intentionally outside the core model. A backend implementation could wrap a local runtime, a CLI harness, an API service, a remote worker, SSH, a VM-based worker, or another orchestration system.
+```text
+executor://a
+executor://b
+executor://remote-lab
+```
 
-Conceptual interface:
+The implementation type behind that ID remains operator/adapter-private configuration.
+
+One adapter implementation may expose multiple backend instances with different endpoints, credentials, native models, resource pools, security posture, or quotas.
+
+After the Run/Attempt design, the conceptual contract is no longer a naïve `launch()` API. It needs discovery/offers plus idempotent Attempt reconciliation.
+
+Conceptually:
 
 ```rust
 trait ExecutorBackend {
@@ -124,45 +135,41 @@ trait ExecutorBackend {
         request: &ExecutionRequest,
     ) -> Vec<ExecutionOffer>;
 
-    async fn launch(
+    async fn ensure_execution(
         &self,
-        binding: &ExecutionBinding,
-    ) -> BackendSession;
+        attempt: &AttemptExecutionSpec,
+        attachment: Option<&BackendAttachment>,
+    ) -> EnsureExecutionResult;
 
-    async fn status(&self, session: &BackendSession) -> BackendStatus;
-    async fn interrupt(&self, session: &BackendSession);
-    async fn resume(&self, session: &BackendSession);
-    async fn terminate(&self, session: &BackendSession);
+    async fn observe(
+        &self,
+        attempt: &AttemptExecutionRef,
+    ) -> ExecutionObservation;
+
+    async fn interrupt(...);
+    async fn resume(...);
+    async fn terminate(...);
 }
 ```
 
-The exact Rust trait is deferred until the Run/Attempt subsystem is designed. Operations that are not universally supported are advertised through Execution Features and fail closed when required but unsupported.
+The exact Rust trait remains deferred until implementation integration. The normative semantics are:
 
-## Backend instance versus implementation
-
-Core addresses a configured backend **instance** through a stable opaque reference such as:
-
-```text
-executor://local-primary
-executor://premium-reasoning
-executor://remote-lab
-```
-
-The implementation type behind that reference is adapter-private/operator configuration.
-
-One adapter implementation may expose multiple backend instances with different endpoints, credentials, models, resource pools, security posture, or routing policy.
-
-This prevents core state from depending on implementation names.
+- offer generation is side-effect free;
+- Attempt creation and immutable `LaunchKey` happen durably before external creation;
+- repeated `ensure_execution` for the same Attempt/LaunchKey must not create a second logical execution lineage;
+- reconnect/recovery/reattachment stay under the same Attempt when continuity is preserved;
+- a fresh execution incarnation uses a new Attempt/LaunchKey;
+- changing Agent or ExecutionBinding creates a new Run.
 
 ## BackendDescriptor
 
-A backend publishes a normalized descriptor used for discovery and coarse filtering.
+A backend publishes normalized slowly changing discovery data.
 
-Conceptual shape:
+Conceptually:
 
 ```yaml
 backend:
-  id: executor://local-primary
+  id: executor://a
   descriptorRevision: 17
 
   features:
@@ -185,11 +192,9 @@ backend:
     observedAt: ...
 ```
 
-The descriptor contains stable/fairly stable facts. Dynamic per-request decisions belong in `ExecutionOffer`.
+The descriptor contains facts about mechanisms, placement, isolation and health. Per-request feasibility belongs in `ExecutionOffer`.
 
-Backends should periodically fingerprint/report health. A backend that is unhealthy or whose required dependencies are missing is not eligible to produce launchable offers.
-
-Health states for v1 should remain small:
+v1 health states remain small:
 
 ```text
 healthy
@@ -198,13 +203,13 @@ unknown
 draining
 ```
 
-`unknown` fails closed for new launches.
+`unknown` fails closed for new execution commitments.
 
 ## Execution Features
 
-Execution Features are namespaced strings with provider-neutral semantics.
+Execution Features are namespaced provider-neutral mechanisms.
 
-Initial examples:
+Examples:
 
 ```text
 session.interactive
@@ -218,30 +223,64 @@ tools.streaming-events
 transport.streaming
 ```
 
-Pantheon should avoid a large frozen enum. Features use a validated namespace format so future adapters can introduce additional features without modifying the core scheduler.
+Pantheon should avoid a large frozen enum. Core-standard names receive Pantheon-defined semantics. Adapter-extension names may exist but cannot silently become mandatory portable Agent requirements.
 
-Core-standard feature names receive Pantheon-defined semantics. Adapter-specific features may exist under an extension namespace but cannot become required by portable Agent/Task definitions unless an operator intentionally accepts that non-portability.
+## Logical Agent eligibility precedes offers
+
+Task competencies are matched against Agent competencies before backend solicitation.
+
+```text
+Task
+  ↓
+Agent Resolver
+  ↓
+Eligible Logical Agents
+  ↓
+ExecutionRequest per Agent
+  ↓
+Backend offers
+```
+
+Backends therefore receive a request for an already-eligible Logical Agent. They do not choose which Agent is semantically qualified.
+
+Final commitment is nevertheless joint: routing compares valid `Agent + ExecutionOffer` pairs so an eligible Agent with no feasible execution path need not block another valid Agent that can execute now.
 
 ## ExecutionRequest
 
-An `ExecutionRequest` is a normalized, provider-independent statement of what an execution environment must support for one Task/Agent pairing.
+An `ExecutionRequest` is a normalized provider-independent statement of what execution must support for one **Task + eligible Logical Agent** pairing.
 
-It is generated by Pantheon from the immutable Task, logical Agent, current Goal constraints, policy, workspace requirements, and execution policy.
+It is generated from:
 
-Conceptual shape:
+```text
+immutable Task
++
+selected Agent candidate
++
+Goal constraints
++
+project/system policy
++
+workspace/sandbox requirements
++
+execution policy
+```
+
+Conceptually:
 
 ```yaml
 request:
   id: exec-request_01K...
 
   task: task_123
-  agent: coder
+  agent: agent://coder
+
+  semantic:
+    taskType: code.debug
+    competencies:
+      - code.analysis
+      - code.debugging
 
   requirements:
-    taskCapabilities:
-      - code-analysis
-      - code-editing
-
     executionFeatures:
       - session.interactive
       - tools.structured
@@ -256,10 +295,10 @@ request:
       minimum: workspace
 
   tools:
-    bundles:
-      - filesystem
-      - git
-      - shell
+    actions:
+      - filesystem.read
+      - filesystem.write
+      - shell.execute
 
   policy:
     envelopeHash: sha256:...
@@ -268,41 +307,29 @@ request:
     requirement: worktree
 ```
 
-The request does **not** specify provider, harness, model, API endpoint, CLI flags, or provider session data.
+The semantic section is retained for provenance/routing metrics; backend feasibility must not reinterpret competency eligibility.
 
-### Request composition
+The request does **not** name a concrete provider, harness, model, endpoint, or native session.
 
-The effective request is the intersection/combination of:
-
-```text
-Task requirements
-+
-Agent intrinsic execution requirements
-+
-Goal constraints
-+
-project/system policy
-+
-workspace/sandbox requirements
-```
-
-A lower layer may tighten requirements but cannot weaken enclosing hard constraints.
+The request is immutable/revision-bound and hashed before offers are accepted.
 
 ## ExecutionOffer
 
-A backend receives an `ExecutionRequest` and may return zero or more short-lived normalized offers.
+A compatible backend may return zero or more short-lived normalized offers.
 
 An offer says:
 
-> This backend instance can satisfy this request under these concrete normalized properties and resource claims right now.
+> This backend instance can satisfy this ExecutionRequest now under these normalized factual properties and claims.
 
-Conceptual shape:
+Conceptually:
 
 ```yaml
 offer:
   id: offer_01K...
   request: exec-request_01K...
-  backend: executor://local-primary
+  requestHash: sha256:...
+
+  backend: executor://a
   descriptorRevision: 17
 
   satisfies:
@@ -318,285 +345,244 @@ offer:
 
   resources:
     claims:
-      - resource: resource://host/memory
+      - resource: resource://host/default/memory
         quantity: 20Gi
-      - resource: resource://host/cpu
-        quantity: 4
-      - resource: resource://backend/local-primary/concurrency
+      - resource: resource://backend/a/concurrency
         quantity: 1
 
-  estimates:
-    startupClass: normal
-    confidence: medium
+  usageEstimate:
+    ref: usage-estimate://...
 
   validUntil: ...
 ```
 
-The backend may keep an opaque private token/state associated with the offer. Core must not interpret that state.
+Offer generation must not start a process/session, allocate a worktree, consume a durable execution slot, or otherwise create execution side effects.
 
-### What an offer must not do
+A backend may return multiple offers if its private world has several ways to satisfy the same request.
 
-A backend must not grant itself authority or claim that policy has been satisfied merely because it produced an offer.
+## Backends report facts, not desirability
 
-Authorization remains owned by Pantheon. The offer is execution feasibility information, not a security decision.
+A backend may report factual normalized properties it owns:
 
-Backend self-reported qualitative claims such as "best model" or "high quality" should not directly determine routing. Quality and reliability ranking should primarily come from operator policy and Pantheon's normalized historical evidence.
+- supported Execution Features;
+- placement/locality;
+- isolation mechanism;
+- resource footprint;
+- expected usage;
+- current availability;
+- offer validity.
+
+It must not be trusted to self-award:
+
+```text
+quality score
+recommended=true
+priority
+best model
+```
+
+Pantheon owns historical acceptance/reliability/latency/budget-efficiency metrics and route policy.
 
 ## Backend Registry
 
-The Backend Registry stores the currently configured backend instances and their descriptors/health.
-
-Conceptually:
+The Backend Registry owns:
 
 ```text
-Backend Registry
-  ├── executor://local-primary
-  ├── executor://premium-reasoning
-  └── executor://remote-lab
-```
-
-The registry owns:
-
-```text
-backend identity
+backend instance identity
 descriptor revision
-execution features
-placement attributes
-supported isolation modes
+Execution Features
+placement/isolation facts
 health/fingerprint
-resource namespaces supplied by the backend
-adapter-private configuration reference
+backend-owned resource namespaces
+adapter configuration reference
 ```
 
-It does not own Task routing policy or authorization.
+It does not own Task semantics, Agent eligibility, routing policy, or authorization.
 
-For v1, backends may be configured statically and registered when Pantheon starts. Dynamic plugin installation/discovery can be added later without changing the contract.
+v1 may use static/configuration-based registration. Hot-pluggable process discovery can come later.
 
 ## Generic resource claims
 
-Execution offers express resource demand using normalized resource identifiers.
-
-Core-standard host/workspace resources may include:
+Offers express capacity demand using normalized resource keys, for example:
 
 ```text
-resource://host/cpu
-resource://host/memory
-resource://host/disk-temporary
-resource://workspace/worktree
-resource://sandbox/isolated
+resource://host/default/cpu
+resource://host/default/memory
+resource://workspace/default/worktree
+resource://sandbox/isolated/instance
+resource://backend/a/concurrency
 ```
 
-Backend-specific capacity is namespaced to the backend instance:
+The Resource Ledger understands generic accounting metadata and does not need implementation semantics for every namespaced resource.
 
-```text
-resource://backend/<backend-id>/concurrency
-resource://backend/<backend-id>/<resource-name>
-```
+Only the owner of a resource namespace may publish its capacity/health.
 
-The resource ledger understands generic accounting metadata such as:
-
-```text
-resource key
-quantity/unit
-capacity
-allocatable
-reserved
-shareability / exclusivity
-overcommit policy
-health
-```
-
-It does not need to understand the implementation meaning of every backend-specific key.
-
-This lets a future backend advertise a new constrained resource without adding provider-specific scheduler code.
-
-## Resource ownership
-
-Only the component that owns a resource namespace may publish its capacity/health.
-
-Examples:
-
-```text
-host resource controller
-  owns resource://host/**
-
-workspace controller
-  owns resource://workspace/**
-
-backend executor://local-primary
-  owns resource://backend/local-primary/**
-```
-
-This prevents arbitrary adapters from spoofing unrelated host capacity.
+Budget/usage concepts such as tokens or monetary spend are **not** ordinary releasable ResourceReservations and are modeled separately.
 
 ## Router and Admission responsibilities
 
-The Router and Admission Engine remain separate.
+The high-level path is:
 
 ```text
-Router
-  asks compatible backends for offers
-  filters by request/policy
-  ranks viable offers using normalized policy + history
-
-Admission
-  checks generic resource claims and concurrency/budget guards
-  returns whether each offer fits current capacity
-```
-
-Neither component branches on concrete provider/model names.
-
-A typical flow is:
-
-```text
-ExecutionRequest
+Agent Resolver
       ↓
-Backend Registry
+eligible Agents
       ↓
-compatible backend instances
+ExecutionRequest per Agent
+      ↓
+Backend Registry prefilter
       ↓
 ExecutionOffers
       ↓
-Router scoring
+Agent + Offer candidates
       ↓
-Admission fit
+hard validation / policy / budget feasibility
+      ↓
+route ordering
+      ↓
+resource admission
+      ↓
+atomic commitment
       ↓
 ExecutionBinding
 ```
 
-Routing and admission may iterate when a preferred offer is temporarily unavailable.
+Admission evaluates normalized resource fit. Budget admission evaluates spend/usage constraints. Route policy ranks only candidates that pass hard constraints.
+
+Neither routing nor admission branches on concrete provider/model names.
 
 ## ExecutionBinding
 
-After routing/admission chooses an offer and resource reservation succeeds, Pantheon creates an immutable `ExecutionBinding`.
+After final selection and atomic commitment, Pantheon creates an immutable `ExecutionBinding` that freezes both the Logical Agent and execution offer.
 
-Conceptual shape:
+Conceptually:
 
 ```yaml
 binding:
   id: binding_01K...
 
-  request: exec-request_01K...
-  requestHash: sha256:...
+  agent:
+    ref: agent://coder
+    specHash: sha256:...
 
-  offer: offer_01K...
-  offerHash: sha256:...
+  request:
+    ref: exec-request_01K...
+    hash: sha256:...
 
-  backend: executor://local-primary
-  descriptorRevision: 17
+  offer:
+    ref: offer_01K...
+    hash: sha256:...
+
+  backend:
+    ref: executor://a
+    descriptorRevision: 17
 
   reservations:
     - reservation://...
 
+  budgetHolds:
+    - budget-hold://...
+
   policyHash: sha256:...
 ```
 
-The binding is the execution decision that a later Run materializes.
+The Binding is one immutable resolved strategy and belongs to exactly one Run.
 
-A stale/expired offer cannot be silently rebound. If the backend state has materially changed, Pantheon must produce/revalidate an offer and binding.
+Changing the Agent or material execution strategy produces another Binding and therefore another Run.
 
-## Run Manifest
+## Run and Attempt boundary
 
-The Run Manifest records the normalized binding used by core:
+The Run records/references the immutable Binding and Agent/Genome/policy/workspace snapshots required for reproducibility.
 
-```yaml
-executor:
-  backend: executor://local-primary
-  binding: binding_01K...
-  descriptorRevision: 17
-```
-
-For diagnostics and reproducibility, backend-private resolved details may also be persisted as namespaced audit metadata or an opaque backend-state reference, for example runtime/model/session identifiers.
-
-Core routing/scheduling logic must never depend on those fields.
-
-This gives Pantheon both abstraction and observability:
+Concrete execution identity belongs to Attempt:
 
 ```text
-control decisions use normalized contract
-+
-audit records preserve concrete reality
+Run
+  └─ immutable ExecutionBinding
+       │
+       ├─ Attempt 1
+       │    └─ LaunchKey A
+       │
+       └─ Attempt 2
+            └─ LaunchKey B
 ```
+
+Backend-private process/session/runtime identifiers live in Attempt-scoped opaque attachment/audit state.
+
+Core logic may store them but does not interpret them.
+
+## Execution reconciliation
+
+Minimal normalized external observations are:
+
+```text
+ABSENT
+STARTING
+RUNNING
+EXITED
+UNKNOWN
+```
+
+`UNKNOWN` means insufficient evidence and never authorizes duplicate execution. `ABSENT` means the backend can positively establish that the Attempt execution does not exist.
+
+Backend events are hints that trigger reconciliation; they are not authoritative lifecycle commands.
 
 ## Policy and security
 
 The Execution Fabric does not replace Pantheon authorization.
 
-Before launch, Pantheon determines whether the execution configuration can faithfully enforce the resolved policy using:
+Backend declarations are evidence about mechanisms, not authority.
+
+Before consequential external actions Pantheon rechecks current authority and must ensure mandatory policy can be enforced by the combination of:
 
 ```text
 Pantheon Action Broker
-provider/backend permission compilation where available
+backend-native enforcement where available
 OS/container/VM sandbox compensation
 ```
 
-If a required security property cannot be enforced, the offer is invalid/fails closed.
-
-Backend declarations are evidence about mechanisms, not authority.
-
-## Logical Agent portability
-
-A canonical Agent must not contain an allowlist of concrete harness/provider names.
-
-Instead, the Agent expresses intrinsic execution requirements:
-
-```yaml
-execution:
-  routePolicy: coding-default
-  requirements:
-    executionFeatures:
-      - session.interactive
-      - tools.structured
-    minContextTokens: 64000
-```
-
-The Backend Registry and Router determine which currently configured backend instances can satisfy those requirements.
-
-Backend-specific tuning does not belong in the portable Agent manifest. It belongs in backend configuration or routing-policy configuration.
-
-This allows replacing an executor implementation without modifying logical agent identity.
-
-## Relationship to A2A
-
-A2A interoperability remains separate from the internal Execution Fabric.
-
-A2A's discovery model is useful conceptually because clients discover declared capabilities/interfaces while treating a remote agent as an opaque system. Pantheon may later expose logical Agents through A2A or wrap an A2A remote system as an ExecutorBackend, but A2A is not the canonical internal execution contract.
+If required security cannot be enforced, execution fails closed.
 
 ## v1 scope
 
 Include:
 
 - `ExecutorBackend` abstraction;
-- backend instance identifiers (`executor://...`);
-- Backend Registry;
-- descriptor revision and health/fingerprint;
+- opaque backend instance IDs;
+- Backend Registry with descriptor revision/health;
 - provider-neutral Execution Features;
-- `ExecutionRequest`;
-- short-lived `ExecutionOffer`;
+- Agent-specific immutable `ExecutionRequest`;
+- short-lived side-effect-free `ExecutionOffer`;
+- `Agent + ExecutionOffer` candidate formation;
 - generic namespaced resource claims;
-- immutable `ExecutionBinding`;
-- normalized Run Manifest backend reference;
-- fail-closed policy compatibility checks.
+- budget/usage estimate references;
+- immutable `ExecutionBinding` freezing Agent + execution strategy;
+- Attempt-scoped idempotent `LaunchKey` and opaque attachment state;
+- normalized execution reconciliation observations;
+- fail-closed policy compatibility.
 
 Defer:
 
 - hot-installable backend plugins;
 - remote backend federation;
 - marketplace/discovery protocols;
-- semantic negotiation across arbitrary vendor extensions;
-- ML-driven offer scoring;
-- cross-host distributed resource allocation.
+- arbitrary semantic negotiation across vendor extensions;
+- opaque ML route scoring;
+- cross-host distributed resource allocation;
+- speculative duplicate execution.
 
 ## Key decisions
 
-1. **Provider/model/runtime names do not participate in Pantheon core scheduling or routing logic.**
-2. **Concrete execution is hidden behind `ExecutorBackend` instances.**
-3. **Logical Agents express requirements, never concrete compatible harness allowlists.**
-4. **Backend mechanics are called Execution Features to avoid confusion with authorization capability grants/tickets.**
-5. **Backend discovery uses normalized descriptors plus health/fingerprint.**
-6. **Per-request feasibility is represented by short-lived `ExecutionOffer`s.**
-7. **Backend-specific resource capacity uses namespaced generic resources.**
-8. **Router ranks normalized offers; Admission evaluates generic resource fit.**
-9. **Selected execution becomes an immutable `ExecutionBinding`.**
-10. **Concrete runtime/model/session details remain available for audit but are opaque to core decision logic.**
-11. **Backend declarations never grant authority; Pantheon authorization remains canonical and fail-closed.**
+1. Provider/model/runtime names do not participate in Pantheon core scheduling/routing branches.
+2. Concrete execution is hidden behind configured `ExecutorBackend` instances.
+3. Task semantic requirements are competencies; backend mechanics are Execution Features.
+4. Agent eligibility is resolved before backend solicitation, while final commitment is joint over valid Agent + Offer pairs.
+5. Logical Agents express portable requirements, never concrete provider/harness/model allowlists.
+6. Backend discovery uses normalized descriptors plus health/fingerprint.
+7. Per-request feasibility is represented by short-lived side-effect-free `ExecutionOffer`s.
+8. Backend-specific capacity uses namespaced generic resources; token/cost budgets are separate.
+9. Backends report factual execution properties, not self-awarded quality.
+10. Selected Agent and execution configuration become one immutable `ExecutionBinding` owned by a Run.
+11. Attempt owns the idempotent LaunchKey and concrete execution lineage.
+12. Concrete runtime/model/session details remain available for audit but opaque to core decisions.
+13. Backend declarations never grant authority; Pantheon authorization remains canonical and fail-closed.
