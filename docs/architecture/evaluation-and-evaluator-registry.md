@@ -234,6 +234,8 @@ evaluationOperation:
 
 An EvaluationOperation is deliberately not a Task, Run, Attempt, or Logical Agent.
 
+Where an EvaluationOperation can incur backend-authored billable usage, its durable operation intent additionally freezes a metering-source binding before external contact. The binding is provenance only: it names which backend/metering contract may report factual Usage for this operation and does not make that backend the EvaluationOperation lifecycle owner or convert the operation into normal Agent execution.
+
 ## 11. Generic control-operation holder scope
 
 Evaluation consumes real finite resources. ResourceReservation therefore supports a generic third holder scope:
@@ -283,6 +285,17 @@ Pure local deterministic checks normally have no token or monetary BudgetHold, b
 
 If an EvaluationOperation has a billable external cost in the future, it uses the existing `control-operation` BudgetHold holder scope and normal Usage/Charge accounting.
 
+Any such backend-authored metering requires an immutable operation-level metering-source binding frozen by Pantheon before the operation can contact that external metering source. Conceptually it binds at least:
+
+```text
+control operation identity
+reporting backend identity
+backend descriptor/revision
+metering contract digest/version
+```
+
+The reporting backend cannot choose or rewrite this binding. An EvaluationOperation without a frozen external metering-source binding cannot accept backend-authored UsageRecords. Valid delayed usage remains ingestible after operation terminalization when immutable provenance validates it; current operation phase is not used as an ownership check.
+
 Human evaluation does not require a BudgetHold.
 
 Model-based evaluation is deferred together with its model-routing and metering requirements.
@@ -305,6 +318,7 @@ verify criterion is still applicable
 
 assess and reserve generic resources
 create EvaluationOperation execution intent
+freeze metering-source binding if backend-authored billable usage applies
 create BudgetHold if applicable
 append Events
 
@@ -545,6 +559,9 @@ evaluation_operations
   round_id
   criterion_id
   evaluator_version
+  usage_reporter_backend_id nullable
+  usage_reporter_backend_revision nullable
+  metering_contract_digest nullable
   state
 
 evaluation_attempts
@@ -559,6 +576,8 @@ human_evaluation_requests
   criterion_id
   state
 ```
+
+The metering-source columns are immutable operation intent and are either absent together for a non-backend-metered operation or complete together before external contact. They are not an ExecutionBinding.
 
 Exact DDL belongs to the implementation schema pass.
 
@@ -645,3 +664,4 @@ Defer:
 10. **Cancellation/current authority overrides applying stale evaluation results.**
 11. **Registry changes never rewrite historical Evidence or existing Task acceptance semantics.**
 12. **Model-based authoritative evaluation is deferred from v1.**
+13. **Backend-authored EvaluationOperation usage is accepted only from the backend frozen in immutable operation-level metering provenance; that binding does not redefine EvaluationOperation lifecycle/execution ownership.**

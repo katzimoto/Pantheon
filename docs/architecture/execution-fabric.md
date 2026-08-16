@@ -227,9 +227,17 @@ Attachment is not authority by itself; it is validated in the context of current
 
 ## Metering
 
-Backend reports factual usage under its declared metering contract. Pantheon namespaces source identity with backend + Attempt/control-operation + adapter key + meter and validates the Binding before ingestion.
+Backend reports factual usage under its declared metering contract. Pantheon namespaces source identity with backend + Attempt/control-operation + adapter key + meter.
 
-A backend cannot report usage for another backend's Attempt. Controller lease epoch is provenance, not by itself a reason to discard delayed factual usage.
+Attempt usage is accepted only when the immutable ExecutionBinding names the reporting backend and frozen metering contract for that Attempt lineage.
+
+A billable control operation that accepts backend-authored usage instead freezes an immutable metering-source binding in its own durable intent before external contact. That binding identifies the reporting backend, descriptor/revision and metering contract/digest. It is accounting provenance only: the control operation remains owned by its controller and is not converted into a Run, Attempt, ExecutionOffer or ExecutionBinding merely because a backend reports metering facts for it.
+
+A backend cannot report usage for another backend's Attempt or for a control operation whose immutable metering-source binding names another backend. A control operation without such a binding cannot accept backend-authored usage.
+
+Current lifecycle state is not a substitute for immutable provenance: delayed valid usage may arrive after terminalization. Durable launch/contact evidence may independently prove that an external lineage was never contacted, but that is an execution-reconciliation fact rather than backend ownership.
+
+Controller lease epoch is provenance, not by itself a reason to discard delayed factual usage.
 
 ## Backend lifecycle
 
@@ -265,4 +273,4 @@ for semantic business logic is an architecture violation. Concrete-specific beha
 7. Attempt/LaunchKey/contact marker, not adapter memory, are durable launch truth.
 8. Sandbox guarantees are controller-validated, not backend self-authorization.
 9. Agent Control features are semantic execution features independent of transport/harness.
-10. Backend usage is validated/namespaced against immutable Binding ownership.
+10. Backend usage is validated/namespaced against immutable Attempt ExecutionBinding ownership or immutable control-operation metering-source ownership; metering provenance never reclassifies a control operation as a Run.

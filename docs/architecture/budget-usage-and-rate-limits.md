@@ -80,7 +80,18 @@ For Attempt usage, Pantheon accepts the record only when:
 - the meter/units are valid for the reported usage contract;
 - the namespaced source identity has not already been ingested with conflicting content.
 
-The backend cannot claim usage for another backend's Attempt by choosing a colliding `adapter_operation_key`.
+For control-operation usage, Pantheon accepts a backend-authored record only when:
+
+- the referenced control operation exists;
+- before external contact, the durable control-operation intent froze an immutable metering-source binding naming the reporting `backend_id`, backend descriptor/revision and metering contract/digest applicable to that operation;
+- the meter/units are valid for that frozen metering contract;
+- the namespaced source identity has not already been ingested with conflicting content.
+
+A control operation with no frozen external metering-source binding cannot accept backend-authored usage. The reporting backend cannot create, select or rewrite that binding. This metering binding is provenance/accounting authority only; it does not turn an EvaluationOperation or another control operation into a normal Run/ExecutionBinding or make the metering backend its lifecycle executor.
+
+Current lifecycle state is not used as a shortcut for usage truth. A valid delayed UsageRecord may arrive after an Attempt/control operation becomes terminal or is administratively resolved. Where the architecture has durable launch/contact evidence, ingestion may reject a lineage that is durably proven never to have crossed the external-contact boundary; absence of such proof is not permission to infer usage.
+
+A backend therefore cannot claim usage for another backend's Attempt or control operation merely by choosing a colliding/novel `adapter_operation_key` or another subject ID.
 
 Duplicate delivery of the same namespaced observation is idempotent. Same identity with materially different content is a structured integrity conflict, not a second charge.
 
@@ -90,7 +101,7 @@ A delayed valid UsageRecord may arrive after Pantheon controller ownership/lease
 
 Therefore Pantheon **does not discard otherwise valid usage merely because it carries an old control epoch**.
 
-ControlLease fencing applies to authority-bearing state transitions/callbacks. Usage ingestion instead validates immutable Attempt/backend provenance plus idempotency identity and observation quality.
+ControlLease fencing applies to authority-bearing state transitions/callbacks. Usage ingestion instead validates immutable Attempt/backend or control-operation/metering-source provenance plus idempotency identity and observation quality.
 
 If a reporting protocol includes control epoch/incarnation, retain it as provenance/anomaly evidence; do not treat epoch mismatch alone as proof that factual usage is false.
 
@@ -201,10 +212,11 @@ Operator force-resolution is audited and can settle unresolved administrative au
 1. Context capacity, ResourceReservations, BudgetHolds, factual Usage, Charges and rate limits are distinct.
 2. Usage is append-only factual truth and never clamped to a budget limit.
 3. Usage source identity is Pantheon-namespaced by backend + execution/control-operation + adapter key + meter.
-4. A backend may report usage only for the execution lineage it owns in the immutable Binding.
+4. A backend may report usage only for an Attempt lineage it owns in the immutable ExecutionBinding or a control-operation metering lineage that durably froze that backend as its reporting source before external contact.
 5. Duplicate source delivery is idempotent; conflicting duplicate content is an integrity error.
 6. Controller lease/epoch rotation does not by itself invalidate delayed factual usage.
 7. UNKNOWN final usage does not authorize fabricated consumption.
 8. Failed work still consumes real usage.
 9. Late usage after administrative force-resolution remains recordable and may create truthful overdraw.
 10. External allowance/rate observations include freshness and never become local fabricated authority.
+11. Control-operation metering provenance does not redefine control-operation execution/lifecycle ownership or require normal Run/ExecutionBinding semantics.

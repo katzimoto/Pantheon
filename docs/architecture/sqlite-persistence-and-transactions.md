@@ -380,7 +380,23 @@ UsageRecord idempotency must be namespaced by Pantheon provenance, equivalent to
 
 with a CHECK ensuring exactly one execution/control-operation subject where applicable.
 
-Attempt usage validates that the immutable Binding names the reporting backend. Controller epoch/incarnation may be stored as provenance but is not a rejection key for delayed otherwise-valid factual usage.
+Attempt usage validates that the immutable ExecutionBinding names the reporting backend and the applicable frozen metering contract.
+
+Backend-authored control-operation usage validates the symmetric immutable provenance on the referenced control-operation record. Any control operation that can accept such usage must freeze, before external contact, relational immutable fields equivalent to:
+
+```text
+usage_reporter_backend_id
+usage_reporter_backend_revision
+metering_contract_digest
+```
+
+The fields are absent together for an operation that does not accept backend-authored usage and complete together for one that does. The reporting backend cannot create or rewrite this ownership. For EvaluationOperations these fields belong to the immutable operation intent; they do not create an ExecutionBinding or transfer lifecycle ownership from the Evaluation Controller.
+
+Usage ingestion rejects a control-operation record when `backend_id` does not equal the operation's frozen `usage_reporter_backend_id`, when the meter/units are outside the frozen contract, or when no external metering-source binding exists.
+
+Current terminal/running state is not an ownership predicate: delayed otherwise-valid factual usage may arrive after terminalization or administrative resolution. Where a separately durable launch/contact marker proves that the external lineage was never contacted, that evidence may reject impossible usage; the persistence of that launch boundary is a distinct execution-reconciliation invariant.
+
+Controller epoch/incarnation may be stored as provenance but is not a rejection key for delayed otherwise-valid factual usage.
 
 ## Grants and broker operation redemption
 
@@ -508,6 +524,8 @@ Historical hash-bearing config rows are never rewritten in place by migration.
 
 EvaluationRound pins Candidate/acceptance/evaluator versions. External deterministic checks use `EvaluationOperation` with control-operation ResourceReservations/BudgetHolds where required; EvaluationAttempts are small execution/reconciliation identities, not Runs.
 
+A billable EvaluationOperation that accepts backend-authored factual usage carries immutable operation-intent fields equivalent to `usage_reporter_backend_id`, `usage_reporter_backend_revision`, and `metering_contract_digest`, frozen before external contact. These fields are nullable only as an all-or-none group for operations with no backend-authored metering and are never mutable lifecycle status.
+
 ## Secret metadata
 
 SQLite stores only SecretDescriptor/provider locator/non-secret random version IDs/status/intents/lease metadata/use records. It never stores long-lived secret bytes or hashes of secret bytes.
@@ -544,7 +562,7 @@ one current AgentControlSession per Attempt
 one live Task-scoped reservation per singular (Task, ResourceKey)
 Reservation holder validity
 Budget aggregate == immutable ledger reconstruction
-Usage provenance/backend ownership
+Usage provenance/backend ownership for Attempt and control-operation subjects
 Candidate outputs -> existing Artifacts/Blobs
 Workspace/Sandbox ownership consistency
 IntegrationIntent/Git state consistency
@@ -584,7 +602,7 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 5. Task-scoped reservations are unique/reused across Runs.
 6. Run Finalizing always records terminalTarget; only Completed requires Candidate.
 7. Launch contact boundary is durable before external launch call.
-8. Usage identity is Pantheon-namespaced and delayed factual usage is not rejected solely for stale controller epoch.
+8. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
 9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy.
 10. Cancellation/supersession can beat Candidate submission through Task revision CAS.
 11. Requeue occurs only after previous responsible Run terminal.
