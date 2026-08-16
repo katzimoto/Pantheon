@@ -2,290 +2,258 @@
 
 ## Status
 
-Draft design — Pantheon public control-plane interface specification.
+Canonical Pantheon operator-facing API/CLI specification.
 
 ## Purpose
 
-Pantheon needs one public control surface for humans, automation, future UIs, and integrations without creating alternate paths around its controllers, persistence invariants, authorization model, or recovery semantics.
+> **`pantheond` is the only control-plane authority. CLI/UI/automation never open SQLite, mutate Workspaces/Git refs, provision Sandboxes, read secret material or call ExecutorBackends directly.**
 
-The central rule is:
+This document defines the **Operator Control Surface**. Worker/Agent traffic uses the separate restricted Attempt-bound surface in `agent-control-channel.md`.
 
-> **`pantheond` is the only control-plane authority. Every CLI, UI, automation, or future remote client talks to the daemon API; none may open SQLite, mutate workspaces, manipulate Git refs, or call ExecutorBackends directly.**
+## Trust boundary
 
 ```text
-pantheon CLI
-future UI
-future integrations
-      │
-      ▼
- Public Control API
-      │
-      ▼
-   pantheond
-      │
- ┌────┼─────────────┐
- ▼    ▼             ▼
-SQLite Controllers  Brokers
-                    │
-                    ▼
-              external world
+human / CLI / UI / trusted automation
+        ↓
+Operator Control Surface
+        ↓
+pantheond controllers/persistence/brokers
+
+untrusted Agent workload
+        ↓
+Agent Control Surface
+        ↓
+Attempt-scoped verbs only
 ```
 
-See also:
+The Operator socket is never exposed inside an untrusted Sandbox. Same-UID ownership alone is not an Agent/operator identity boundary.
 
-- `docs/architecture/sqlite-persistence-and-transactions.md`
-- `docs/architecture/event-and-observability-model.md`
-- `docs/architecture/global-recovery-and-crash-reconciliation.md`
-- `docs/architecture/permissions-and-capabilities.md`
-- `docs/architecture/workspace-and-git-integration.md`
-- `docs/architecture/run-and-attempt.md`
+## V1 transport
 
-## 1. V1 transport
-
-V1 uses HTTP/1.1 + JSON over a Unix-domain stream socket.
-
-Conceptually:
+Operator Control v1 uses HTTP/1.1 + JSON over a local Unix-domain stream socket, conceptually:
 
 ```text
 ~/.pantheon/run/pantheon.sock
 ```
 
-The parent directory is private to the local user and the socket is not exposed over TCP by default.
+with restrictive parent-directory/socket permissions. V1 is single-user/local-only; TCP/remote listening is disabled by default until authenticated remote transport is deliberately designed.
 
-The application protocol is deliberately independent of Unix sockets so that a future authenticated HTTPS listener can expose the same API semantics.
+The logical HTTP contract is transport-independent and may later be exposed through authenticated HTTPS without changing core resource semantics.
 
-V1 is local-first, single-user, and local-only by default.
+## API versioning
 
-## 2. CLI boundary
-
-The `pantheon` CLI is a thin client of the daemon API.
-
-It never:
-
-- opens `pantheon.db`;
-- mutates Git worktrees directly;
-- updates repository refs directly;
-- calls ExecutorBackends directly;
-- edits ResourceReservations/BudgetHolds directly;
-- bypasses authorization or Recovery Policy.
-
-Even diagnostic commands such as `pantheon doctor` ask `pantheond` to execute the appropriate invariant checker/reconciliation inspection.
-
-This prevents the CLI from becoming a privileged second control plane.
-
-## 3. API versioning
-
-The public API is versioned independently of the Pantheon binary, SQLite schema, Agent manifest, and Event schema.
-
-V1 base path:
+Base path:
 
 ```text
 /api/v1
 ```
 
-Public resources may use:
+Public API version is distinct from Pantheon binary version, SQLite schema version, Event type version and Agent/config schema versions.
 
-```yaml
-apiVersion: pantheon/v1
-kind: Task
-```
+Compatible v1 evolution may add optional fields/endpoints/query parameters/extensible values. Meaning changes/removals require a new API version.
 
-Incompatible public API semantic changes require a new major API namespace such as `/api/v2`.
+## OpenAPI
 
-## 4. OpenAPI contract
+Pantheon maintains a machine-readable OpenAPI contract for the Operator HTTP surface. Transport-specific Unix-socket metadata may use a Pantheon extension; resource/HTTP semantics remain standard.
 
-Pantheon maintains a machine-readable OpenAPI contract under an API directory such as:
+Generated clients/docs never become authority over the handwritten architecture/controller semantics.
 
-```text
-api/
-├── openapi.yaml
-└── schemas/
-```
+## Semantic resources, not database CRUD
 
-The OpenAPI document describes HTTP operations, public schemas, Problem Details, query parameters, and response contracts.
-
-The local Unix-socket transport may be described with a Pantheon extension because standard OpenAPI server URLs do not model filesystem sockets directly.
-
-Conceptually:
-
-```yaml
-x-pantheon-transport:
-  default: unix
-  socket: ~/.pantheon/run/pantheon.sock
-```
-
-The public API contract remains transport-independent.
-
-## 5. Public API is semantic, not raw CRUD
-
-Pantheon does not expose internal tables or controller-owned lifecycle fields as arbitrary CRUD resources.
-
-Forbidden examples:
+Public reads expose architectural resources such as:
 
 ```text
-PATCH /runs/run_123 { phase: Completed }
-DELETE /resource-reservations/res_123
-POST /attempts
+Goal
+Task / TaskGraph
+Run / Attempt
+Artifact / Candidate / Evidence
+Agent / Backend
+Workspace / Sandbox
+ResourceDescriptor / Reservation
+Budget / Usage summary
+Grant / Approval
+Evaluation
+RecoveryFinding / RecoveryDecision
+ConfigurationRevision
+IntegrationIntent
+Event / Command
 ```
 
-Public mutations represent semantic commands such as:
+The API does not expose raw tables such as `run_status` or permit generic lifecycle field mutation.
 
-- create/revise/cancel a Goal;
-- cancel a Task;
-- adjust a Budget;
-- approve/deny an approval request;
-- request integration;
-- create a bounded recovery override.
-
-Controllers remain authoritative for internal phase transitions, retries, Attempt creation, reservation release, routing, and reconciliation.
-
-## 6. Public resource reads
-
-Representative read endpoints:
+Mutations are semantic commands, for example:
 
 ```text
-GET /api/v1/goals/{id}
-GET /api/v1/tasks/{id}
-GET /api/v1/runs/{id}
-GET /api/v1/attempts/{id}
+revise/cancel Goal
+cancel/retry Task
+approve/deny Approval
+adjust Budget configuration
+apply/rollback configuration
+request/cancel Integration
+force-resolve exact UNKNOWN obligation
+pause/resume dispatch
+```
+
+There is no generic `POST /runs`, `POST /attempts`, `PATCH phase`, or `DELETE reservation` escape hatch.
+
+## Read endpoints
+
+Representative v1 reads:
+
+```text
+GET /api/v1/system
+GET /api/v1/health/live
+GET /api/v1/health/ready
+
+GET /api/v1/goals[/...]
+GET /api/v1/tasks[/...]
+GET /api/v1/runs[/...]
+GET /api/v1/attempts[/...]
+
+GET /api/v1/agents[/...]
+GET /api/v1/backends[/...]
+
+GET /api/v1/resources
+GET /api/v1/reservations
+GET /api/v1/budgets[/...]
+
+GET /api/v1/workspaces[/...]
+GET /api/v1/sandboxes[/...]
+
 GET /api/v1/artifacts/{digest}
 GET /api/v1/candidates/{digest}
-GET /api/v1/agents
-GET /api/v1/backends
-GET /api/v1/budgets
-GET /api/v1/recovery/findings
+GET /api/v1/evidence[/...]
+GET /api/v1/evaluations[/...]
+
+GET /api/v1/approvals[/...]
+GET /api/v1/grants[/...]
+
+GET /api/v1/recovery/findings[/...]
+GET /api/v1/recovery/decisions[/...]
+
+GET /api/v1/configuration
+GET /api/v1/configuration/history
+
+GET /api/v1/integrations[/...]
+GET /api/v1/events
 ```
 
-These return normalized architectural resources, not raw SQLite rows or backend-private state.
+Responses are normalized public representations, not row dumps or backend-private attachments.
 
-## 7. Optimistic concurrency with ETag / If-Match
+## Required operator mutation surface
 
-Mutable public resources expose a strong ETag derived from their authoritative revision.
+### Goal
 
-Conceptually:
-
-```http
-ETag: "goal_123:7"
+```text
+POST /api/v1/goals
+POST /api/v1/goals/{id}/revisions
+POST /api/v1/goals/{id}/actions/cancel
 ```
 
-A mutation based on previously observed state uses `If-Match`:
+### Task/recovery
 
-```http
-If-Match: "goal_123:7"
+```text
+POST /api/v1/tasks/{id}/actions/cancel
+POST /api/v1/tasks/{id}/recovery-overrides
 ```
 
-If the resource changed since the client read it, the daemon rejects the mutation instead of silently overwriting newer state.
+CLI sugar `pantheon task retry` creates an explicit permitted recovery override/context; it does not directly create a Run.
 
-Use this for stale-sensitive operations such as:
+### Approval/Grant
 
-- Goal revision;
-- Budget limit change;
-- dispatch-policy modification;
-- IntegrationIntent modification;
-- other replacement/update operations derived from observed current state.
-
-Operations whose semantics are intentionally state-independent, such as an idempotent cancel request, need not require `If-Match`.
-
-If a required precondition is omitted, return `428 Precondition Required`. If it is supplied but stale, return `412 Precondition Failed`.
-
-## 8. Durable command identity
-
-Every mutating public operation carries a Pantheon `commandId`.
-
-Conceptually:
-
-```json
-{
-  "commandId": "cmd_01K...",
-  "goal": { }
-}
+```text
+POST /api/v1/approvals/{id}/actions/approve
+POST /api/v1/approvals/{id}/actions/deny
 ```
 
-The daemon persists the command identity and request hash.
+Only Operator Control may perform these.
 
-Rules:
+### Dispatch control
+
+```text
+GET  /api/v1/dispatch
+POST /api/v1/dispatch/actions/pause
+POST /api/v1/dispatch/actions/resume
+```
+
+Dispatch pause fences new Scheduler Run commits; it does not pretend existing external work stopped.
+
+### Configuration
+
+```text
+POST /api/v1/configuration/actions/validate
+POST /api/v1/configuration/actions/diff
+POST /api/v1/configuration/actions/apply
+POST /api/v1/configuration/actions/rollback
+```
+
+Configuration activation follows immutable ConfigurationRevision/publication-barrier semantics.
+
+### Integration
+
+```text
+POST /api/v1/integrations
+POST /api/v1/integrations/{id}/actions/cancel
+```
+
+Integration remains separately authorized and never happens merely because a Task/Goal succeeded.
+
+### UNKNOWN force-resolution
+
+```text
+POST /api/v1/recovery/findings/{id}/actions/force-resolve
+```
+
+or an equivalent exact-obligation endpoint.
+
+Request must include expected revision plus explicit reason/risk acknowledgement and may specify the intended administrative disposition where multiple safe accounting/resource choices exist.
+
+Force resolution creates durable lineage tombstone/audit state. It never fabricates factual usage and cannot be invoked by Agent Control.
+
+## Commands and idempotency
+
+Every Operator mutation carries a durable Pantheon `commandId` independent of HTTP transport.
 
 ```text
 new commandId
-→ execute command
+  -> process
 
-same commandId + same request hash
-→ return the previously recorded outcome
+same commandId + same non-sensitive request hash
+  -> return/reconcile prior outcome
 
-same commandId + different request hash
-→ fail closed as command identity misuse/conflict
+same commandId + different hash
+  -> fail closed conflict
 ```
 
-This provides transport-independent idempotency across retries, tests, future transports, and automation.
+Sensitive secret-set mutations are a deliberate exception: secret bytes are never part of durable request hashes/logs; command ID is single-use and the durable SecretMutationIntent contains only non-secret metadata/version identity.
 
-`commandId` remains separate from HTTP transport metadata.
+## ETag / optimistic concurrency
 
-## 9. Command versus resource
+Mutable resources expose strong opaque ETags derived from authoritative identity+revision.
 
-A Command records the external mutation request and its durable outcome.
+Stale-sensitive mutations use `If-Match`. Missing mandatory precondition returns `428 Precondition Required`; revision mismatch returns `412 Precondition Failed`.
 
-Conceptually:
+Require preconditions where a command is based on observed mutable state, for example Goal revision, configuration apply/rollback, budget/config changes and exact RecoveryFinding force-resolution.
 
-```yaml
-kind: Command
-metadata:
-  id: cmd_123
-operation: integration.request
-status:
-  phase: accepted
-result:
-  ref: integration_456
-```
+State-independent idempotent commands such as cancel-if-nonterminal need not require a client-supplied prior revision unless controller semantics need it.
 
-A Command is not another workflow engine. It answers whether a request was accepted/completed/failed and which durable resource or intent it created.
+## HTTP completion semantics
 
-Long-running control-plane work continues under normal controller/reconciliation semantics after the request connection closes.
-
-## 10. HTTP success semantics
-
-Use status codes according to the durable state established when the request returns.
-
-Typical examples:
+Use HTTP status according to what has durably happened:
 
 ```text
-201 Created
-resource was durably created
-
-200 OK / 204 No Content
-requested desired-state mutation committed synchronously
-
-202 Accepted
-request was durably accepted, but consequential processing continues asynchronously
+201  resource created synchronously
+200/204 durable semantic mutation completed
+202  durable command/intent accepted but external/controller processing continues
 ```
 
-For asynchronous commands, the response may include a `Location` pointing to the Command resource.
+`202` response points at a Command/intent resource where clients can observe completion.
 
-## 11. Error model
+## Problem Details
 
-All structured HTTP errors use RFC 9457 Problem Details:
+Structured errors use `application/problem+json` and stable Pantheon problem types/codes. Clients must not parse human detail text.
 
-```text
-Content-Type: application/problem+json
-```
-
-Conceptually:
-
-```json
-{
-  "type": "urn:pantheon:problem:stale-revision",
-  "title": "Resource revision is stale",
-  "status": 412,
-  "detail": "Goal goal_123 is now at revision 9.",
-  "instance": "urn:pantheon:problem-instance:prb_123",
-  "pantheonCode": "STALE_REVISION",
-  "currentRevision": 9,
-  "commandId": "cmd_..."
-}
-```
-
-Clients inspect stable type/code/structured fields rather than parsing human `detail` text.
-
-Initial Problem families should include:
+Initial vocabulary includes:
 
 ```text
 not-found
@@ -293,454 +261,164 @@ validation
 precondition-required
 stale-revision
 conflict
+stale-authority
 policy-denied
 approval-required
 budget-blocked
 temporarily-unavailable
 subject-fenced
 cursor-gone
+recovery-force-resolution-required
 internal
 ```
 
-## 12. Health and recovery readiness
+Agent Control defines additional restricted worker-operation problems such as `task-not-active`, `run-not-current`, `candidate-submission-conflict` and request-id conflict.
 
-Expose distinct health endpoints:
+Cancellation/supersession that committed before Candidate submission therefore yields a deterministic stale-authority/conflict response rather than ambiguous Candidate creation.
+
+## Health/readiness
 
 ```text
 GET /health/live
+  daemon/runtime process functioning
+
 GET /health/ready
+  recovery barrier passed + active configuration published + scheduler/control-plane safe for new work
 ```
 
-`live` means the daemon process/runtime is functioning.
+During startup recovery, live may be 200 while ready is 503. Read-only diagnostics may remain available while new dispatch is fenced.
 
-`ready` means the global recovery barrier has passed and Pantheon may safely dispatch new work.
+## System discovery
 
-During startup recovery, liveness may be healthy while readiness returns `503 Service Unavailable`.
-
-Read-only diagnostic endpoints may remain available while scheduling is fenced.
-
-## 13. List + Watch consistency
-
-Pantheon needs gap-free transition from a current-state list to subsequent Event streaming.
-
-A list response therefore includes an Event Journal snapshot cursor obtained from the same SQLite read snapshot as the returned resource list.
-
-Conceptually:
-
-```yaml
-items:
-  - ...
-metadata:
-  snapshotCursor:
-    epoch: journal_abc
-    sequence: 48291
-  nextCursor: ...
-```
-
-A client then watches Events strictly after that cursor.
-
-Because authoritative state and the Event Journal commit in the same SQLite transaction domain, this avoids losing committed events between list and watch establishment.
-
-## 14. Event watch via Server-Sent Events
-
-Representative endpoint:
+`GET /api/v1/system` exposes non-sensitive compatibility/control-plane metadata such as:
 
 ```text
-GET /api/v1/events/watch?after=journal_abc:48291
+daemonVersion
+supported API versions
+DB format version
+installation ID
+active ConfigurationRevision
+recovery/ready status
+JournalEpoch/latest sequence
 ```
 
-Response:
+No secrets/backend-private session state.
 
-```text
-Content-Type: text/event-stream
-```
+## Listing and pagination
 
-Example frames:
-
-```text
-id: journal_abc:48292
-event: pantheon.task.phase.changed.v1
-data: {...}
-
-id: journal_abc:48293
-event: pantheon.run.created.v1
-data: {...}
-```
-
-The SSE `id` is the resumable journal cursor (`JournalEpoch:sequence`), while the durable Pantheon Event ID remains inside the Event payload.
-
-Clients may reconnect using `Last-Event-ID` or an explicit `after` cursor.
-
-## 15. Cursor expiration/history branch
-
-If a requested watch cursor is no longer available because history was pruned or the database was restored into another JournalEpoch, return:
-
-```text
-410 Gone
-```
-
-with a `cursor-gone` Problem response.
-
-The client then relists current state, receives a fresh snapshot cursor, and resumes watch from there.
-
-## 16. Historical Event API
-
-Streaming and historical inspection are separate operations.
-
-```text
-GET /api/v1/events/watch
-```
-
-provides live/resumable streaming.
-
-```text
-GET /api/v1/events?after=...&type=...&subject=...&limit=...
-```
-
-provides historical queries.
-
-Higher-level commands such as `pantheon task explain` may query Events, Evidence, FailureRecords, and RecoveryDecisions to construct a structured explanation.
-
-## 17. Pagination
-
-Lists use opaque keyset cursors rather than page numbers/offsets.
-
-Conceptually:
-
-```text
-GET /api/v1/tasks?goal=goal_123&phase=Ready&limit=100&cursor=...
-```
-
-Response metadata contains an opaque `nextCursor`.
-
-Clients must not parse cursor internals.
-
-## 18. Filtering
-
-V1 exposes explicit typed query parameters for supported filters.
+Lists use explicit typed filters and opaque keyset cursors, not arbitrary public SQL/query expressions or page-number offsets.
 
 Examples:
 
 ```text
-?goal=goal_123
-?phase=Ready
-?type=code.debug
-?agent=agent://coder
-?since=...
+?goal=...
+?phase=...
+?backend=...
+?state=...
+?limit=...
+?cursor=...
 ```
 
-Pantheon does not expose a public SQL-like or arbitrary expression query language in v1.
+## Gap-free list + Event watch
 
-Persistence representation remains private.
+A state-list response that supports watching includes an Event Journal `snapshotCursor` obtained from the same SQLite read snapshot:
 
-## 19. Actor identity and authentication boundary
-
-Actor identity is derived by the daemon from the authenticated connection context.
-
-Clients cannot authoritatively submit:
-
-```yaml
-actor: owner
+```text
+(epoch, sequence)
 ```
 
-For local single-user v1, Unix-socket filesystem ownership/permissions identify the local installation principal.
+Client starts Event watch **after** that cursor, preventing a list/watch gap.
 
-Diagnostic request metadata such as `User-Agent` is not authority.
+## Event streaming
 
-Future remote/multi-user transports must establish authenticated principals before being enabled.
+Server-to-client durable Event streaming uses SSE:
 
-## 20. Remote listening
+```text
+GET /api/v1/events/watch?after=<epoch:sequence>
+Content-Type: text/event-stream
+```
 
-V1 does not expose an unauthenticated TCP listener.
+SSE `id` is the resumable Journal cursor; Event ID remains inside payload.
 
-Future remote access requires a separate transport/security design covering at least:
+If requested history is pruned/unavailable or belongs to an unreachable pre-restore epoch, return `410 Gone` / `cursor-gone`; client relists current state and resumes from a fresh snapshot cursor.
 
-- TLS;
-- authentication;
-- principal mapping;
-- authorization boundaries;
-- secret handling;
-- remote-rate/abuse controls where relevant.
+## Operator principal
 
-The application-level API can remain the same.
+V1 local principal is derived from the trusted Operator Control connection/installation context. Request bodies cannot self-declare an authoritative actor/role.
 
-## 21. Explainability and private reasoning
+`User-Agent` and similar metadata are diagnostic only.
 
-Public API may expose structured architecture facts such as:
+## CLI
 
-- Task/Run/Attempt state;
-- Artifacts/Candidates/Evidence;
-- RecoveryDecision;
-- routing reasons;
-- Agent eligibility reasons;
-- FailureRecords;
-- Event history.
-
-It does not expose:
-
-- hidden chain-of-thought;
-- private model reasoning scratchpads;
-- secrets/credentials;
-- bearer capability tickets;
-- provider-private opaque session state.
-
-`pantheon explain` derives explanations from durable structured facts and decisions.
-
-## 22. CLI shape
-
-The CLI is resource-oriented and intentionally excludes internal controller-owned creation/mutation operations.
+CLI is a thin API client. It never opens SQLite, edits Workspace/Git authority, talks to backends/runtime sockets or reads SecretProvider material directly.
 
 Representative commands:
 
 ```text
 pantheon status
+pantheon daemon ...
 
-pantheon goal create
-pantheon goal get
-pantheon goal list
-pantheon goal revise
-pantheon goal cancel
-
-pantheon task get
-pantheon task list
-pantheon task cancel
-pantheon task explain
-
-pantheon run get
-pantheon run list
+pantheon goal create|get|list|revise|cancel
+pantheon task get|list|explain|retry|cancel
+pantheon run get|list
 pantheon attempt get
 
-pantheon agent list
-pantheon agent get
+pantheon agent list|get
+pantheon backend list|get
 
-pantheon budget list
-pantheon budget get
-pantheon budget adjust
+pantheon resource list
+pantheon reservation list
+pantheon budget list|get
 
-pantheon approval list
-pantheon approval approve
-pantheon approval deny
+pantheon workspace list|get
+pantheon sandbox list|get
 
-pantheon integration list
-pantheon integration apply
-pantheon integration cancel
+pantheon approval list|approve|deny
 
+pantheon recovery list|show|force-resolve
+
+pantheon config status|validate|diff|apply|history|rollback
+
+pantheon integration list|apply|cancel
+
+pantheon artifact inspect|export
 pantheon events
 pantheon events watch
-
 pantheon doctor
 pantheon version
 ```
 
-Do not expose direct commands such as:
+No commands directly create Runs/Attempts, set lifecycle phases, delete Reservations or mutate shared Git refs outside semantic controllers.
 
-```text
-pantheon run create
-pantheon attempt create
-pantheon task set-phase
-pantheon reservation delete
-```
+## `--wait`
 
-## 23. Recovery override UX
+`--wait` is client-side observation. CLI sends the normal durable command, then watches Events/resource state until requested terminal condition. Disconnecting CLI does not cancel/alter the durable operation.
 
-An ergonomic command such as:
+## Machine-readable output
 
-```text
-pantheon task retry task_123
-```
+Read commands support stable human output plus `-o json`/`-o yaml` where applicable. JSON/YAML stdout contains only structured result; interactive progress/diagnostics go to stderr.
 
-must not directly create a Run or Attempt.
+## Doctor
 
-It maps to an explicit recovery-override resource/command, for example:
+`pantheon doctor` calls daemon diagnostic APIs such as PersistenceInvariantChecker, configuration/source drift, recovery findings, backend/Sandbox health and storage consistency. It does not inspect/mutate `pantheon.db` directly.
 
-```text
-POST /api/v1/tasks/task_123/recovery-overrides
-```
+## Security
 
-Recovery Policy remains authoritative about what action is now allowed and the Scheduler remains authoritative for creating a new Run.
+- Operator socket is physically absent/unreachable from untrusted Agent Sandboxes.
+- Agent Control route set cannot invoke approvals, configuration, budgets, force-resolution, dispatch control or unrelated resources.
+- Raw secrets/tickets/Agent credentials are never returned by generic API reads.
+- Artifact refs remain identifiers, not capabilities; read/export is authorized.
+- Future remote transport requires explicit authentication/TLS/principal mapping before enablement.
 
-## 24. `--wait`
+## Core invariants
 
-CLI `--wait` is implemented client-side.
-
-Example:
-
-```text
-pantheon goal create goal.yaml --wait
-```
-
-The Goal is created through the normal API command. The CLI then watches Events/current state until the requested completion condition occurs.
-
-Disconnecting the CLI does not cancel or alter the Goal.
-
-No server transaction or controller lifetime is tied to the client connection.
-
-## 25. Output modes
-
-Read-oriented CLI commands support stable output modes such as:
-
-```text
--o table
--o json
--o yaml
-```
-
-Human-readable table/summary output may be the interactive default.
-
-Machine-readable stdout must remain free from progress text or decoration. Progress/debug output goes to stderr where appropriate.
-
-## 26. CLI exit-code contract
-
-V1 can use a small stable shell classification:
-
-```text
-0 success
-1 unexpected/internal failure
-2 CLI usage/input error
-3 resource not found
-4 conflict/stale precondition
-5 denied/approval required
-6 temporarily unavailable/fenced
-7 requested Pantheon operation completed unsuccessfully
-```
-
-API clients should prefer structured Problem Details over shell exit-code semantics.
-
-## 27. System discovery
-
-Expose a system discovery endpoint such as:
-
-```text
-GET /api/v1/system
-```
-
-Conceptual response:
-
-```yaml
-daemonVersion: ...
-supportedApiVersions:
-  - pantheon/v1
-
-database:
-  formatVersion: ...
-
-installation:
-  id: ...
-
-recovery:
-  ready: true
-
-journal:
-  epoch: ...
-  latestSequence: ...
-```
-
-Do not expose secrets, capability tokens, or backend-private configuration.
-
-## 28. Architectural resource vocabulary
-
-The public API uses Pantheon architectural concepts such as:
-
-```text
-Goal
-Task
-TaskGraph
-Run
-Attempt
-Artifact
-Candidate
-Evidence
-Agent
-Backend
-Budget
-Grant
-Approval
-RecoveryFinding
-RecoveryDecision
-Workspace
-IntegrationIntent
-Event
-Command
-```
-
-Database implementation concepts such as `run_status`, `budget_consumptions`, or exporter cursors remain private.
-
-## 29. Compatibility policy
-
-Within `/api/v1`, compatible additive evolution may include:
-
-- new optional response fields;
-- new endpoints;
-- new optional query parameters;
-- new Event types;
-- new values in documented extensible string namespaces.
-
-V1 must not silently:
-
-- change an existing field's meaning;
-- remove required fields;
-- change identifier semantics;
-- broaden an operation's authority.
-
-Incompatible semantic change requires a new API version.
-
-Clients should tolerate unknown optional fields where documented schemas permit them.
-
-## 30. Conformance testing
-
-V1 implementation should include integration tests for at least:
-
-- OpenAPI request/response conformance;
-- Problem type/code stability;
-- ETag and `If-Match` behavior;
-- 428/412 precondition behavior;
-- `commandId` retry/idempotency semantics;
-- same `commandId` with different request rejection;
-- list/watch gap freedom;
-- SSE reconnect/resume;
-- 410 cursor recovery;
-- CLI/API compatibility;
-- recovery-barrier readiness behavior.
-
-## V1 non-goals
-
-Defer:
-
-- public unauthenticated TCP listening;
-- multi-user identity/role system;
-- arbitrary public SQL/filter expressions;
-- websocket-specific control protocol;
-- gRPC dependency for the public API;
-- direct DB access by clients;
-- direct backend/Git/workspace access by clients;
-- generic lifecycle CRUD;
-- hidden chain-of-thought APIs.
-
-## Key decisions
-
-1. **`pantheond` is the sole control-plane authority; clients never access SQLite or external execution systems directly.**
-2. **V1 is HTTP/1.1 + JSON over a local Unix-domain socket.**
-3. **Remote/TCP exposure is deferred until transport authentication/security are designed.**
-4. **The CLI is a thin client of exactly the same public API.**
-5. **The public API is independently versioned under `/api/v1`.**
-6. **OpenAPI describes the public HTTP contract.**
-7. **Public mutations are semantic commands, not raw CRUD over internal lifecycle state.**
-8. **Controller-owned internal resources cannot be arbitrarily created/deleted through generic endpoints.**
-9. **Mutable resources expose strong ETags based on authoritative revision.**
-10. **Stale-sensitive mutations use `If-Match`; missing required preconditions return 428 and stale preconditions return 412.**
-11. **Every mutation uses Pantheon's durable `commandId` and request hash for retry idempotency.**
-12. **HTTP success codes reflect whether durable work is complete or merely accepted for asynchronous processing.**
-13. **Errors use RFC 9457 Problem Details with stable Pantheon Problem types/codes.**
-14. **Liveness and recovery/scheduling readiness are distinct health signals.**
-15. **List responses include an Event Journal snapshot cursor from the same SQLite snapshot.**
-16. **List + Event watch is gap-free by watching strictly after that snapshot cursor.**
-17. **Event streaming uses SSE with `JournalEpoch:sequence` as the resumable stream ID.**
-18. **Unavailable/pruned/pre-restore cursors return 410; clients relist and resume.**
-19. **Lists use opaque keyset cursors and explicit typed filters.**
-20. **Actor identity is server-derived, never self-declared by request payload.**
-21. **Structured explainability uses Events/Evidence/decisions, not hidden reasoning.**
-22. **CLI `--wait` is a read/watch behavior, not a different server mutation path.**
-23. **Machine-readable CLI output is stable and kept cleanly separate from progress/debug output.**
-24. **Public resources use architectural vocabulary; persistence tables remain implementation-private.**
-25. **API v1 evolves additively; incompatible semantics require v2.**
-26. **OpenAPI conformance, idempotency, optimistic concurrency and list/watch behavior are first-class integration tests.**
+1. `pantheond` is the only control-plane authority.
+2. Operator Control and Agent Control are distinct trust surfaces/principals/route sets.
+3. Public API exposes semantic architecture resources/commands, not raw lifecycle/table CRUD.
+4. Every normal mutation has durable commandId idempotency; sensitive secret commands never persist secret bytes in hashes/logs.
+5. ETags/If-Match map client optimistic concurrency to controller revision CAS.
+6. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, recovery-quarantine/force-resolution and configuration operations required to operate the system.
+7. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.
+8. List + Event watch is gap-free through same-snapshot Journal cursor.
+9. CLI is only an API client; `--wait` watches durable state/events.
+10. Remote/TCP access is deferred until a real authentication/security model exists.
