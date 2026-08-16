@@ -48,6 +48,7 @@
         "tools": {"$ref": "#/$defs/tools"},
         "permissions": {"$ref": "#/$defs/permissions"},
         "workspace": {"$ref": "#/$defs/workspace"},
+        "sandbox": {"$ref": "#/$defs/sandbox"},
         "delegation": {"$ref": "#/$defs/delegation"},
         "limits": {"$ref": "#/$defs/limits"},
         "review": {"$ref": "#/$defs/review"},
@@ -123,10 +124,7 @@
       "required": ["profile"],
       "properties": {
         "profile": {"type": "string", "minLength": 1},
-        "rules": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/permissionRule"}
-        }
+        "rules": {"type": "array", "items": {"$ref": "#/$defs/permissionRule"}}
       }
     },
     "permissionRule": {
@@ -148,8 +146,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "isolation": {"enum": ["none", "worktree", "copy"]},
-        "sandbox": {"type": "string", "minLength": 1}
+        "strategy": {"enum": ["none", "isolated-clone", "linked-worktree", "copy"]}
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {"type": "string", "minLength": 1},
+        "requirements": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/qualifiedName"}
+        }
       }
     },
     "delegation": {
