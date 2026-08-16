@@ -2,401 +2,185 @@
 
 ## Status
 
-Draft design — first Pantheon subsystem.
+Canonical Logical Agent knowledge/identity architecture. Autonomous mutation/promotion pipeline is post-v1.
 
 ## Purpose
 
-The Agent Genome defines a persistent logical agent independently of the model or harness that executes it. A coder should remain the same coder whether a particular task is executed by Claude Code, OpenCode, or a local Qwen model.
+The Agent Genome defines persistent Logical Agent identity and reusable guidance independently of concrete execution providers/models/harnesses.
 
-Pantheon therefore owns the canonical agent representation and compiles it into provider-specific sessions.
+> **Backend choice does not define Agent identity. Pantheon owns the Logical Agent; execution adapters compile the frozen Agent inputs into a backend-specific context package.**
 
-## Canonical agent home
+## Canonical Agent home
+
+Conceptually:
 
 ```text
-~/.pantheon/
-└── agents/
-    ├── coder/
-    │   ├── SOUL.md
-    │   ├── AGENT.yaml
-    │   ├── BEHAVIOR.md
-    │   ├── MEMORY.md
-    │   ├── skills/
-    │   │   ├── debugging/
-    │   │   │   ├── SKILL.md
-    │   │   │   ├── scripts/
-    │   │   │   ├── references/
-    │   │   │   └── evals/
-    │   │   └── testing/
-    │   ├── experiences/
-    │   │   └── events.jsonl
-    │   ├── reflections/
-    │   │   └── candidates.jsonl
-    │   ├── evals/
-    │   │   └── regression/
-    │   └── changes/
-    │       └── history.jsonl
-    ├── researcher/
-    └── security/
+~/.pantheon/agents/<agent>/
+  SOUL.md
+  AGENT.yaml
+  BEHAVIOR.md
+  memory/
+  skills/
+  experiences/      # future learning inputs
+  reflections/      # future candidates
+  evals/
+  changes/
 ```
+
+Filesystem layout is operator storage/configuration representation; active runtime authority comes from immutable Agent/configuration snapshots, not whatever files happen to contain during a Run.
 
 ## Knowledge layers
 
-### `SOUL.md` — stable identity
+### SOUL
 
-`SOUL.md` defines durable identity:
+Stable human-governed identity/responsibility/decision principles. It excludes credentials, transient repository paths, provider flags and short-lived procedures.
 
-- role and responsibility;
-- mentality and decision principles;
-- engineering/research/security character;
-- collaboration principles;
-- communication posture.
+SOUL mutation requires human approval and is not automatic in v1.
 
-It must not contain project commands, credentials, ports, transient frameworks, repository paths, or short-lived procedures.
+### AGENT.yaml
 
-Agents may propose soul changes but may not silently apply them. Soul mutation requires human approval.
+Machine-readable applicability/competencies/execution requirements/tool/action declarations/permission ceiling/delegation/limits and Genome references. See `agent-manifest.md`.
 
-### `AGENT.yaml` — machine-readable contract
+### BEHAVIOR
 
-The exact schema is a later design item. It will bind capabilities, allowed skills, provider preferences, permission profiles, routing policy, evaluation policy, and other machine-readable configuration.
+Validated cross-task heuristics describing how the Agent should approach work. V1 treats configured BEHAVIOR as static approved input during a Run.
 
-### `BEHAVIOR.md` — learnable heuristics
+### Memory
 
-Pantheon adds an explicit adaptive layer between identity and procedures.
+Durable facts/context/preference-like knowledge that may influence work without becoming procedural authority. Context Builder selects a bounded immutable set of Memory items for each Run and freezes their versions/digests in ContextPlan.
 
-Examples:
+### Skills
 
-- Inspect logs and recent changes before editing an unfamiliar service.
-- When acceptance criteria are ambiguous, derive testable criteria before implementation.
-- After repeated similar failures, revisit the underlying assumption rather than attempting another variation.
+Portable procedural knowledge with progressive disclosure. Skills may contain `SKILL.md` plus references/scripts/assets/evals. `skills.preload` is initial ContextPlan content; other allowed Skills are on-demand.
 
-Behavior may evolve through the validated learning pipeline. This prevents one-off experiences from polluting fundamental identity.
+A Skill is not a competency, permission, tool/action or execution feature.
 
-### Memory — durable facts
+## Agent snapshot and Run freezing
 
-Memory stores facts, preferences, decisions, and stable context that should influence future work without becoming procedural instructions.
+Configuration/Agent registry publishes immutable Agent versions/snapshots. Agent Resolution selects a current eligible Logical Agent version; the Run freezes that identity.
 
-The exact Markdown/SQLite/retrieval split remains an open design item.
-
-### Skills — procedural knowledge
-
-Skills use portable `SKILL.md` directories with optional scripts, references, assets, and evaluations.
+Context Builder freezes exact selected:
 
 ```text
-debugging/
-├── SKILL.md
-├── scripts/
-├── references/
-└── evals/
-    ├── case-01.yaml
-    └── case-02.yaml
+Agent version
+SOUL version/digest
+BEHAVIOR version/digest
+preloaded Skill versions
+selected Memory item versions
+ContextPolicy/retrieval provenance
 ```
 
-## Knowledge horizons
+Later file/memory/Skill changes do not mutate an existing Run.
+
+## V1 scope
+
+V1 includes:
 
 ```text
-SHORT TERM
-experience / session state
-hours
-
-MEDIUM TERM
-memory / reflections / candidate heuristics
-days to weeks
-
-LONG TERM
-validated skills / promoted behavior / approved soul
-months to permanent
+SOUL
+AGENT.yaml
+BEHAVIOR
+approved Skills
+bounded selected Memory
+immutable Agent snapshots
+Context Builder integration
 ```
 
-The more permanent a piece of knowledge becomes, the stronger the evidence required to promote it.
+V1 does **not** automatically promote or mutate Genome content based on execution outcomes.
 
-## Learning pipeline
+This keeps implementation focused on deterministic orchestration and avoids making unvalidated model reflection part of authoritative Run configuration.
 
-Pantheon treats reflection as a hypothesis, not truth.
+## Post-v1 learning architecture
+
+Pantheon may later support a staged learning pipeline:
 
 ```text
-Task execution
-   ↓
-Objective outcome signals
-   ↓
-Experience record
-   ↓
-Reflector
-   ↓
-Candidate lesson
-   ↓
-Classifier
-   ├─ memory
-   ├─ skill
-   ├─ behavior heuristic
-   └─ soul proposal
-   ↓
-Validation / evaluation
-   ↓
-Promote or reject
+Task/Event/Evidence outcomes
+  ↓
+Experience
+  ↓
+Reflection proposal
+  ↓
+classification
+  ↓
+candidate Memory/Skill/Behavior/Soul change
+  ↓
+validation/evaluation
+  ↓
+promotion or rejection
 ```
 
-An agent may learn and propose freely. Permanent self-modification requires evidence.
+The invariant remains:
 
-## Outcome signals
+> **Reflection is a hypothesis, not truth. Production Genome state changes only through versioned governed promotion.**
 
-Learning should incorporate objective signals rather than relying only on conversation transcripts:
-
-- exit status;
-- tests;
-- build and lint results;
-- benchmarks;
-- reviewer verdict;
-- user correction and acceptance;
-- number and type of retries;
-- rollback occurrence;
-- execution time;
-- token/quota usage;
-- security/policy violations.
-
-User corrections are especially high-value signals because they represent explicit ground truth about desired behavior.
-
-## Example learning episode
-
-A coding agent tries to fix a generated API binding twice by directly editing generated output. Both attempts fail. On the third attempt it discovers the schema generator, updates the source schema, regenerates the binding, and all tests pass.
-
-The raw experience records the attempts and objective test outcome. Reflection proposes:
-
-> Before directly modifying generated API bindings, identify their source schema or generator.
-
-The classifier identifies this as procedural knowledge and proposes a patch to `skills/code-generation/SKILL.md`, rather than modifying `SOUL.md`.
-
-## Versioned skill mutation
-
-Production skills are never modified directly.
+Potential promotion strength increases with permanence:
 
 ```text
-skill v1.4
-   ↓
-candidate patch
-   ↓
-v1.5-rc1
-   ↓
-regression + effectiveness evals
-   ├─ regression → reject
-   └─ improvement → promote to v1.5
+Memory candidate        lower bar, still validated/governed
+Skill/Behavior change   evaluation-gated
+SOUL change             explicit human approval
 ```
 
-Every change records at least:
+Learning may never silently expand operator-controlled `accepts` or `competencies`.
 
-- author agent;
-- source session/task;
-- reason;
-- supporting evidence;
-- previous/new content hash;
-- evaluation results;
-- timestamp;
-- rollback metadata.
+## Experiences and reflections
 
-## Skill evaluation
+Future raw experiences/reflections are not automatically supplied to normal Run context. They are learning-system inputs until validated/promoted.
 
-A skill change should be evaluated against task-like cases rather than only reviewed textually.
+This prevents transient failure narration, prompt injection or one-off model conclusions from becoming long-lived Agent instruction authority.
 
-Example:
+## Skill mutation
 
-```yaml
-task: >
-  Investigate a failing generated TypeScript API client.
+If future skill learning is enabled, production Skill versions remain immutable. Candidate change produces a new version/candidate evaluated against regression/effectiveness cases before activation.
 
-expected:
-  must:
-    - identify generator
-    - inspect source schema
-    - avoid editing generated output first
-  must_not:
-    - immediately patch generated client
-```
+Old Runs continue referencing old frozen Skill versions.
 
-The candidate is promoted only when it improves or preserves evaluation performance without critical regression.
+## Cross-Agent promotion
 
-## Agent-specific skill views
-
-A global skill library may exist, but agents receive capability-scoped views.
-
-Example:
+Future sharing may follow:
 
 ```text
-GLOBAL
-├── git
-├── research
-├── browser
-└── documentation
-
-CODER
-├── debugging
-├── testing
-├── rust
-└── web-development
-
-RESEARCHER
-├── source-evaluation
-├── web
-└── synthesis
-
-SECURITY
-├── reverse-engineering
-├── web-security
-├── binary-analysis
-└── ctf
-```
-
-One agent cannot silently mutate another agent's private skill set.
-
-## Skill promotion
-
-Private knowledge may become broadly useful. Pantheon supports an explicit promotion pipeline:
-
-```text
-agent-private skill
-      ↓
-proven repeatedly
-      ↓
+private Agent candidate
+  ↓ evidence/evals
 shared candidate
-      ↓
-cross-agent review/eval
-      ↓
-global skill
+  ↓ stronger validation/review
+published shared Skill/Behavior version
 ```
 
-Cross-agent/global promotion requires stronger evidence than local skill improvement.
+A curator/librarian may organize/deduplicate candidate knowledge but is not trusted to manufacture semantic truth without evidence.
 
-## Soul evolution
+## Outcome signals for future learning
 
-`SOUL.md` is protected but not absolutely frozen.
-
-After substantial evidence, Pantheon may produce a human-reviewable proposal such as:
+Useful objective signals include:
 
 ```text
-SOUL CHANGE PROPOSAL
-
-Current:
-Seek robust and extensible solutions.
-
-Proposed:
-Prefer the simplest solution that satisfies current requirements;
-add extensibility only when justified.
-
-Evidence:
-37 tasks
-12 user corrections
-18 reviewer findings
-
-Confidence: 0.94
+Acceptance Evidence
+build/test results
+recovery/failure fingerprints
+retries
+rollbacks
+resource/usage cost
+policy violations
+user corrections
 ```
 
-Only the human may approve the mutation.
+Events/Evidence are preferred over hidden model reasoning/transcripts as learning ground truth.
 
-## Reflection economics
+## Security
 
-Execution and learning are separate roles. The executor does not need to perform its own routine reflection.
+Genome content cannot grant authority. Permissions/actions remain governed by Agent Manifest ceiling, current policy, Grants, Agent Control and Sandbox.
 
-Preferred pattern:
+Memory/Skill/reference text is context data/instruction guidance, never a Capability Grant or secret container.
 
-```text
-Claude / OpenCode / local executor
-              ↓
-        telemetry + result
-              ↓
-        cheap/local reflector
-              ↓
-       candidate learning
-              ↓
-             evals
-              ↓
-       routine reviewer
-              ↓
- high-impact? → premium reviewer / human
-```
+Secrets/Agent Control credentials must never be stored in Genome content.
 
-This preserves scarce premium-model usage for difficult reasoning and important validation boundaries.
+## Core invariants
 
-## Curator
-
-The curator is a librarian, not an unrestricted teacher.
-
-It may automatically:
-
-- detect stale skills;
-- detect likely duplicates;
-- run regression/effectiveness evaluations;
-- archive unused material;
-- identify degraded skills;
-- propose merges or splits;
-- propose promotion from private to shared knowledge.
-
-Production rewrites still pass through the candidate/evaluation pipeline.
-
-## Negative learning
-
-Failures are first-class learning material.
-
-The reflection system asks:
-
-- What failed?
-- Why did it fail?
-- Was the failure caused by a bad assumption, procedure, tool use, or missing knowledge?
-- Is the lesson reusable?
-- Which knowledge layer should own it?
-
-Repeated failure patterns can become explicit pitfalls in skills.
-
-## Observability
-
-Self-modification must be inspectable.
-
-Expected CLI concepts:
-
-```text
-pantheon agent inspect coder
-pantheon agent diff coder
-pantheon learning pending coder
-pantheon learning history coder
-pantheon learning rollback <change-id>
-```
-
-Inspection should expose:
-
-- soul version and last change;
-- active memory count;
-- active/candidate/stale skills;
-- recent performance metrics;
-- recent learning promotions/rejections;
-- pending high-impact proposals.
-
-## Provider compilation
-
-Pantheon compiles the canonical genome into provider-specific sessions.
-
-### Claude Code
-
-Compile identity, active behavior, selected memory, selected skills, model/tool constraints, and permission policy into the Claude Code agent/session representation.
-
-### OpenCode
-
-Compile the same canonical identity into an OpenCode agent definition with selected model/provider, skills, and permissions.
-
-### Local OpenAI-compatible provider
-
-Construct the appropriate system/context prompt and retrieval package for oMLX or another local endpoint.
-
-The provider is an executor, not the owner of agent identity.
-
-## Guiding principle
-
-> An agent may learn freely and propose changes freely. Permanent self-modification requires evidence. Fundamental identity remains under human control.
-
-## Open design questions
-
-1. Exact `AGENT.yaml` schema.
-2. Markdown vs SQLite vs retrieval index for memory.
-3. Minimum evidence thresholds for each mutation class.
-4. Evaluation isolation and anti-overfitting strategy.
-5. Cross-agent skill promotion criteria.
-6. Soul-change approval UX.
-7. How context limits affect genome compilation and retrieval.
-8. How to detect contradictory or obsolete memories/heuristics.
-9. Whether high-impact policy changes require multi-reviewer consensus.
+1. Logical Agent identity is backend/provider/model independent.
+2. Genome inputs are versioned/frozen per Run through Agent snapshot + ContextPlan.
+3. SOUL/BEHAVIOR/Skills/Memory are distinct semantic layers.
+4. Skill is not competency/tool/execution feature/permission.
+5. V1 uses static approved Genome state; autonomous reflection/promotion is deferred.
+6. Future learning is staged/evidence-gated/versioned and may never directly mutate current Runs.
+7. Genome learning may not silently broaden `accepts`, competencies or security authority.
