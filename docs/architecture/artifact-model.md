@@ -2,337 +2,97 @@
 
 ## Status
 
-Draft design — Pantheon artifact subsystem specification.
+Canonical Pantheon Artifact/Candidate specification.
 
 ## Purpose
 
-Pantheon needs immutable, verifiable result objects that can be referenced by Tasks, Runs, Acceptance, recovery, learning, and future external APIs without depending on mutable workspace paths or backend-specific storage.
+Pantheon needs immutable verifiable result objects independent of mutable Workspaces, provider sessions and storage paths.
 
-The central rule is:
+> **Artifacts are immutable content-addressed logical results. Mutable workspaces, files-in-progress, streams, paths, sessions and storage locations are not Artifacts.**
 
-> **Artifacts are immutable, content-addressed logical results. Mutable workspaces, files-in-progress, streams, paths, sessions, and storage locations are not Artifacts.**
-
-This specification separates content identity, provenance, evidence, storage availability, retention, and candidate-result identity.
-
-See also:
-
-- `docs/architecture/task-object.md`
-- `docs/architecture/task-acceptance-and-completion.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/recovery-policy.md`
-
-## 1. Blob and Artifact are different objects
-
-A `Blob` is immutable bytes identified by content digest.
-
-Conceptually:
-
-```yaml
-blob:
-  digest: sha256:abc...
-  size: 18372
-```
-
-An `Artifact` is a typed immutable logical result represented by a canonical Artifact Manifest that references one or more Blobs.
+## Blob and Artifact
 
 ```text
+Blob
+  immutable raw bytes
+  identity = digest + size
+
 Artifact
-   │
-   ▼
-Artifact Manifest
-   │
-   ├── Blob A
-   ├── Blob B
-   └── Blob C
+  typed immutable canonical manifest over zero or more Blobs
+  identity = digest(canonical manifest)
 ```
 
-Artifact therefore does not mean "file". It may represent a report, changeset, test result, finding set, binary, image, research bundle, or another typed result.
+V1 uses SHA-256 and RFC-8785/JCS-style canonical JSON discipline for hash-bearing manifests.
 
-## 2. Artifact identity is content-addressed
-
-V1 uses an algorithm-qualified digest of the canonical Artifact Manifest:
+External form:
 
 ```text
 artifact://sha256/<manifest-digest>
 ```
 
-Conceptually:
+The Artifact manifest contains immutable semantic content only. Mutable retention/location/availability metadata is separate.
 
-```yaml
-artifactManifest:
-  schemaVersion: 1
-  artifactKind: research.report
+## Artifact kind versus media type
 
-  contents:
-    - name: report.md
-      mediaType: text/markdown
-      digest: sha256:def...
-      size: 48219
-```
-
-The manifest is serialized canonically using RFC 8785 JSON Canonicalization Scheme semantics and hashed with SHA-256.
-
-Digest syntax remains algorithm-qualified so a later algorithm migration does not require redefining Artifact references.
-
-## 3. Payload bytes are preserved exactly
-
-Pantheon canonicalizes only its own Artifact Manifest.
-
-Payload Blobs are hashed over exact bytes.
-
-Pantheon must not silently parse, normalize, reorder, pretty-print, line-ending-convert, or otherwise rewrite Agent/user payloads before computing their content digest.
-
-If a producer submits a JSON file, its Blob identity is the digest of the exact submitted bytes, not of a reserialized JSON value.
-
-## 4. Artifact kind and media type are distinct
-
-`artifactKind` expresses semantic meaning to Pantheon.
-
-Examples:
+`artifactKind` describes Pantheon semantics such as:
 
 ```text
 code.changeset
-code.snapshot
 research.report
-security.findings
-test.results
-diagnosis
-design.document
-report
-artifact.file
+test.report
+log.bundle
+architecture.document
 ```
 
-`mediaType` describes payload encoding.
+`mediaType` describes representation of individual Blob members. The two are not interchangeable.
 
-Examples:
+## Separate graphs
+
+Pantheon keeps four concerns separate:
 
 ```text
-text/markdown
-application/json
-application/octet-stream
-image/png
+CONTENT
+  Blob/Artifact immutable identity
+
+PROVENANCE
+  ProductionRecord: who/what produced the Artifact
+
+STORAGE
+  replicas/availability/verification
+
+CONTROL
+  retention pins/authorization/lifecycle
 ```
 
-A `research.report` may be encoded as Markdown, JSON, PDF, or a multi-content bundle without changing what the Artifact means semantically.
+Producing the exact same Artifact twice yields one content identity and multiple ProductionRecords.
 
-## 5. Mutable metadata is excluded from Artifact identity
+## Artifact sealing
 
-The hashed Artifact Manifest must not contain mutable or contextual data such as:
+Only Pantheon computes authoritative digests. An Agent may request `artifact.seal` against authorized Task Workspace/input state, but it cannot supply an authoritative digest or arbitrary host path.
 
-- creation time;
-- Task/Run/Attempt identity;
-- Agent/backend identity;
-- storage path or URL;
-- replica state;
-- retention policy;
-- labels that may change;
-- access timestamps;
-- human-facing display title when not semantically part of the content.
-
-Artifact identity answers:
-
-> What immutable logical result is this?
-
-It does not answer who produced it, where it lives, how long it is retained, or whether a replica is currently available.
-
-## 6. Provenance is a separate immutable ProductionRecord
-
-Different executions may independently produce identical Artifact content.
-
-Those executions share the same Artifact identity but retain separate provenance.
-
-Conceptually:
-
-```yaml
-production:
-  id: production_123
-
-  subjects:
-    - artifact://sha256/91ab...
-
-  producer:
-    task: task_44
-    run: run_17
-    attempt: attempt_2
-
-  strategy:
-    agent: agent://researcher
-    binding: binding_88
-
-  inputs:
-    - artifact://sha256/12ef...
-    - artifact://sha256/72aa...
-
-  createdAt: ...
-```
-
-ProductionRecord is append-only/immutable evidence of production context. It is not part of the Artifact digest.
-
-This distinction permits both content deduplication and complete audit history.
-
-## 7. Evidence remains separate from Artifact and provenance
-
-Pantheon distinguishes:
+Ordinary local CAS seal ordering:
 
 ```text
-Artifact
-  What immutable result exists?
-
-ProductionRecord
-  Who/what produced it, under what strategy, from which inputs?
-
-Evidence
-  What did an evaluator determine about it?
+write temporary bytes
+fsync/finalize
+atomic rename into digest location
+verify digest/size
+then commit Blob/Artifact/Production/Candidate DB refs
 ```
 
-An evaluator may itself produce report Artifacts, but authoritative acceptance verdicts remain Evidence records governed by the Acceptance subsystem.
+An orphan CAS object after a DB crash is GC-able. A committed DB Artifact referencing missing payload is a recovery/storage fault.
 
-Evidence binds to exact immutable subjects/digests and becomes stale if the evaluated candidate changes.
+## Storage
 
-## 8. Mutable workspace state is never an Artifact
-
-`workspace://...` identifies mutable working state.
-
-An Agent may edit a workspace repeatedly across Attempts or Runs. Therefore workspace identity cannot serve as acceptance/output identity.
-
-Correct boundary:
+One local v1 CAS is sufficient, conceptually:
 
 ```text
-mutable workspace
-       ↓
-      seal
-       ↓
-immutable Artifact
+~/.pantheon/store/objects/sha256/<digest>
 ```
 
-The same rule applies to temporary files, PTY streams, live logs, working Git trees, and other mutable external state.
+Storage path is not Artifact identity.
 
-## 9. Artifact sealing is a control-plane operation
-
-Pantheon exposes a canonical operation conceptually equivalent to:
-
-```text
-artifact.seal
-```
-
-Sealing flow:
-
-```text
-producer identifies output payload(s)
-        ↓
-Pantheon imports/reads payload
-        ↓
-Pantheon computes/verifies size + digest
-        ↓
-write/verify Blob(s) in CAS
-        ↓
-build canonical Artifact Manifest
-        ↓
-compute Artifact Manifest digest
-        ↓
-persist Artifact metadata
-        ↓
-return ArtifactRef
-```
-
-Pantheon computes/verifies digests itself. A producer-provided digest may be a hint/claim but is never trusted as authoritative without verification.
-
-## 10. Sealing is naturally idempotent
-
-Identical payload descriptors and identical canonical Artifact Manifest content produce the same Artifact ID.
-
-Repeated sealing therefore does not create semantically duplicate Artifacts.
-
-Separate ProductionRecords may still state that different Runs produced the same Artifact.
-
-## 11. Blob content is globally deduplicated
-
-The local Content Addressable Store stores one Blob per digest.
-
-Artifacts may share Blobs.
-
-```text
-Artifact A
-  ├── report-a
-  └── diagram
-
-Artifact B
-  ├── report-b
-  └── diagram
-
-CAS
-  ├── report-a
-  ├── report-b
-  └── diagram
-```
-
-This reduces storage duplication without coupling Artifact identity to storage layout.
-
-## 12. Multi-content Artifacts are first-class
-
-V1 supports a simple ordered/named content list.
-
-Example:
-
-```yaml
-artifactKind: security.findings
-contents:
-  - name: findings.json
-    mediaType: application/json
-    digest: sha256:...
-    size: ...
-
-  - name: exploit.py
-    mediaType: text/x-python
-    digest: sha256:...
-    size: ...
-
-  - name: screenshot.png
-    mediaType: image/png
-    digest: sha256:...
-    size: ...
-```
-
-Content names are part of the logical Manifest and therefore affect Artifact identity.
-
-V1 does not attempt to define a universal filesystem Merkle-tree representation. Workspace/Git integration may define specialized `code.snapshot` or `code.changeset` representations using Git-native immutable objects.
-
-## 13. Git representation is an Artifact payload strategy, not the Artifact model
-
-Git already provides immutable content-addressed blobs, trees, and commits.
-
-Pantheon should leverage those primitives for code-related Artifact kinds, but generic Artifact identity must not simply be defined as a Git commit hash.
-
-Conceptually:
-
-```text
-Artifact
-  kind = code.changeset
-      ↓
-representation
-      ↓
-Git-specific immutable descriptor
-```
-
-The Workspace/Git subsystem defines exactly which Git descriptor(s) are sealed for each code Artifact kind.
-
-## 14. Storage replicas are mutable state outside Artifact identity
-
-The same Artifact may have zero, one, or multiple payload replicas.
-
-Conceptually:
-
-```yaml
-replica:
-  artifact: artifact://sha256/...
-  location: store://local/...
-  state: available
-  verifiedAt: ...
-```
-
-Storage migration, replication, eviction, or restoration does not change Artifact identity.
-
-Useful replica observations include:
+Replica state may be:
 
 ```text
 AVAILABLE
@@ -341,53 +101,21 @@ MISSING
 CORRUPT
 ```
 
-These are storage observations, not Artifact lifecycle phases.
+Pantheon verifies bytes against the manifest rather than trusting filesystem presence.
 
-## 15. Corruption never mutates Artifact identity
+## Artifact authorization
 
-If a replica expected to contain `sha256:ABC` verifies as another digest, the replica is `CORRUPT`.
+Artifact refs are identifiers, not bearer capabilities. Reading/materializing an Artifact requires `artifact.read` authorization/current Task/Run policy. Raw CAS paths are not exposed to untrusted Sandboxes.
 
-The Artifact does not become the newly observed content.
+## Retention
 
-Acceptance, provenance, and Task output references continue to point to the original immutable digest and fail closed until a valid replica is available.
+Retention/pinning is separate from content identity. Goal deliverables, active Candidates/Evidence, current Workspaces/integration obligations and explicit operator pins can establish retention roots.
 
-## 16. ArtifactRef is an identifier, not authority
+Removing a retention pin never changes Artifact ID.
 
-Knowledge of an Artifact digest does not grant access to the payload.
+## CandidateResult
 
-Artifact read/export operations remain subject to Pantheon authorization, for example:
-
-```text
-action: artifact.read
-resource: artifact://sha256/...
-```
-
-Artifact refs may safely appear in logs, events, provenance, Task inputs, or acceptance records without becoming bearer tokens.
-
-## 17. Retention and pinning are separate
-
-Retention is mutable policy and must not affect Artifact identity.
-
-Potential retention roots include:
-
-- active Task/Run references;
-- Goal deliverables;
-- Acceptance Evidence;
-- user/operator pins;
-- audit-retention policy;
-- Genome/evaluation references.
-
-V1 should prefer mark-and-sweep style garbage collection from retained roots over making correctness depend exclusively on reference counting.
-
-Metadata retention and payload retention are distinct.
-
-Payload bytes may be intentionally garbage-collected while durable metadata/provenance still records that an Artifact with a given digest existed.
-
-Policies requiring long-term reproducibility pin the required payloads.
-
-## 18. CandidateResult is canonical and content-addressed
-
-A Run submits exactly one immutable candidate that binds Task output names to Artifact references.
+A CandidateResult is an immutable content-addressed proposed answer to one Task from one Run.
 
 Conceptually:
 
@@ -395,142 +123,136 @@ Conceptually:
 candidate:
   task: task_123
   run: run_17
-
   outputs:
     changeset: artifact://sha256/A
     diagnosis: artifact://sha256/B
-
   summary: ...
 ```
 
-Pantheon canonicalizes the CandidateResult and derives a digest/reference such as:
+Candidate ID:
 
 ```text
-candidate://sha256/C
+candidate://sha256/<canonical-candidate-digest>
 ```
 
-Changing any output binding or semantically hashed candidate field changes the candidate digest and invalidates prior candidate-level acceptance evidence.
+V1 permits at most one Candidate per Run. Candidate identity never changes during Acceptance.
 
-Candidate identity is separate from Artifact identity because one candidate may contain multiple output Artifacts.
+## Evidence is separate
 
-## 19. Candidate submission is a sealing boundary
+Evidence binds a Candidate/Artifact/GoalCompletionCandidate to a criterion + exact EvaluatorVersion + verdict/provenance. Evidence is not embedded into Artifact identity, and evaluating the same Artifact differently does not produce a different Artifact.
 
-Workers should not submit mutable paths as final outputs.
+## Code changeset Artifact
 
-Preferred flow:
+A `code.changeset` **must be complete from Pantheon's CAS plus its immutable manifest**. Pantheon must not depend on the repository's mutable/prunable Git object database as the only payload store.
+
+### Canonical identity
+
+The changeset manifest binds at least:
 
 ```text
-artifact.seal(path/content)
-        ↓
-ArtifactRef
-
-artifact.seal(...)
-        ↓
-ArtifactRef
-
-Task result submission
-        ↓
-CandidateResult(outputs = ArtifactRefs)
-        ↓
-Candidate digest frozen
-        ↓
-Task → Evaluating
+repository identity
+resolved immutable base commit
+canonical ordered changed-path entries
+result-tree Git OID as optional/verification metadata where applicable
 ```
 
-This gives Acceptance exact immutable subjects.
+Each changed-path entry is canonical data, conceptually:
 
-## 20. Intermediate Artifacts are allowed
+```yaml
+- path: <lossless canonical path representation>
+  operation: add | modify | delete
+  mode: <canonical repository file mode>
+  blob: sha256:<Pantheon CAS blob digest>   # add/modify only
+```
 
-A Run may seal intermediate results without declaring them Task outputs.
+Entries are sorted by canonical path bytes. Deletion has no payload Blob. Rename is not a distinct identity requirement in v1; it may be represented as delete+add because semantic candidate identity is resulting content, not a diff heuristic.
 
-Examples:
+For repositories whose paths are not representable losslessly as normal UTF-8 strings, the manifest uses an explicitly lossless byte encoding rather than lossy path normalization.
 
-- investigation notes;
-- downloaded datasets;
-- generated traces;
-- benchmark results;
-- intermediate patches;
-- temporary analysis bundles.
+### No Git-generated patch bytes in identity
 
-Relationships such as `intermediate`, `candidate-output`, `evaluation-input`, or `deliverable` belong to Production/usage metadata, not intrinsic Artifact identity.
+A human-readable patch/diff may be generated as a derived Artifact/member for review, but **Git-version-dependent patch text is not part of the authoritative `code.changeset` identity**.
 
-## 21. Production lineage forms a derivation DAG
+This avoids identity changing because different Git versions/configuration render equivalent changes differently.
 
-ProductionRecords may reference input Artifacts, producing a lineage graph:
+If Pantheon ever standardizes a canonical patch representation, its exact format/version must be an explicit immutable schema, not "whatever `git diff` produced".
+
+### Git object IDs are verification/provenance, not sole storage
+
+`baseCommit`, observed/result tree OIDs and worker commit OIDs are useful immutable Git identifiers and may be recorded for integration/reconciliation. But retaining those OIDs does not make Git's ODB the Artifact store.
+
+Pantheon CAS stores the changed file payload Blobs required to reconstruct/apply the changeset even if Git GC later prunes Task-local objects.
+
+### Optional Git object pinning
+
+For efficient local integration/review, Workspace/Integration Controller may additionally pin relevant Git objects under controller-owned refs such as:
 
 ```text
-Artifact A
-   ↓
-Run 1
-   ↓
-Artifact B
-   ↓
-Run 2
-   ↓
-Artifact C
+refs/pantheon/artifacts/<artifact-id>/...
 ```
 
-This lineage remains separate from the immutable Artifact Manifests.
+before a DB state relies on their continued Git availability.
 
-Future interoperability may export selected provenance into external attestation formats without making those formats Pantheon's internal source of truth.
+These refs are **storage/optimization retention**, not Artifact identity. Artifact correctness must still be recoverable from the canonical manifest + CAS payload unless the Artifact kind explicitly defines another complete immutable payload representation.
 
-## 22. Local-first v1 storage
-
-V1 may use one opaque local CAS plus SQLite metadata.
-
-Conceptually:
+This dual rule prevents both failure modes:
 
 ```text
-~/.pantheon/store/
-  objects/
-    sha256/
-      ab/
-        abcdef...
+Git gc prunes only copy -> Artifact broken
 ```
 
-SQLite stores/control-indexes:
+and:
 
-- Artifact records/Manifest metadata;
-- ProductionRecords;
-- CandidateResults;
-- Evidence references;
-- replica state;
-- retention/pins;
-- lineage relationships.
+```text
+Git implementation renders different patch text -> Artifact ID changes
+```
 
-The CAS itself stores opaque immutable bytes and should not be the sole source of relational/control-plane truth.
+## WorkspaceRevision versus code.changeset
 
-## v1 non-goals
+WorkspaceRevision is an immutable controller checkpoint of Task Workspace state, typically recording base/result Git tree metadata. It is not itself the final portable Artifact payload.
 
-Defer:
+Sealing a code candidate:
 
-- distributed object storage;
-- remote CAS protocol;
-- automatic signing/transparency log;
-- universal source-tree Merkle representation;
-- cross-cluster Artifact federation;
-- sophisticated retention tiers;
-- external attestation interoperability as a core dependency.
+```text
+Task Workspace mutable state
+  ↓ controller captures WorkspaceRevision
+  ↓ compare canonical final state to immutable base
+  ↓ copy changed-file bytes into Pantheon CAS
+  ↓ build canonical code.changeset manifest
+  ↓ verify completeness/digests
+  ↓ optional Git object pins
+  ↓ commit Artifact/Candidate refs
+```
 
-## Key decisions
+After this point Acceptance never needs to trust a mutable Workspace.
 
-1. Artifact is immutable and content-addressed; mutable workspace/file/stream state is never an Artifact.
-2. Raw bytes are stored as content-addressed Blobs; Artifact is a typed Manifest over one or more Blobs.
-3. V1 Artifact ID is SHA-256 over an RFC-8785-canonicalized Artifact Manifest.
-4. Payload Blob hashes are over exact bytes; Pantheon does not silently canonicalize producer payloads.
-5. `artifactKind` expresses semantic meaning; `mediaType` expresses encoding.
-6. Mutable metadata, storage locations, producer/timestamps, retention, and backend details are excluded from Artifact identity.
-7. Production/provenance is a separate immutable record, so identical content may have one Artifact ID with multiple production histories.
-8. Evidence remains separate from Artifact and ProductionRecord.
-9. Pantheon computes/verifies size and digest during sealing.
-10. Sealing is naturally idempotent because identical canonical Manifest content yields the same Artifact ID.
-11. CAS deduplicates shared Blob content globally.
-12. V1 supports simple multi-content Artifacts; source-tree representation is specialized by Workspace/Git integration.
-13. Storage replicas and availability are mutable observations outside Artifact identity.
-14. Artifact refs are identifiers, never authorization capabilities.
-15. Retention/pinning is separate from Artifact identity; payload GC does not rewrite historical metadata.
-16. CandidateResult is canonical/content-addressed and binds Task output names to exact Artifact IDs.
-17. Acceptance normally binds to the Candidate digest while criterion evidence may additionally bind constituent Artifacts.
-18. Runs may produce intermediate Artifacts; Task-output status is a relationship, not an intrinsic Artifact property.
-19. Production lineage forms a separate derivation DAG.
-20. V1 uses one local opaque CAS plus SQLite control/provenance/replica/retention state.
+## Integration
+
+Integration Controller consumes accepted immutable `code.changeset` content. It may materialize/reconstruct the result against the intended repository and perform a controlled three-way/application strategy with explicit expected target-ref CAS.
+
+An integration conflict does not invalidate the accepted Artifact; it means current external target state differs from the integration precondition.
+
+## Large evaluator/output content
+
+Logs, test reports and other large evaluation output become normal Artifacts referenced from Evidence; Events/Evidence rows contain metadata/digests rather than unbounded content.
+
+## Secrets excluded
+
+Active credential material is never an Artifact kind. `artifact.seal` cannot read SecretProvider material or use Artifact retention as a secret-storage lifecycle.
+
+## Garbage collection
+
+GC follows reachability/retention metadata, not mere age. Before deleting a Blob, Pantheon verifies no retained Artifact manifest references it. Before releasing optional Git object pins, Pantheon verifies no Integration/Workspace obligation still depends on them and the canonical CAS-complete Artifact remains available.
+
+## Core invariants
+
+1. Artifact identity is immutable canonical content; storage/provenance/retention are separate.
+2. Workspace/path/session/provider state is never Artifact identity.
+3. Pantheon computes/verifies all authoritative hashes.
+4. Candidate is immutable/content-addressed and at most one exists per Run.
+5. Evidence is separate and bound to exact immutable subject/evaluator version.
+6. `code.changeset` is complete from canonical manifest + Pantheon CAS payload; it never relies solely on prunable Git ODB state.
+7. Git-generated patch text is not authoritative changeset identity in v1.
+8. Git OIDs/optional controller refs are useful verification/retention metadata, not a substitute for CAS-complete payload.
+9. Artifact refs are not bearer capabilities.
+10. Active secrets are never Artifacts.
