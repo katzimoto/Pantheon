@@ -89,16 +89,16 @@ Startup recovery invokes the same reconciliation logic used during normal operat
 
 Periodic safety reconciliation continues after startup so missed events, external drift, and latent inconsistencies are eventually rediscovered.
 
-## 3. Installation identity and daemon incarnation
+## 3. Installation identity, restore generation, and daemon incarnation
 
-Pantheon maintains two different identities.
+Pantheon maintains three distinct identities/fences.
 
 ### Installation ID
 
 A stable random identifier for one Pantheon control-plane installation.
 
 ```text
-installationId = persistent across normal daemon restarts
+installationId = persistent across normal daemon restarts and disaster restore of that installation
 ```
 
 Where practical, external resources created by Pantheon should carry adapter-specific ownership metadata derived from:
@@ -110,6 +110,29 @@ Where practical, external resources created by Pantheon should carry adapter-spe
 The concrete tag/label mechanism is adapter-private.
 
 The Installation ID is used for inventory and orphan detection. It is not authorization.
+
+### RestoreGeneration
+
+`RestoreGeneration` is a fresh unpredictable installation-wide authority/idempotency generation.
+
+```text
+normal daemon restart
+→ RestoreGeneration unchanged
+
+disaster restore of an older SQLite snapshot
+→ RestoreGeneration replaced with a fresh unpredictable value
+```
+
+It fences authority whose durable consumption/idempotency history can be rewound by restore, including runtime Grants, CapabilityTickets, broker operations and Operator command identities.
+
+It is deliberately not a monotonic counter restored from the database: an old snapshot can reintroduce a previously used numeric value. The new generation is random/fresh and is committed before any new post-restore authority-bearing mutation or external effect.
+
+`RestoreGeneration` is distinct from:
+
+- Installation ID — stable ownership identity;
+- daemon incarnation — process/controller lifetime;
+- Run ControlLease epoch/token — Run-control ownership;
+- JournalEpoch — Event-stream continuity.
 
 ### Daemon incarnation ID
 
@@ -168,6 +191,8 @@ Whenever control is adopted after daemon restart or restore, Pantheon rotates th
 
 Adapters should propagate the fencing identity to native execution controls where practical. A backend inability to enforce fencing internally does not weaken Pantheon's own authoritative-state checks.
 
+RestoreGeneration does not replace ControlLease fencing. RestoreGeneration prevents replay of rewound authorization/command authority; ControlLease token+epoch fences Run-controller ownership.
+
 ## 6. Startup phases
 
 Startup is staged so unsafe external actions remain blocked until the persisted world has been fenced.
@@ -193,6 +218,8 @@ H. scheduler dispatch enabled
 ```
 
 These phases are not user-facing Task phases.
+
+Ordinary restart preserves the existing RestoreGeneration. Disaster restore executes the additional restore authority fence in §27 before any normal authority-bearing mutation or external effect.
 
 ### A. Installation lock
 
@@ -223,11 +250,15 @@ Load at least:
 - unresolved cleanup/finalization obligations;
 - prior unresolved RecoveryFindings.
 
+In restore mode the inventory also includes Grants, CapabilityTickets, broker operations and Commands because their restored rows may represent authority/idempotency history older than external reality.
+
 ### E. Authority rotation and fencing
 
 Adopt required Run control by incrementing ownership epoch and rotating lease tokens transactionally.
 
 No old controller incarnation may remain authoritative.
+
+In restore mode, the new RestoreGeneration has already been committed before this point; old-generation Grants/Tickets cannot redeem and old-generation broker operations are reconciliation-only.
 
 ### F. Domain reconciliation
 
@@ -305,11 +336,15 @@ Run control         → ControlLease leaseToken + epoch
 Workspace           → Workspace ID + deterministic desired path/base
 Artifact seal       → content digest
 Integration         → IntegrationIntent + expected target OID
+Broker operation    → stable broker-operation/external idempotency identity
+Operator command    → RestoreGeneration + commandId
 Resource release    → Reservation ID
 Budget settlement   → Hold/Usage source IDs
 ```
 
 Pantheon does not need one provider-specific universal transaction protocol. It requires each external domain to expose enough identity/inspection semantics to determine whether an operation happened or to safely repeat it.
+
+A disaster restore never creates permission to replace an existing operation identity with a fresh one solely because the restored row looks incomplete. That would turn uncertainty into duplicate effect authority.
 
 ## 9. External operation certainty
 
@@ -667,6 +702,8 @@ Evidence PASS
 → subject/evaluator bindings must be complete
 ```
 
+In restore mode the scanner additionally checks that any newly redeemable Grant/Ticket, executable broker operation and accepted Operator command belongs to the current RestoreGeneration. Old-generation broker operations may remain only in reconciliation/fenced history.
+
 Violations are classified, not silently patched.
 
 ## 21. RecoveryFinding
@@ -729,6 +766,7 @@ Inspect external state before deciding, for example:
 
 - uncertain executor launch/termination;
 - pending IntegrationIntent after crash;
+- old-generation broker operation whose effect may have occurred after the restored snapshot;
 - workspace that may contain unsealed user/Agent work.
 
 ### Quarantine / operator required
@@ -739,6 +777,7 @@ Examples:
 - nonterminal Run missing immutable ExecutionBinding;
 - reservation whose holder disappeared from authoritative state;
 - unexplained shared Git ref mutation;
+- old-generation broker operation whose external outcome cannot be inventoried/established;
 - database integrity failure;
 - foreign-key/logical corruption that cannot be repaired from immutable history.
 
@@ -768,6 +807,7 @@ Global mutation/dispatch must stop for conditions such as:
 
 - SQLite integrity cannot be established;
 - installation lock/authority is ambiguous;
+- disaster-restore RestoreGeneration fence has not been durably committed;
 - schema is unsupported/incompletely migrated;
 - global resource/budget accounting is internally contradictory in a way that could cause unsafe double allocation.
 
@@ -775,7 +815,9 @@ Global mutation/dispatch must stop for conditions such as:
 
 Once the storage gate is safe, Pantheon may expose inspection/status APIs before dispatch is enabled.
 
-Desired-state writes that do not create immediate external side effects may be accepted and queued, but the dispatch gate remains closed until the recovery barrier is satisfied.
+Desired-state writes that do not create immediate external side effects may be accepted and queued during ordinary startup, but the dispatch gate remains closed until the recovery barrier is satisfied.
+
+During disaster restore, no authority-broadening or effect-creating Operator mutation may be accepted until the new RestoreGeneration has been committed. Requests carrying a pre-restore command epoch fail closed rather than being reinterpreted as new commands.
 
 Safety-reducing operations should remain available where possible, including:
 
@@ -844,28 +886,74 @@ Create consistent snapshots using SQLite-supported online backup mechanisms. Rec
 - backup digest/checksum;
 - application version.
 
-### Restore
+The snapshot necessarily includes the then-current RestoreGeneration, Grants, CapabilityTickets, broker operations and Commands. Those rows are historical after an older backup is restored until the post-restore authority fence is established.
+
+### Restore authority fence
 
 After restoring an older snapshot:
 
 ```text
 DO NOT immediately enable Scheduler dispatch
+DO NOT redeem restored Grants/Tickets
+DO NOT execute restored pending broker operations
+DO NOT accept an old command epoch as a new command
 ```
 
-External executors, Git refs, worktrees, and object stores may contain effects created after the snapshot.
+External executors, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
 
 Restore recovery therefore:
 
-1. acquires installation authority;
-2. creates a new daemon incarnation;
-3. rotates all active ControlLease tokens before external commands;
-4. keeps the dispatch gate closed;
-5. inventories every external domain capable of containing Pantheon-owned state;
-6. reconciles or fences state newer than/absent from the restored database;
-7. requires operator action for un-inventoriable ambiguous domains;
-8. opens dispatch only after the recovery barrier is satisfied.
+1. acquires installation authority and validates that the snapshot belongs to the intended installation;
+2. opens/validates SQLite schema/integrity while all effect-creating gates remain closed;
+3. creates a new daemon incarnation;
+4. **commits a fresh unpredictable RestoreGeneration as the first post-restore authority transition**, and rotates JournalEpoch separately for event continuity;
+5. rotates all active Run ControlLease tokens before Run/executor commands;
+6. treats every restored Grant/CapabilityTicket from the old generation as non-redeemable historical authority; re-affirmation creates a new current-generation Grant rather than reactivating the old row;
+7. treats every restored old-generation broker operation as reconciliation-only: inspect by the original stable identity where possible, never reissue merely because restored SQLite says `PENDING`/incomplete;
+8. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
+9. inventories every external domain capable of containing Pantheon-owned state and reconciles/fences effects newer than or absent from the restored database;
+10. requires operator action for un-inventoriable ambiguous domains/operations;
+11. opens normal mutation/dispatch only after the recovery barrier is satisfied.
 
 A restored database snapshot is never permission to blindly replay historical external operations.
+
+### Grant replay prevention
+
+A one-use Grant consumed after the backup may appear unused again after restore. The RestoreGeneration mismatch makes it impossible to redeem that restored Grant, independent of the restored use counter.
+
+If the operator wants the same authority again, they explicitly approve/re-affirm it under the current generation. Pantheon therefore preserves the semantic meaning of a bounded human approval even when the database history recording its consumption was lost.
+
+### Broker-operation reconciliation after restore
+
+A restored broker operation may describe an external side effect that happened after the snapshot but before the failure.
+
+Correct handling is:
+
+```text
+old-generation broker operation
+        ↓
+inspect external system using original stable operation/idempotency identity
+        ↓
+CONFIRMED | NOT_APPLIED | UNKNOWN
+```
+
+If CONFIRMED, record the reconciled historical outcome. If NOT_APPLIED is provable, Recovery Policy/operator may intentionally create new current-generation authority if the effect is still desired. If UNKNOWN, remain fenced; do not rotate the operation identity and retry.
+
+### Operator command identity after restore
+
+Operator command idempotency is scoped by:
+
+```text
+RestoreGeneration + commandId
+```
+
+A restored database may have lost a `commands` row for a command that already produced an external/control-plane effect. Therefore row absence alone can never make an old-epoch request new. `public-daemon-api-and-cli.md` requires stale command epochs to fail closed.
+
+The client observes the new command epoch, treats pre-restore command outcome as UNKNOWN, inspects current resource state, then deliberately chooses whether a new command with a new ID is required.
+
+### JournalEpoch is separate
+
+Restore also rotates JournalEpoch because restored Event history is discontinuous. JournalEpoch is not reused as RestoreGeneration: event-retention/stream continuity and authority/idempotency continuity are independent semantics.
 
 ## 28. Clean shutdown
 
@@ -913,6 +1001,16 @@ CAS ref update before IntegrationIntent acknowledgement
 finalization obligation satisfaction before terminal transition
 ```
 
+Restore tests additionally construct an older consistent snapshot, perform newer external/control effects, restore the old snapshot, and assert at least:
+
+```text
+consumed one-use Grant cannot redeem again
+old-generation CapabilityTicket cannot redeem
+restored PENDING broker operation cannot execute again without reconciliation proof
+old commandEpoch + commandId cannot become a new command when its row is absent
+fresh RestoreGeneration is different from every value recovered from the snapshot
+```
+
 For each crash point, restart Pantheon and assert that the resulting state is equivalent to either the operation not having happened or having happened exactly once, never a duplicate unsafe effect.
 
 Property/invariant tests should continuously assert:
@@ -923,7 +1021,10 @@ Property/invariant tests should continuously assert:
 - no acceptance against corrupt/mismatched Artifact bytes;
 - no shared Git ref overwrite after stale CAS expectation;
 - no Active Task without exactly one responsible nonterminal Run in valid state;
-- no controller command accepted under stale lease token.
+- no controller command accepted under stale lease token;
+- no Grant/CapabilityTicket redeemed across RestoreGeneration;
+- no old-generation broker operation reissued as an external effect;
+- no Operator command accepted under a stale commandEpoch.
 
 ## 30. Recovery passes
 
@@ -942,6 +1043,8 @@ recoveryPass:
     quarantined: 1
 ```
 
+Restore-mode RecoveryPass records the old restored generation (as historical metadata where available) and the newly committed RestoreGeneration without treating the old value as authority.
+
 A pass is not required to reach zero findings before scheduler dispatch. It must only reach the recovery barrier: every relevant unresolved item is safely fenced.
 
 ## 31. Controller order and dependencies
@@ -953,7 +1056,11 @@ A practical startup dependency order is:
 ```text
 Storage / Installation Authority
         ↓
+RestoreGeneration fence (restore mode only)
+        ↓
 Run + Attempt ownership/reconciliation
+        ↓
+Authorization / broker-operation reconciliation
         ↓
 Workspace / Sandbox reconciliation
         ↓
@@ -970,7 +1077,7 @@ Scheduler dispatch gate
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
-The global Recovery Coordinator owns only startup gating, pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic.
+The global Recovery Coordinator owns only startup gating, restore-generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic.
 
 ## 32. v1 scope
 
@@ -978,12 +1085,14 @@ Include:
 
 - single-daemon installation lock;
 - stable Installation ID and per-start daemon incarnation ID;
+- fresh RestoreGeneration rotation on disaster restore;
+- generation-bound Grants/CapabilityTickets/broker operations and Operator commands;
 - Run ControlLease token rotation plus ownership epoch;
 - staged startup and global dispatch gate;
 - recovery barrier based on reconciled/fenced/quarantined obligations;
 - periodic safety reconciliation using normal controller code;
 - finalization obligations for cleanup safety;
-- Run/Attempt, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
+- Run/Attempt, authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
 - durable RecoveryFindings;
 - invariant scanning and quarantine;
 - SQLite integrity/version checks and supported backup procedure;
@@ -1023,7 +1132,10 @@ Defer:
 19. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
 20. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
 21. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-22. **Restoring an old SQLite snapshot always triggers restore recovery/inventory because external state may be newer than the snapshot.**
-23. **Clean daemon shutdown and cancellation of external work are separate intents.**
-24. **Crash/fault-injection testing at external-side-effect boundaries is a required v1 quality gate.**
-25. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+22. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human-authority consumption histories may be newer than the snapshot.**
+23. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+24. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+25. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+26. **Clean daemon shutdown and cancellation of external work are separate intents.**
+27. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
+28. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**

@@ -22,6 +22,8 @@ alongside separate Artifact CAS and Workspace storage.
 
 One database is intentional: Task/Run/Reservation/Budget/Event/authorization state frequently changes atomically. Splitting these across attached WAL databases would weaken crash-atomic cross-domain commits.
 
+`system_state` includes the current installation `restore_generation`: a fresh unpredictable value that persists across normal daemon restart and is rotated only at the disaster-restore authority fence. It is distinct from daemon incarnation, Run ownership epoch/lease token, and JournalEpoch.
+
 ## SQLite operating rules
 
 V1 locks:
@@ -402,9 +404,21 @@ Controller epoch/incarnation may be stored as provenance but is not a rejection 
 
 Grant use-count and current-policy redemption are authoritative relational transitions.
 
-A consequential broker redemption transaction rechecks current Attempt/Task/Run authority, current ConfigRevision/authz digest, Grant scope/expiry/remaining uses, exact operation idempotency; then CAS-consumes one Grant use and creates/transitions the exact broker operation in the **same transaction**.
+The following authority-bearing rows carry a relational `restore_generation` copied from the current `system_state.restore_generation` when created:
 
-Capability tickets, if represented, are single-use/short-lived references and are revalidated at redemption; issuance alone is not durable bearer authority.
+```text
+grants
+capability_tickets
+broker_operations
+```
+
+A consequential broker redemption transaction rechecks current Attempt/Task/Run authority, current ConfigRevision/authz digest, current RestoreGeneration, Grant scope/expiry/remaining uses and exact operation idempotency. It requires `grant.restore_generation == current restore_generation`, then CAS-consumes one Grant use and creates/transitions the exact broker operation under that same generation in the **same transaction**.
+
+Capability tickets, if represented, are single-use/short-lived references and are revalidated at redemption, including `ticket.restore_generation == current restore_generation`; issuance alone is not durable bearer authority.
+
+After disaster restore, rows whose generation differs from current are not deleted or rewritten to current. Old-generation Grants/Tickets are non-redeemable historical authority. If an operator re-affirms the permission, a new Grant is created under the current generation.
+
+Old-generation `broker_operations` are **reconciliation-only**. Their restored state may be compared with external reality using the original operation/idempotency identity, but no controller may issue/reissue the external effect from that row merely because it appears `PENDING`, incomplete, or absent from later history. If the outcome cannot be established, the operation/domain remains UNKNOWN/fenced until explicit recovery resolution.
 
 ## Recovery tombstones
 
@@ -536,11 +550,48 @@ The Event Journal is append-only durable history/outbox, not primary state. Even
 
 Sequence is explicit `(journal_epoch, sequence)` with a singleton next-sequence allocator in the same write transaction. Disaster restore rotates JournalEpoch rather than pretending restored history is continuous.
 
+JournalEpoch and RestoreGeneration are intentionally separate: JournalEpoch fences event-stream continuity, while RestoreGeneration fences runtime authority and command/idempotency continuity. A future journal-only rotation must not revoke Grants, and an authority-generation decision must not depend on Event retention mechanics.
+
 ## Commands
 
-`commands` stores operator idempotency identity, actor, operation, non-sensitive request hash, status/result refs/timestamps. Same command ID+same hash returns/reconciles prior outcome; same ID+different hash fails closed.
+`commands` stores operator idempotency identity, actor, operation, non-sensitive request hash, status/result refs/timestamps. Command identity is relationally scoped by:
 
-Sensitive secret-set operations are an explicit exception: secret bytes are never part of durable request hashes; command ID is single-use and secret mutation intent uses only non-secret metadata/version identity.
+```text
+restore_generation / command_epoch
+command_id
+```
+
+Normal uniqueness is `(restore_generation, command_id)`. For a request, Pantheon first compares the supplied `command_epoch` with current `system_state.restore_generation` **before** treating command-row absence as a new command. A mismatch fails closed as stale command authority even if restoration removed the historical command row.
+
+Within the current generation, same command ID+same hash returns/reconciles prior outcome; same command ID+different hash fails closed. After disaster restore, callers must treat old-generation outcomes as unknown and intentionally issue a new command ID under the new generation only after current-state reconciliation.
+
+Sensitive secret-set operations are an explicit exception only to persisted request hashing: secret bytes are never part of durable request hashes; command ID remains single-use and generation-bound, and secret mutation intent uses only non-secret metadata/version identity.
+
+## Disaster-restore authority fence (T0)
+
+Restore is not an ordinary startup. After SQLite integrity/schema validation and acquisition of the installation lock, but before scheduler dispatch, authorization redemption, broker execution, Operator mutations or other new authority-bearing external effects, Pantheon commits one restore fence transaction:
+
+```text
+BEGIN IMMEDIATE
+
+verify restore mode + installation identity
+write fresh unpredictable system_state.restore_generation
+rotate JournalEpoch as required by event-history semantics
+record restore RecoveryPass/incarnation linkage
+append restore-fence audit Event in the new journal epoch
+
+COMMIT
+```
+
+The freshly generated RestoreGeneration must not be derived by incrementing a value from the restored snapshot; an old backup may contain a previously used number. Normal daemon restart never performs T0.
+
+After T0:
+
+- old-generation Grants and CapabilityTickets cannot redeem;
+- old-generation broker operations are reconciliation-only;
+- Operator commands carrying an old commandEpoch are rejected before command-row lookup/creation;
+- Run ControlLease tokens still rotate separately before Run/external commands;
+- domain recovery reconciles/fences external state before normal dispatch resumes.
 
 ## Migrations / backup
 
@@ -563,6 +614,10 @@ one live Task-scoped reservation per singular (Task, ResourceKey)
 Reservation holder validity
 Budget aggregate == immutable ledger reconstruction
 Usage provenance/backend ownership for Attempt and control-operation subjects
+Grant/CapabilityTicket redemption generation == current RestoreGeneration
+new/executable broker operation generation == current RestoreGeneration
+old-generation broker operations are reconciliation-only
+current Operator command epoch == current RestoreGeneration before command creation
 Candidate outputs -> existing Artifacts/Blobs
 Workspace/Sandbox ownership consistency
 IntegrationIntent/Git state consistency
@@ -574,6 +629,7 @@ Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 ## Named transaction families
 
 ```text
+T0  DISASTER-RESTORE AUTHORITY FENCE
 T1  GOAL REVISION
 T2  GRAPH PATCH
 T3  SCHEDULER RUN-INTENT COMMIT
@@ -603,8 +659,10 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 6. Run Finalizing always records terminalTarget; only Completed requires Candidate.
 7. Launch contact boundary is durable before external launch call.
 8. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy.
-10. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-11. Requeue occurs only after previous responsible Run terminal.
-12. Force-resolution tombstones stale lineages without fabricating factual Usage.
-13. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+10. Disaster restore rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect; restored Grants/Tickets cannot redeem and restored broker operations cannot be reissued from stale state.
+11. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+12. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+13. Requeue occurs only after previous responsible Run terminal.
+14. Force-resolution tombstones stale lineages without fabricating factual Usage.
+15. Event rows are committed with their authoritative mutation, but state tables remain source of truth.

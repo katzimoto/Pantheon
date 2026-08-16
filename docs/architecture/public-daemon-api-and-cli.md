@@ -210,22 +210,37 @@ Request must include expected revision plus explicit reason/risk acknowledgement
 
 Force resolution creates durable lineage tombstone/audit state. It never fabricates factual usage and cannot be invoked by Agent Control.
 
-## Commands and idempotency
+## Commands, restore epochs, and idempotency
 
-Every Operator mutation carries a durable Pantheon `commandId` independent of HTTP transport.
+Every Operator mutation carries a durable Pantheon command identity composed of:
+
+```text
+commandEpoch = current RestoreGeneration
+commandId
+```
+
+The client obtains the current `commandEpoch` from `GET /api/v1/system` and binds it to the command before submission. A normal daemon restart does not rotate it. Disaster restore does.
+
+Within one command epoch:
 
 ```text
 new commandId
   -> process
 
-same commandId + same non-sensitive request hash
+same commandEpoch + same commandId + same non-sensitive request hash
   -> return/reconcile prior outcome
 
-same commandId + different hash
+same commandEpoch + same commandId + different hash
   -> fail closed conflict
 ```
 
-Sensitive secret-set mutations are a deliberate exception: secret bytes are never part of durable request hashes/logs; command ID is single-use and the durable SecretMutationIntent contains only non-secret metadata/version identity.
+A request carrying an old `commandEpoch` fails closed as `stale-command-epoch`, even when the restored database no longer contains the historical `commands` row. Pantheon never treats row absence after restore as proof that the command did not previously execute.
+
+The caller must then treat the pre-restore command outcome as `UNKNOWN`, inspect current resource/external state, and intentionally decide whether another mutation is required. Any new mutation uses the current command epoch and a new command ID.
+
+This restore boundary is deliberately stronger than transport retry idempotency: it prevents a restored snapshot from silently converting a previously consumed command identity into fresh external-effect authority.
+
+Sensitive secret-set mutations remain a deliberate exception only to request hashing: secret bytes are never part of durable request hashes/logs. Their command identity is still bound to the RestoreGeneration, command ID remains single-use, and the durable SecretMutationIntent contains only non-secret metadata/version identity.
 
 ## ETag / optimistic concurrency
 
@@ -260,6 +275,7 @@ not-found
 validation
 precondition-required
 stale-revision
+stale-command-epoch
 conflict
 stale-authority
 policy-denied
@@ -299,8 +315,11 @@ DB format version
 installation ID
 active ConfigurationRevision
 recovery/ready status
+RestoreGeneration / commandEpoch
 JournalEpoch/latest sequence
 ```
+
+`RestoreGeneration` is an authority/idempotency continuity boundary and is independent of `JournalEpoch`, which represents Event Journal continuity. Both may rotate during disaster restore for different reasons.
 
 No secrets/backend-private session state.
 
@@ -351,6 +370,8 @@ V1 local principal is derived from the trusted Operator Control connection/insta
 ## CLI
 
 CLI is a thin API client. It never opens SQLite, edits Workspace/Git authority, talks to backends/runtime sockets or reads SecretProvider material directly.
+
+For every mutation the CLI obtains/caches the current `commandEpoch` from the daemon and submits it with a newly generated command ID. If the daemon rejects an old epoch after restore, the CLI reports that prior command outcome is unknown and requires fresh state observation before issuing a replacement mutation; it does not automatically mint a new ID and replay the command.
 
 Representative commands:
 
@@ -415,7 +436,7 @@ Read commands support stable human output plus `-o json`/`-o yaml` where applica
 1. `pantheond` is the only control-plane authority.
 2. Operator Control and Agent Control are distinct trust surfaces/principals/route sets.
 3. Public API exposes semantic architecture resources/commands, not raw lifecycle/table CRUD.
-4. Every normal mutation has durable commandId idempotency; sensitive secret commands never persist secret bytes in hashes/logs.
+4. Every normal mutation is idempotent only within the current `(RestoreGeneration, commandId)` identity; old command epochs fail closed after disaster restore even if historical command rows were rewound away. Sensitive secret commands never persist secret bytes in hashes/logs.
 5. ETags/If-Match map client optimistic concurrency to controller revision CAS.
 6. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, recovery-quarantine/force-resolution and configuration operations required to operate the system.
 7. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.

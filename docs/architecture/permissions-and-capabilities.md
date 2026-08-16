@@ -150,9 +150,26 @@ resource
 argument constraints
 expiry
 maximum uses
+restoreGeneration
 ```
 
 Persistent operator decisions become explicit user/project configuration rather than an immortal runtime Grant.
+
+## Restore-generation fencing
+
+Runtime Grants and capability tickets are authority minted within one installation `RestoreGeneration`. The generation is a fresh unpredictable value that survives ordinary daemon restart and is rotated as the first durable authority transition after disaster restore.
+
+A restored historical Grant is evidence of a prior approval, not automatically current authority. Redemption requires:
+
+```text
+grant.restoreGeneration == current RestoreGeneration
+```
+
+and capability-ticket redemption requires the same generation match. A mismatch fails closed before use-count mutation, broker-operation creation, secret retrieval or external effect.
+
+Operators do not reactivate an old-generation Grant in place. If the same authority is still desired after restore, the operator explicitly re-affirms it, creating a new Grant under the current RestoreGeneration. This prevents one human approval or one-use Grant from becoming reusable because SQLite was rewound behind an already-applied external effect.
+
+Broker operations created by redemption also record the current RestoreGeneration. After restore, an old-generation broker operation may be inspected/reconciled under its original stable external identity, but its restored `PENDING`/incomplete state is never authority to issue the external effect again. `global-recovery-and-crash-reconciliation.md` defines the reconciliation-only restore rule.
 
 ## Atomic Grant use-count redemption
 
@@ -166,14 +183,16 @@ BEGIN IMMEDIATE
 re-read:
   current Attempt/Run/Task authority
   current ConfigurationRevision/authz policy
-  Grant state + scope + expiry
+  current RestoreGeneration
+  Grant state + scope + expiry + restoreGeneration
   remaining uses
   exact normalized action/resource/args hash
 
+require Grant.restoreGeneration == current RestoreGeneration
 re-evaluate authorization under current policy
 
 CAS decrement/increment Grant use accounting exactly once
-create/transition exact broker-operation authority record
+create/transition exact broker-operation authority record under current RestoreGeneration
 append authorization/audit Event
 
 COMMIT
@@ -182,6 +201,8 @@ external effect
 ```
 
 Two concurrent requests cannot both consume the last remaining use. Retries of the same idempotent operation return/reconcile the already-created broker operation rather than consuming another use.
+
+A broker operation from an older RestoreGeneration is not eligible for this normal retry path. It is reconciliation-only until its external outcome is established or explicitly force-resolved; Pantheon never changes its idempotency identity merely to make a restored operation executable again.
 
 ## Capability tickets
 
@@ -192,12 +213,13 @@ Attempt/Run/Task
 exact action/resource
 argsHash
 Grant/decision refs
+restoreGeneration
 expiry/single-use state
 ```
 
 But a ticket is **not durable bearer authority that bypasses current policy**.
 
-Before redemption/external effect, the broker transaction must revalidate current authority and atomically mark/consume the ticket. A ticket issued before security tightening can therefore be denied at redemption.
+Before redemption/external effect, the broker transaction must revalidate current authority, require the ticket's RestoreGeneration to equal the current generation, and atomically mark/consume the ticket. A ticket issued before security tightening or recovered from an older disaster-restore generation can therefore be denied at redemption.
 
 No Agent may mint a ticket. Ticket IDs/bytes are never equivalent to Operator Control authority.
 
@@ -292,6 +314,7 @@ Audit/Event records identify, without sensitive material:
 - decision and reason;
 - exact ConfigurationRevision/authz digest;
 - Grant/ticket/broker-operation refs actually involved;
+- RestoreGeneration involved in authority redemption;
 - redemption/use-count transition;
 - external outcome/reconciliation state.
 
@@ -303,9 +326,10 @@ Secrets/tokens/raw bearer material never enter Events/logs.
 2. Authorization is `PERMIT|DENY`; approval creates a Grant then re-evaluates.
 3. Hard forbid/default deny are mandatory.
 4. Existing Runs never gain broader authority from later policy relaxation.
-5. Grants/tickets are revalidated against current authority at redemption.
-6. Grant `uses` accounting and exact operation creation are one transactional CAS boundary.
-7. Agent `secret.read` is hard-denied in v1; `secret.use` is brokered use only.
-8. Sandbox ambient capability is no broader than semantic authority and excludes Pantheon/peer/host privileged state.
-9. Provider-native security is defense in depth, never the source of truth.
-10. Failure to enforce required policy fails closed.
+5. Grants/tickets are revalidated against current authority **and current RestoreGeneration** at redemption; restored old-generation authority cannot be redeemed until an operator creates new current-generation authority.
+6. Grant `uses` accounting and exact operation creation are one transactional CAS boundary, and the broker operation is bound to the same current RestoreGeneration.
+7. Old-generation broker operations are reconciliation evidence after restore, not authority to repeat an external effect.
+8. Agent `secret.read` is hard-denied in v1; `secret.use` is brokered use only.
+9. Sandbox ambient capability is no broader than semantic authority and excludes Pantheon/peer/host privileged state.
+10. Provider-native security is defense in depth, never the source of truth.
+11. Failure to enforce required policy fails closed.
