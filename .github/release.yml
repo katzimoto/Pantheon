@@ -1,0 +1,29 @@
+# Native GitHub generated release notes are a fallback/sanity-check projection.
+# Pantheon's authoritative release scope comes from the Version Milestone and
+# its Engineering Missions; scripts/version-automation.py generates that view.
+changelog:
+  exclude:
+    labels:
+      - changelog:none
+  categories:
+    - title: Added
+      labels:
+        - changelog:added
+    - title: Changed
+      labels:
+        - changelog:changed
+    - title: Deprecated
+      labels:
+        - changelog:deprecated
+    - title: Removed
+      labels:
+        - changelog:removed
+    - title: Fixed
+      labels:
+        - changelog:fixed
+    - title: Security
+      labels:
+        - changelog:security
+    - title: Other Changes
+      labels:
+        - "*"
