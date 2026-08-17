@@ -170,6 +170,7 @@ RECOVERY
   recovery_decisions
   recovery_counters
   recovery_findings
+  finalization_obligations
   external_lineage_tombstones
 
 EVALUATION / ACCEPTANCE
@@ -213,7 +214,39 @@ Secret material is never stored in SQLite.
 
 `goal_completion_candidates` is immutable/content-addressed and binds the exact Goal/Graph revision, required deliverable bindings, producer Candidate digests and the already-pinned Goal acceptance-contract identity/provenance. It never causes evaluator refs to be re-resolved.
 
-`tasks` stores current phase/status revision/current responsible Run pointer. `task_specs` is immutable and likewise carries the Task acceptance contract with exact EvaluatorVersion pinning performed at Task materialization.
+`tasks` stores current phase/status revision/current responsible Run pointer **and the durable selected terminal target whenever finalization has begun**. `task_specs` is immutable and likewise carries the Task acceptance contract with exact EvaluatorVersion pinning performed at Task materialization.
+
+Conceptually the Task lifecycle fields include:
+
+```text
+tasks
+  id
+  phase
+  terminal_target          nullable before Finalizing; Succeeded|Failed|Cancelled|Superseded
+  terminal_reason_json     nullable bounded structured detail
+  status_revision
+  active_run_id
+  ...
+```
+
+The terminal target is authoritative lifecycle intent, not Event-derived narration. V1 keeps it through terminalization so the committed terminal phase and the previously selected target remain auditable and cannot contradict one another.
+
+Row-local terminal-intent coherence is schema-enforced:
+
+```sql
+CHECK (
+  (phase IN ('Pending', 'Ready', 'Active', 'Waiting', 'Evaluating')
+   AND terminal_target IS NULL)
+  OR
+  (phase = 'Finalizing'
+   AND terminal_target IN ('Succeeded', 'Failed', 'Cancelled', 'Superseded'))
+  OR
+  (phase IN ('Succeeded', 'Failed', 'Cancelled', 'Superseded')
+   AND terminal_target = phase)
+)
+```
+
+Therefore a crash cannot leave a valid `Finalizing` Task whose intended terminal outcome must be guessed, and a terminal Task cannot retain a contradictory stale target.
 
 Key invariant:
 
@@ -683,6 +716,48 @@ After disaster restore, rows whose generation differs from current are not delet
 
 Old-generation `broker_operations` are **reconciliation-only**. Their restored state may be compared with external reality using the original operation/idempotency identity, but no controller may issue/reissue the external effect from that row merely because it appears `PENDING`, incomplete, or absent from later history. If the outcome cannot be established, the operation/domain remains UNKNOWN/fenced until explicit recovery resolution.
 
+## Explicit finalization obligations
+
+`finalization_obligations` is a narrow residual mechanism, not a mirror of every finalization predicate.
+
+Most cleanup/finalization facts are already authoritative in their owning tables and are recomputed from those rows after restart: Run/Attempt status, Sandbox phase/presence/tombstone, ResourceReservation, BudgetHold/Usage, WorkspaceRevision, Artifact retention and IntegrationIntent. Pantheon does not duplicate those facts into `finalization_obligations` merely to create a second source of truth.
+
+An explicit row is created only when a required finalization action has its own retry/uncertainty state and no other owning domain row already represents that action. V1 uses concrete relational owner edges rather than an unconstrained `subject_kind + subject_id` pair. Conceptually:
+
+```text
+finalization_obligations
+  id
+  owner_kind                  TASK|GOAL|RUN|WORKSPACE
+  task_id                     nullable FK -> tasks
+  goal_id                     nullable FK -> goals
+  run_id                      nullable FK -> runs
+  workspace_id                nullable FK -> workspaces
+  key                         stable owner-local obligation key
+  state                       PENDING|SATISFIED|UNCERTAIN
+  operation_key               nullable stable external/idempotency correlation
+  revision
+  detail_json                 bounded non-authoritative detail/provenance
+  created_at
+  updated_at
+```
+
+A CHECK/XOR constraint requires exactly one concrete owner FK and requires it to match `owner_kind`. V1 adds another owner kind only when a concrete finalization action actually needs independent durable state; control-operation, Sandbox, Reservation, Budget and Integration lifecycles are not pushed into this table merely because they can participate in finalization.
+
+Within one owner, `key` identifies one logical explicit obligation and is unique for that owner. State transitions are controller-owned/CAS-checked. `UNCERTAIN` preserves ambiguity; it is never rewritten to `SATISFIED` merely because a timeout elapsed.
+
+Task finalization therefore evaluates two layers:
+
+```text
+durable task.terminal_target
++
+required predicates from authoritative owning-domain rows
++
+explicit finalization_obligations for residual independent actions
+→ terminal transition permitted only when safe
+```
+
+A Task entering `Finalizing` writes its `terminal_target` in the same authoritative lifecycle transaction. Explicit obligation rows that are known at that transition may be inserted in the same transaction; obligations discovered deterministically later must still be created before their external action occurs. Events never substitute for either terminal intent or explicit obligation state.
+
 ## Recovery tombstones
 
 Operator force-resolution of irrecoverable UNKNOWN creates an immutable/durable lineage tombstone, conceptually:
@@ -1087,6 +1162,9 @@ A deterministic PersistenceInvariantChecker verifies at least:
 
 ```text
 Task phase/active_run_id row-local consistency
+Task terminal_target coherence: non-finalizing nonterminal => NULL; Finalizing => present; terminal => matches phase
+Task Finalizing completion only from safe authoritative domain predicates + resolved explicit finalization obligations
+explicit finalization obligation owner-kind/FK XOR valid; state in PENDING|SATISFIED|UNCERTAIN
 Task active_run_id belongs to the same Task through runs.task_id
 run_status holder matches runs.task_id
 one nonterminal Run per Task
@@ -1136,7 +1214,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task row-local pointer facts remain schema `CHECK` constraints. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task terminal intent and local pointer facts are schema `CHECK` constraints; finalization completion remains cross-row controller/invariant-checker logic over the authoritative owning-domain rows plus any explicit residual obligation records. Explicit finalization-obligation ownership is concrete-FK/XOR constrained rather than opaque. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -1176,6 +1254,8 @@ T4b verifies the same current Attempt/Run/control authority **and the exact curr
 
 T7 loads the EvaluationRound's concrete typed subject and exact pinned criterion/EvaluatorVersion, rechecks the owning lifecycle object's currentness, creates immutable Evidence, updates criterion/Aggregate AcceptanceResult state and settles applicable control-operation accounting in one authoritative transaction. For `TASK_CANDIDATE`, Task must still be Evaluating with that exact current Candidate. For `GOAL_COMPLETION_CANDIDATE`, Goal must still be Evaluating with that exact current completion candidate and represented GoalRevision current for completion. T7 never lets the evaluator itself transition Task or Goal lifecycle; owning controllers apply current aggregate results through their lifecycle transitions.
 
+A Task lifecycle transaction that first enters `Finalizing` must set the selected `terminal_target` in that same authoritative commit. Explicit residual finalization obligations known at that point may be inserted in the same commit. No external finalization action may run before either its owning domain intent/state or its explicit `finalization_obligation` identity has been durably established. The later terminal transition re-reads the same `terminal_target`, all required authoritative domain predicates and any explicit obligation states; it never infers completion from Events.
+
 T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs, SandboxKey and initial `sandbox_status` before any runtime call. Lifecycle phase and external observed presence are updated independently from factual inspection. Ordinary release commits `RELEASED` only after `ABSENT` is established; an administratively force-resolved `RELEASED+UNKNOWN` lineage requires the matching durable tombstone/fence in the same authoritative recovery path. Release never erases holder identity or factual observation needed for audit/reconciliation.
 
 T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
@@ -1196,21 +1276,22 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 6. GoalRevision and TaskSpec acceptance contracts freeze exact permitted EvaluatorVersions before EvaluationRound creation; registry movement never silently rewrites those semantics.
 7. EvaluationRound owns exactly one concrete relational subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`); no opaque generic subject reference or Task-only ownership is used.
 8. Evidence/AcceptanceResult must match the exact EvaluationRound subject and pinned evaluator contract; Task and Goal lifecycle controllers separately recheck current authority before applying results.
-9. RunStatus carries immutable Task holder identity constrained back to `runs`; Task `active_run_id` is constrained to a Run of the same Task; and a real partial unique index over `run_status.task_id` enforces at most one `Active|Finalizing` Run per Task. Task phase-specific exact-zero/exact-one semantics remain controller/invariant-checker rules.
-10. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
-11. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
-12. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
-13. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
-14. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-15. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-16. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
-17. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
-18. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
-19. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-20. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
-21. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-22. Requeue occurs only after previous responsible Run terminal.
-23. Force-resolution tombstones stale lineages without fabricating factual Usage or external absence.
-24. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-25. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
-26. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.
+9. Task terminal intent is durable row state: non-finalizing nonterminal Tasks have no target, `Finalizing` Tasks have exactly one selected target, and terminal Tasks retain a target matching their terminal phase. Finalization completion is reconstructed from authoritative domain rows plus only those explicit residual obligations that need independent retry/uncertainty state.
+10. RunStatus carries immutable Task holder identity constrained back to `runs`; Task `active_run_id` is constrained to a Run of the same Task; and a real partial unique index over `run_status.task_id` enforces at most one `Active|Finalizing` Run per Task. Task phase-specific exact-zero/exact-one semantics remain controller/invariant-checker rules.
+11. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
+12. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
+13. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
+14. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
+15. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+16. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+17. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+18. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+19. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
+20. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+21. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+22. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+23. Requeue occurs only after previous responsible Run terminal.
+24. Force-resolution tombstones stale lineages without fabricating factual Usage or external absence.
+25. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+26. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
+27. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.

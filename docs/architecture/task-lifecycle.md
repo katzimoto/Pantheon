@@ -26,8 +26,9 @@ See also:
 6. **Waiting is durable and consumes no executor Run slot.**
 7. **Success requires immutable Candidate acceptance and finalization.**
 8. **Cancellation and supersession never terminalize a Task while a responsible Run is still nonterminal.**
-9. **Terminal Tasks never reopen.** Further semantic work requires another Task.
-10. **All lifecycle writes use revision/CAS checks and append a durable Event in the same authoritative transaction.**
+9. **`Task Finalizing` always carries a durable `terminalTarget`; restart never reconstructs terminal intent from Events or surrounding state.**
+10. **Terminal Tasks never reopen.** Further semantic work requires another Task.
+11. **All lifecycle writes use revision/CAS checks and append a durable Event in the same authoritative transaction.**
 
 ## v1 phases
 
@@ -118,6 +119,8 @@ status:
   revision: ...
 ```
 
+`terminalTarget` answers **what terminal outcome Pantheon has already selected**. Finalization obligations answer **what must become safely true before that outcome may be committed**. The two are not inferred from one another.
+
 Typical obligations include:
 
 - ensure the responsible Run/Attempt is safely terminal or fenced;
@@ -127,7 +130,13 @@ Typical obligations include:
 - notify graph joins/dependents;
 - establish final retention/finalizer state.
 
-Finalization is restart-safe. A crash never requires guessing which terminal state was intended because `terminalTarget` is durable.
+Most obligations are reconstructed after restart from the authoritative domain rows that already own the fact: Run/Attempt status, Sandbox status/tombstone, ResourceReservation, BudgetHold/Usage, WorkspaceRevision, Artifact retention, IntegrationIntent and related controller state. Pantheon does not duplicate those facts into a second generic finalizer ledger merely to mirror them.
+
+If a finalization action has independent retry/uncertainty state that is not durably represented by another owning domain object, Pantheon records an explicit durable finalization obligation for that action. Such an obligation carries its own stable key/state and is reconciled idempotently; it never replaces the owning domain's authoritative state.
+
+A Task may leave `Finalizing` only when its durable `terminalTarget` is present, every required authoritative domain predicate is safe for that target, and every explicit finalization obligation is satisfied or otherwise resolved under Recovery Policy.
+
+Finalization is restart-safe. A crash never requires guessing which terminal state was intended because `terminalTarget` is durable, and cleanup progress is derived only from durable authoritative state or explicit durable obligation records—not from Event narration or process memory.
 
 ## Terminal phases
 
@@ -276,9 +285,13 @@ Evaluating + evaluation incomplete
 Evaluating + rejected + prior Run still finalizing
 → remain Evaluating
 
-Finalizing
-→ continue durable/reconstructable finalizers toward terminalTarget
+Finalizing + terminalTarget present
+→ recompute required finalization predicates from durable owning-domain state
+→ reconcile any explicit durable finalization obligations
+→ continue toward that exact terminalTarget
 ```
+
+A `Finalizing` Task without a durable `terminalTarget` is an invariant violation and is quarantined; Recovery does not infer the intended outcome from Events, Candidate state or surrounding objects.
 
 Waiting relationships never depend on an in-memory future/model process.
 
@@ -293,4 +306,5 @@ Waiting relationships never depend on an in-memory future/model process.
 7. Candidate submission is revision-bound and loses to an already-committed cancellation/supersession fence.
 8. Acceptance rejection cannot return the Task to Ready until its producing Run is terminal.
 9. Cancellation/supersession use Finalizing + terminalTarget and never leave a terminal Task with a live Run.
-10. Terminal Tasks never reopen.
+10. `Task Finalizing => terminalTarget is durably present`; finalization completion is derived only from durable authoritative domain state plus any explicit durable obligation rows.
+11. Terminal Tasks never reopen.

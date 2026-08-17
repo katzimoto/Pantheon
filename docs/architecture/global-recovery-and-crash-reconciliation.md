@@ -52,6 +52,7 @@ The authoritative sources are:
 
 - immutable Goal/GoalRevision/GoalCompletionCandidate records and pinned Goal acceptance contracts;
 - immutable Task/TaskSpec/Run/Attempt/Binding/Candidate/Artifact records and pinned Task acceptance contracts;
+- durable Task/Goal/Run lifecycle intent including terminal targets when finalization has begun;
 - durable PlanningOperation/PlanningAttempt identities plus immutable PlanningRecord results where external planning exists;
 - immutable EvaluationRound typed-subject identity, exact pinned evaluator set, Evidence and AcceptanceResult records;
 - durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
@@ -59,7 +60,8 @@ The authoritative sources are:
 - durable desired-state fields;
 - ResourceReservations and BudgetHolds;
 - current control ownership/fencing records;
-- explicit IntegrationIntent and cleanup/finalization obligations.
+- IntegrationIntent and other owning-domain cleanup/finalization state;
+- explicit `finalization_obligations` only for residual cleanup actions whose retry/uncertainty state is not already represented by an owning domain row.
 
 The following are never authoritative by themselves:
 
@@ -286,7 +288,7 @@ Persist the new daemon incarnation and keep the global dispatch gate closed. Inc
 
 Load at least:
 
-- nonterminal Goals and Tasks;
+- nonterminal Goals and Tasks, including every `Finalizing` Task/Goal and its durable terminal target;
 - Active/Evaluating/Finalizing Goals and Tasks;
 - current GoalCompletionCandidates and Task Candidates referenced by active acceptance;
 - nonterminal Runs and Attempts;
@@ -300,8 +302,10 @@ Load at least:
 - pending IntegrationIntents;
 - candidate/evidence/finalization work;
 - Artifact replicas needed by live work;
-- unresolved cleanup/finalization obligations;
+- unresolved explicit `finalization_obligations`, plus the owning-domain rows needed to recompute implicit finalization predicates;
 - prior unresolved RecoveryFindings.
+
+A `Finalizing` Task without a durable terminal target is not a partially recovered lifecycle decision. It is an invariant violation: Recovery cannot safely infer the intended outcome from Events, Candidate state, cancellation requests or neighboring rows.
 
 An EvaluationRound is inventoried by its own durable identity and concrete subject edge. Recovery never reconstructs Goal-level EvaluationRound ownership by pretending it has a Task ID.
 
@@ -326,6 +330,8 @@ Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new lau
 Planning Controller independently reconciles nonterminal PlanningAttempts by their durable PlanningAttempt identity/correlation. An unresolved `CONTACT_MAY_HAVE_OCCURRED` Planner call is not permission to issue an overlapping replacement call.
 
 Evaluation Controller first validates the EvaluationRound subject relationship before it treats any evaluator process/Evidence as actionable acceptance state. A Round with a broken/mismatched typed subject is quarantined rather than guessed into Task or Goal ownership.
+
+Task/Goal finalizers recompute their required predicates from the authoritative domain rows that own those facts and separately reconcile only explicit residual `finalization_obligations`. They never use Event replay as a substitute for terminal intent or finalizer progress.
 
 Restore mode has an additional certainty rule: negative observations recovered only from the snapshot are historical facts about the snapshot point. They do not prove that an external effect did not occur after that point. Fresh external inspection/inventory or an equivalent current fence must establish absence before a replacement/conflicting effect is authorized.
 
@@ -417,6 +423,7 @@ Broker operation    → stable broker-operation/external idempotency identity
 Operator command    → RestoreGeneration + commandId
 Resource release    → Reservation ID
 Budget settlement   → Hold/Usage source IDs
+Explicit finalizer  → finalization obligation ID + stable owner-local key/operation correlation
 ```
 
 Evaluation subject identity itself is not an external-operation idempotency key. It is the immutable semantic target that every EvaluationOperation/Evidence record must resolve through.
@@ -468,26 +475,58 @@ EvaluationRound subject validity is a separate relational fact: a restored Round
 
 ## 10. Cleanup and finalization obligations
 
-Destructive cleanup must not be represented as a single irreversible delete command.
+Destructive cleanup must not be represented as a single irreversible delete command, but Pantheon also must not create a second generic ledger that mirrors every domain's existing authoritative state.
 
-Pantheon maintains durable finalization obligations for resources that own external state.
+A **finalization obligation** is a required durable predicate/action that must be safe before a lifecycle object completes finalization. There are two representations.
+
+### Owning-domain predicates
+
+Most finalization requirements are already durably represented by the domain that owns the fact. Recovery reads those authoritative rows directly, for example:
+
+```text
+executor stopped/fenced
+→ Attempt / Run status + launch/recovery lineage
+
+Sandbox gone/fenced
+→ sandbox_status + SandboxKey + optional tombstone
+
+reservation releasable
+→ ResourceReservation
+
+budget settled
+→ BudgetHold / Usage / Charge state
+
+workspace output preserved
+→ Workspace / WorkspaceRevision / Artifact state
+
+integration complete or safely stale
+→ IntegrationIntent
+```
+
+These facts are **not copied** into a separate FinalizationObligation row merely to say the same thing twice. Their owning table remains the source of truth.
+
+### Explicit residual obligations
+
+An explicit `finalization_obligations` row is used only when a required cleanup action has independent retry/uncertainty state and no existing owning-domain row already represents that action.
 
 Conceptually:
 
 ```yaml
 finalizationObligation:
-  subject: run://123
-  key: executor-stopped
-  status: PENDING
+  owner: task://123
+  key: dependent-notification
+  state: PENDING
+  operationKey: notify-task-123-v7
 ```
 
 or:
 
 ```yaml
 finalizationObligation:
-  subject: workspace://456
-  key: immutable-output-preserved
-  status: SATISFIED
+  owner: workspace://456
+  key: external-retention-ack
+  state: UNCERTAIN
+  operationKey: retention-456-3
 ```
 
 Minimum states:
@@ -498,9 +537,28 @@ SATISFIED
 UNCERTAIN
 ```
 
-A resource may enter a logical terminating/finalizing state before its obligations are satisfied, but Pantheon must not erase authoritative ownership information or release protected capacity until the relevant obligations are satisfied.
+The persistence model uses concrete relational owner edges for the v1 owner kinds that actually require explicit residual finalizers; it does not use an unconstrained string `subject` as a safety boundary. A new owner kind is added only when a concrete independent finalizer exists.
 
-Typical obligations include:
+An explicit obligation identity is durable **before** its external action. `UNCERTAIN` preserves ambiguity and follows the same reconciliation discipline as every other external side effect; timeout alone cannot convert it to `SATISFIED`.
+
+### Terminal intent versus finalization progress
+
+For Task finalization:
+
+```text
+task.terminalTarget
+→ WHAT terminal outcome Pantheon selected
+
+authoritative owning-domain predicates
++ explicit finalization_obligations
+→ WHAT must safely finish before that outcome is committed
+```
+
+A Task enters `Finalizing` only in an authoritative transaction that also stores its terminal target. The target is retained through terminalization and must match the terminal phase. Recovery never reconstructs it from Events or from which finalizers appear to have run.
+
+A Task may enter a logical terminating/finalizing state before every obligation is satisfied, but Pantheon must not commit its terminal phase, erase authoritative ownership information or release protected capacity until all requirements for that target are safe. Required explicit residual obligations must be `SATISFIED` or otherwise resolved under Recovery Policy; owning-domain predicates must independently report their safe state.
+
+Typical requirements include:
 
 - executor/evaluator/planner external contact/termination/result certainty where applicable;
 - Run/control-operation reservations safe to release;
@@ -508,9 +566,10 @@ Typical obligations include:
 - candidate/evidence/planning result state durably sealed where required;
 - workspace outputs preserved before deletion;
 - managed Git ref/integration state reconciled;
-- Run or verification Sandbox cleanup confirmed absent, or explicitly force-resolved with a durable lineage fence plus a separate safe capacity/accounting disposition where physical occupancy remains uncertain.
+- Run or verification Sandbox cleanup confirmed absent, or explicitly force-resolved with a durable lineage fence plus a separate safe capacity/accounting disposition where physical occupancy remains uncertain;
+- genuinely residual notification/retention actions with their own explicit retry identity where required.
 
-This is Pantheon's equivalent of a finalizer pattern: durable deletion intent plus controller-owned cleanup, not immediate record disappearance.
+This is Pantheon's equivalent of a finalizer pattern: durable terminal intent plus controller-owned cleanup over durable state, not immediate record disappearance and not Event-derived recovery.
 
 ## 11. Never delete evidence needed to recover
 
@@ -525,12 +584,13 @@ Pantheon must not physically delete:
 - LaunchKeys and evaluation/planning launch-contact facts;
 - ExecutionBindings;
 - current GoalCompletionCandidate/Task Candidate identities referenced by active acceptance;
+- terminal targets/finalization intent needed by a `Finalizing` lifecycle object;
 - non-RELEASED SandboxInstance holder/SandboxKey identity and required verification history;
 - `RELEASED+UNKNOWN` Sandbox history/tombstone/fence needed to explain why replacement authority was safe despite unresolved physical existence;
 - unresolved Reservations/Holds;
 - Workspace ownership records;
 - IntegrationIntents;
-- unresolved finalization obligations;
+- unresolved explicit `finalization_obligations` and their stable operation correlations;
 - Artifact/Candidate identities referenced by active acceptance;
 
 merely because an in-memory controller believes the work is over.
@@ -1013,6 +1073,19 @@ Examples:
 Task.phase == Active
 → exactly one nonterminal active Run must own responsibility
 
+Task.phase == Finalizing
+→ terminalTarget is durably present and valid
+→ terminal transition may use only that target
+→ finalization readiness is recomputed from authoritative owning-domain rows plus any explicit residual obligations
+
+Task.phase is terminal
+→ retained terminalTarget matches the terminal phase
+
+explicit FinalizationObligation
+→ concrete owner FK/kind is valid
+→ state is PENDING|SATISFIED|UNCERTAIN
+→ stable owner-local key/operation correlation is not silently rewritten across retries
+
 Run nonterminal
 → immutable ExecutionBinding must exist
 
@@ -1128,6 +1201,7 @@ Examples:
 - resume/reconcile a known PlanningAttempt by the same durable attempt identity when external correlation makes that safe;
 - re-inspect a known Sandbox by the same SandboxKey and durable holder;
 - advance Sandbox `RELEASING -> RELEASED` after fresh observation establishes `ABSENT`;
+- reconcile an explicit residual finalization obligation using its same stable obligation/operation identity;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
 - use Git's supported worktree repair operation when ownership and expected path are unambiguous;
@@ -1141,6 +1215,7 @@ Inspect external state before deciding, for example:
 - restored negative launch/contact state that cannot establish the post-snapshot interval;
 - pre-restore worker execution whose Agent Control session is old-generation;
 - Sandbox existence/cleanup `UNKNOWN` for a Run or EvaluationOperation, including `ERROR+UNKNOWN` or `RELEASING+UNKNOWN`;
+- explicit finalization obligation in `UNCERTAIN` state;
 - pending IntegrationIntent after crash;
 - old-generation broker operation whose effect may have occurred after the restored snapshot;
 - workspace that may contain unsealed user/Agent work;
@@ -1151,6 +1226,8 @@ Inspect external state before deciding, for example:
 Examples:
 
 - active Task with missing immutable Run identity;
+- `Finalizing` Task with missing/invalid terminal target or terminal Task whose retained target contradicts its terminal phase;
+- explicit finalization obligation with missing/inconsistent concrete owner or invalid state/identity;
 - nonterminal Run missing immutable ExecutionBinding;
 - nonterminal PlanningAttempt whose parent PlanningOperation/meters cannot be established;
 - EvaluationRound with both/neither concrete subject FK;
@@ -1468,12 +1545,15 @@ usage ingestion before/after budget debit
 candidate Artifact durable put before/after SQLite metadata
 Task candidate commit before lifecycle transition
 GoalCompletionCandidate commit before Goal Active->Evaluating transition
+Task terminal-target selection / Finalizing commit before any finalizer effect
+explicit finalization-obligation identity creation before external finalizer action
 executor/planner/evaluator termination or result certainty before reservation release
 Sandbox release before reservation release
 workspace remove before reservation release
 integration commit-object creation before CAS ref update
 CAS ref update before IntegrationIntent acknowledgement
-finalization obligation satisfaction before terminal transition
+finalization predicate/obligation satisfaction before terminal transition
+terminal Task commit retaining the exact selected terminalTarget
 ```
 
 Restore tests additionally construct an older consistent snapshot, perform newer external/control effects, then execute the **supported restore-entry procedure** and assert at least:
@@ -1497,6 +1577,11 @@ For each crash point, restart Pantheon and assert that the resulting state is eq
 
 Property/invariant tests should continuously assert:
 
+- no `Finalizing` Task without a durable valid terminalTarget;
+- no non-finalizing nonterminal Task with a stale terminalTarget;
+- terminal Task target equals terminal phase;
+- Task finalization never completes from Event narration or process-local finalizer state;
+- every explicit finalization obligation has exactly one valid concrete owner and stable owner-local key;
 - no duplicate active Attempt created under UNKNOWN execution;
 - no overlapping PlanningAttempt under ambiguous external planning contact;
 - no overlapping EvaluationAttempt under ambiguous evaluation contact;
@@ -1578,20 +1663,20 @@ Artifact / Task Candidate / GoalCompletionCandidate availability
         ↓
 EvaluationRound typed-subject + Evidence/AcceptanceResult reconciliation
         ↓
-Integration reconciliation
+Integration + explicit residual finalization-obligation reconciliation
         ↓
-Task / Goal lifecycle + planning/graph reconciliation
+Task / Goal lifecycle finalization + planning/graph reconciliation
         ↓
 Scheduler dispatch gate
 ```
 
 This is a dependency graph, not a requirement that every controller execute serially. In particular, execution/contact inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result, and a new external PlanningAttempt waits for prior PlanningAttempt certainty/accounting fences.
 
-Acceptance lifecycle application waits for both immutable subject availability and EvaluationRound typed-subject validation; it never relies on Event ordering alone.
+Acceptance lifecycle application waits for both immutable subject availability and EvaluationRound typed-subject validation; it never relies on Event ordering alone. A terminal lifecycle transition waits for its durable terminal target plus all required owning-domain predicates and explicit residual obligations; Event ordering is never finalizer authority.
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
-The global Recovery Coordinator owns only startup gating, restore-entry/generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic.
+The global Recovery Coordinator owns only startup gating, restore-entry/generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic or become a generic Finalization Controller.
 
 ## 32. v1 scope
 
@@ -1607,7 +1692,8 @@ Include:
 - staged startup and global dispatch gate;
 - recovery barrier based on reconciled/fenced/quarantined obligations;
 - periodic safety reconciliation using normal controller code;
-- finalization obligations for cleanup safety;
+- durable Task/Goal/Run terminal intent and finalization predicates reconstructed from owning-domain state;
+- explicit residual finalization obligations only for actions whose retry/uncertainty state is not already durably represented elsewhere;
 - Run/Attempt, PlanningOperation/PlanningAttempt and EvaluationOperation/EvaluationAttempt recovery;
 - concrete EvaluationRound Task-Candidate/GoalCompletionCandidate subject reconciliation and exact-subject Evidence/AcceptanceResult validation;
 - immutable PlanningRecord recovery with independent GraphRevision/GoalRevision revalidation before materialization;
@@ -1642,31 +1728,32 @@ Defer:
 6. **The recovery barrier does not require all uncertainty to be resolved; scoped UNKNOWN state may remain while unrelated safe work continues.**
 7. **Every consequential external action has durable intent/preconditions before the side effect and durable observation afterward.**
 8. **UNKNOWN external outcome never authorizes a blind replacement side effect.**
-9. **Cleanup uses durable finalization obligations; ownership/capacity records are not erased until required cleanup is confirmed.**
-10. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
-11. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
-12. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
-13. **Evaluation recovery preserves EvaluationRound's exact concrete subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`), pinned evaluator contract and EvaluationAttempt identity; historical Evidence never gains authority over a different/current subject.**
-14. **Task and Goal lifecycle controllers, not evaluators/recovery scanners, separately apply AcceptanceResult after rechecking their exact current subject/revision.**
-15. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
-16. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
-17. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
-18. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
-19. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
-20. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
-21. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
-22. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
-23. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
-24. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-25. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
-26. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
-27. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
-28. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
-29. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
-30. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
-31. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
-32. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
-33. **Clean daemon shutdown and cancellation of external work are separate intents.**
-34. **Crash/fault-injection testing at external-side-effect, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
-35. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-36. **Sandbox recovery is holder-driven, not Run-traversal-driven: lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` presence are separate durable facts; ordinary RELEASED requires ABSENT, while force-resolved UNKNOWN stays factually UNKNOWN behind an explicit lineage fence and separate capacity disposition.**
+9. **Finalization is reconstructed from durable terminal intent plus authoritative owning-domain state; an explicit finalization-obligation row exists only for a residual action with independent retry/uncertainty state, never to mirror another domain's source of truth.**
+10. **A Finalizing Task must durably name its selected terminal target, and a terminal Task retains a matching target; Recovery never infers terminal intent from Events or observed cleanup progress.**
+11. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
+12. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
+13. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
+14. **Evaluation recovery preserves EvaluationRound's exact concrete subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`), pinned evaluator contract and EvaluationAttempt identity; historical Evidence never gains authority over a different/current subject.**
+15. **Task and Goal lifecycle controllers, not evaluators/recovery scanners, separately apply AcceptanceResult after rechecking their exact current subject/revision.**
+16. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
+17. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
+18. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
+19. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
+20. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
+21. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
+22. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
+23. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
+24. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
+25. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
+26. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
+27. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
+28. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
+29. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+30. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+31. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+32. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
+33. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
+34. **Clean daemon shutdown and cancellation of external work are separate intents.**
+35. **Crash/fault-injection testing at external-side-effect, finalization-intent, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
+36. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+37. **Sandbox recovery is holder-driven, not Run-traversal-driven: lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` presence are separate durable facts; ordinary RELEASED requires ABSENT, while force-resolved UNKNOWN stays factually UNKNOWN behind an explicit lineage fence and separate capacity disposition.**
