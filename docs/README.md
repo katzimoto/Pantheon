@@ -12,8 +12,12 @@ into exactly the documents your task needs.
 | Detailed architecture contracts | `docs/architecture/<domain>/` | **Canonical.** One document per subsystem contract. |
 | Reviews and review process | `docs/reviews/` | **Not canonical.** Historical analysis and review ledgers. |
 | Schemas | `schemas/` | **Canonical** for the artifacts they describe. |
-| Development process | `docs/development/` | **Canonical** for how engineering work is specified, how versions are bounded, and how a change to Pantheon is proven, reviewed and landed. Not for what Pantheon is, and not for how an agent operates — that is `AGENTS.md`. Start with `docs/development/README.md`. |
-| Version definitions | `docs/versions/` | Concrete release/version definitions. Their planning semantics are owned by `docs/development/versions.md`. |
+| Development process | `docs/development/` | **Canonical** for how engineering work is specified, how GitHub Milestones define release/version boundaries, and how a change to Pantheon is proven, reviewed and landed. Not for what Pantheon is, and not for how an agent operates — that is `AGENTS.md`. Start with `docs/development/README.md`. |
+
+Concrete Pantheon Version records do not live in `docs/`. A GitHub Milestone is
+the canonical Version record; `docs/development/versions.md` defines that
+contract and `docs/development/version-template.md` is the Milestone-description
+authoring template.
 
 ## Where to start
 
@@ -75,7 +79,7 @@ then they are not implementation requirements. See `docs/reviews/README.md`.
 | A review, audit or external analysis | `docs/reviews/` |
 | Superseded material worth keeping | `docs/reviews/`, with a `## Status` line saying what superseded it |
 | A rule about how engineering work or versions are specified, or how a change is proven, reviewed and landed | `docs/development/` |
-| A concrete release/version definition | `docs/versions/` |
+| A concrete release/version definition | A GitHub Milestone, using `docs/development/version-template.md` for its description |
 | A change to where Rust code belongs, or to the allowed crate dependencies | `docs/development/implementation.md` |
 
 Rules for any new document:
