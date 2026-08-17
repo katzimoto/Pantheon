@@ -79,10 +79,9 @@ No skill restates architecture, Mission, Version, PR-lifecycle, label, or
 release semantics. Each points at the document that owns its subject. This
 keeps the skill catalog small on purpose (Issue #21's constraint): a new
 skill is justified only by a repeated, Pantheon-specific procedural gap, the
-same bar `docs/reviews/2026-08-rust-agent-skill-research.md` (Issue #22)
-applied to Rust-specific candidates. Generic Rust, Git, formatting, or
-"write idiomatic code" content is out of scope for this catalog regardless
-of format support.
+same bar Issue #22's Rust-specific-skill research applied to its own
+candidates. Generic Rust, Git, formatting, or "write idiomatic code" content
+is out of scope for this catalog regardless of format support.
 
 ## Portability: one body, several agent surfaces
 
@@ -94,15 +93,25 @@ can quietly drift out of sync.
 | Surface | Where it looks | How it reaches the canonical body |
 |---|---|---|
 | OpenCode | `.agents/skills/<name>/SKILL.md` (native project search path) | Direct — no adapter needed |
+| Codex CLI | `.agents/skills/<name>/SKILL.md` (native discovery) | Direct — no adapter needed |
 | Claude Code | `.claude/skills/<name>/SKILL.md` | `.claude/skills/<name>` is a symlink to `../../.agents/skills/<name>` |
-| Codex CLI | `.codex/skills/<name>/SKILL.md` | `.codex/skills/<name>` is a symlink to `../../.agents/skills/<name>` |
+
+Claude Code is the one surface here that only looks in its own
+`.claude/skills/`, so it is the one surface that needs a symlink at all.
+Codex CLI's own skill catalog (`$skill-installer`, the wider ecosystem
+around `agentskills.io`) already resolves and discovers skills through
+`.agents/skills/` directly, the same as OpenCode — an earlier version of
+this mechanism additionally symlinked `.codex/skills/<name>` out of caution
+before that was confirmed; it was removed once multiple independent sources,
+including OpenAI's own Codex review tooling, confirmed the native path makes
+it unnecessary.
 
 `scripts/check-skill-symlinks.sh` (run by `./scripts/verify.sh`) mechanically
-enforces this: every `.claude/skills/*` and `.codex/skills/*` entry must be a
-symlink that resolves into `.agents/skills/`, and every canonical skill's
-frontmatter `name` must match its directory. A real, independently-editable
-`SKILL.md` under a vendor directory fails verification rather than silently
-becoming a second copy.
+enforces this: every `.claude/skills/*` entry must be a symlink that
+resolves into `.agents/skills/`, and every canonical skill's frontmatter
+`name` must match its directory. A real, independently-editable `SKILL.md`
+under a vendor directory fails verification rather than silently becoming a
+second copy.
 
 ## Lifecycle hooks
 
@@ -114,37 +123,72 @@ decision logic to keep in sync.
 
 | Script | Purpose |
 |---|---|
-| `scripts/hooks/lib.sh` | Shared helpers (portable sha256, repo-root/state-dir resolution). Sourced, not run directly. |
+| `scripts/hooks/lib.sh` | Shared helpers (portable sha256, repo-root/state-dir resolution, the fingerprint-comparison decision `pantheon_tree_matches_last_verified`, minimal JSON string escaping). Sourced, not run directly. |
 | `scripts/hooks/tree-fingerprint.sh` | Deterministic fingerprint of the current working tree (HEAD + tracked diff + untracked file content). |
-| `scripts/hooks/record-verified.sh` | Called by `./scripts/verify.sh` itself on success; records the fingerprint under `.git/pantheon/verified-tree`. Not a second verification command — verify.sh remembering its own result. |
-| `scripts/hooks/check-stale-verification.sh` | Stop-event entrypoint: blocks a completion claim on a changed, unverified tree; never blocks a `## Handoff`. |
+| `scripts/hooks/record-verified.sh` | Called by `./scripts/verify.sh` itself on success; records the fingerprint under Git's own per-worktree state directory (`git rev-parse --git-path pantheon`). Not a second verification command — verify.sh remembering its own result. |
+| `scripts/hooks/check-stale-verification.sh` | Claude Code Stop-event entrypoint: blocks a completion claim on a changed, unverified tree; never blocks a `## Handoff`. |
+| `scripts/hooks/check-stale-verification-codex.sh` | Codex CLI Stop-event entrypoint: the same decision (`pantheon_tree_matches_last_verified`), adapted to Codex's own stdin/stdout contract. |
 | `scripts/hooks/narrow-validate.sh` | Post-edit entrypoint: runs only the one existing validator relevant to the changed file's path. |
 
-### Why `.git/` and not a repository file
+### Why Git's own per-worktree state, and not a repository file
 
 The recorded fingerprint is local, transient, and disposable by design (the
 constraint Issue #21 states explicitly): it never becomes committed
 repository authority, is meaningless to anyone but the local checkout that
 produced it, and its absence only ever means "treat this tree as
-unverified" — never the reverse. Storing it under `.git/pantheon/` rather
-than a tracked path is what makes that guarantee structural rather than a
-convention someone could accidentally commit past.
+unverified" — never the reverse. Recording it via `git rev-parse
+--git-path pantheon` rather than a tracked path is what makes that guarantee
+structural rather than a convention someone could accidentally commit past,
+and it is also what makes the state correctly per-worktree: in a linked Git
+worktree, `.git` is a *file* pointing at the real git-dir under the main
+checkout's `.git/worktrees/<name>/`, not a directory, so a hardcoded
+`$root/.git/pantheon` path breaks there. `git rev-parse --git-path` is the
+supported way to resolve a path Git itself treats as private to the current
+worktree, so each worktree gets its own independent verification record —
+correct, since each worktree can have different tree state.
+
+`./scripts/verify.sh`'s call to `record-verified.sh` is best-effort: every
+other check already passed by the time it runs, so an environment quirk that
+keeps this local bookkeeping step from writing (an unwritable `.git/`, an
+unusual worktree layout) produces a warning, not a failed verification.
 
 ### The stale-verification guardrail
 
 `scripts/hooks/check-stale-verification.sh` is wired as Claude Code's `Stop`
-hook (`.claude/settings.json`). On every turn that is about to end:
+hook (`.claude/settings.json`); `scripts/hooks/check-stale-verification-codex.sh`
+is wired the same way for Codex CLI (`.codex/hooks.json`). Both call the same
+decision, `pantheon_tree_matches_last_verified` in `lib.sh`, on every turn
+that is about to end:
 
-1. A clean tree (no uncommitted changes) never blocks — there is nothing to
-   falsely claim as verified beyond what was already committed.
-2. A dirty tree whose fingerprint matches the last successful
-   `./scripts/verify.sh` run never blocks.
-3. A dirty tree containing the literal text `## Handoff` in the turn's final
-   message never blocks — `docs/development/change-lifecycle.md` treats a
-   handoff as explicitly not a completion claim, and this hook honors that
-   distinction rather than forcing every stop through verification.
-4. Otherwise, it blocks (`exit 2`) with a message naming the two ways
-   forward: re-run `./scripts/verify.sh`, or write a proper handoff.
+1. If no successful `./scripts/verify.sh` run has ever been recorded for
+   this checkout, the guardrail does not block — a checkout that has never
+   been verified at all is out of scope for *this* specific drift check;
+   `AGENTS.md`'s ordinary "verify before claiming done" instruction covers
+   that case on its own, and blocking every single turn until the first
+   `verify.sh` run would make the guardrail obstructive rather than useful.
+2. Otherwise, the current tree's fingerprint is compared against the
+   recorded one — **regardless of whether the tree is currently dirty or
+   clean.** A clean tree is not automatically "nothing to check": committing
+   an unverified change makes the working tree clean again without ever
+   having been verified, and earlier versions of this guardrail wrongly
+   treated a clean tree as always safe, which made that commit a silent
+   bypass. Comparing fingerprints unconditionally closes it, because the
+   fingerprint already encodes the current commit, not just uncommitted
+   diff.
+3. A turn whose final message/transcript contains the literal text
+   `## Handoff` never blocks, regardless of the fingerprint comparison —
+   `docs/development/change-lifecycle.md` treats a handoff as explicitly not
+   a completion claim, and this hook honors that distinction rather than
+   forcing every stop through verification. Detection is a plain substring
+   search over the raw text available to each vendor (Claude Code's own
+   `last_assistant_message` payload field; Codex's named transcript file),
+   not a parse of an assumed message schema.
+4. Otherwise, it blocks with a message naming the two ways forward: re-run
+   `./scripts/verify.sh`, or write a proper handoff. Claude Code blocks via
+   `exit 2`; Codex CLI via `{"decision":"block","reason":"..."}`, which
+   Codex turns into a continuation prompt rather than a hard stop — a
+   different mechanism with the same effect, "make the agent address this
+   before the turn ends."
 
 This is a guardrail, not a security boundary: every precondition (no Git, no
 resolvable repository root, unreadable input) fails open rather than
@@ -175,7 +219,7 @@ call them early, never reimplements them.
 
 ### Self-test
 
-`scripts/check-hooks.sh` (run by `./scripts/verify.sh`) exercises both
+`scripts/check-hooks.sh` (run by `./scripts/verify.sh`) exercises the
 required scenarios end to end, entirely against a disposable scratch Git
 repository:
 
@@ -183,6 +227,11 @@ repository:
   until it is re-verified;
 - the same changed, unverified tree with a `## Handoff` message is never
   blocked;
+- an unverified change that gets **committed** (not just left uncommitted)
+  still blocks — the regression case for the commit-bypass this guardrail
+  once had;
+- a checkout where `./scripts/verify.sh` has never once succeeded does not
+  block on every turn;
 - a sensitive-file edit dispatches its one relevant validator; an unrelated
   edit dispatches nothing.
 
@@ -190,21 +239,25 @@ repository:
 
 | Concern | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
-| Skill consumption | Native (`.claude/skills/`, symlinked) | Native (`.codex/skills/`, symlinked) | Native (`.agents/skills/`, no adapter) |
-| Stale-verification guardrail | Full: `Stop` hook, documented JSON schema, can block (`exit 2`) | Not wired. Codex's hook mechanism is presently behind a feature flag with no stable published payload schema at the time this was written; scripting against it now would mean guessing a contract that could change under it. Revisit once it stabilizes. | Best-effort only (`.opencode/plugin/pantheon-hooks.js`, `session.idle`): can warn, cannot reliably block, because blocking correctly requires detecting a `## Handoff` in the same turn, and OpenCode's public plugin docs do not confirm that `session.idle` exposes the turn's message text the way Claude Code's `Stop` payload's `last_assistant_message` field does. |
-| Narrow post-edit feedback | Full: `PostToolUse` hook | Not wired, same reason as above | Best-effort only (`tool.execute.after`): reads several plausible file-path field names defensively since OpenCode's plugin docs name the event but do not publish its payload schema; no-ops if none match |
+| Skill consumption | Native path, symlinked (`.claude/skills/`) | Native (`.agents/skills/`, no adapter) | Native (`.agents/skills/`, no adapter) |
+| Stale-verification guardrail | Full: `Stop` hook, documented JSON schema, blocks via `exit 2` | Full: `Stop` hook (`.codex/hooks.json`), blocks via documented `{"decision":"block","reason":"..."}`. Handoff detection reads the turn's `transcript_path` file for the literal `## Handoff` text — a substring search, not a parse of an assumed transcript schema. Two activation gates outside this repository's control: the user's own `~/.codex/config.toml` needs `[features] codex_hooks = true`, and the project needs to be marked trusted in the user's Codex configuration. | Best-effort only (`.opencode/plugins/pantheon-hooks.js`, generic `event` hook, `event.type === "session.idle"`): can warn, cannot reliably block. Blocking correctly requires detecting a `## Handoff` in the same turn, and OpenCode's documented `session.idle` payload carries no message-text field the way Claude Code's `last_assistant_message` or Codex's `transcript_path` do, so this adapter cannot check for one at all — not "checks and might miss it," genuinely has nothing to check. |
+| Narrow post-edit feedback | Full: `PostToolUse` hook (`Edit`\|`Write`) | **Not possible with Codex's current hook model.** Codex's `PostToolUse`/`PreToolUse` fire for the `shell`/Bash tool only; file-editing tools (`apply_patch`, `Edit`/`Write`/`Read`) do not fire either event at all. This is a confirmed architectural limitation of Codex's hook surface today, not an unresearched gap — there is no event to wire this to yet. | Best-effort (`tool.execute.before`, documented `output.args.filePath`, plus `output.args.patchText` marker-line parsing for the `apply_patch` tool GPT-series models substitute for `edit`/`write`). Fires *before* the edit lands on disk, so this is an early advisory nudge on the file about to change, not a true post-edit check the way Claude Code's `PostToolUse` is — a real, accepted timing difference, not an oversight. `tool.execute.after`'s documented payload (`{title, output, metadata}`) has no file-path field, so it is not used; using it would mean guessing an undocumented field. |
 
 Claude Code is the fully-specified reference implementation because its hook
-event set and JSON payload schema are precisely documented (event names,
-`transcript_path`/`last_assistant_message`/`tool_input` fields, exit-code and
-`hookSpecificOutput` semantics). Where another surface's own documentation
-does not yet publish an equivalent contract precisely enough to script
-against reliably, this repository does not fabricate one — it says so here,
-implements the honest subset that surface's confirmed capabilities support,
-and defers full parity until that surface's contract is stable enough to
-implement without guessing. All three surfaces get the same skill bodies
-regardless: the portability gap is entirely in hook enforcement strength, not
-in what procedural guidance is available.
+event set and JSON payload schema are precisely documented end to end (event
+names, `transcript_path`/`last_assistant_message`/`tool_input` fields,
+exit-code and `hookSpecificOutput` semantics). Codex CLI's `Stop` hook is
+implemented with the same confidence once its documented fields were
+confirmed; its `PostToolUse` gap is a real, confirmed limitation of the
+underlying tool rather than a documentation gap on this repository's side.
+OpenCode's adapter is deliberately the most limited of the three because its
+own plugin documentation does not yet publish payload shapes for the events
+this repository would need for full parity (`session.idle`'s fields,
+`tool.execute.after`'s file path) — where that is true, this repository does
+not fabricate a field to fill the gap; it implements the honest subset the
+documented contract actually supports and says so here. All three surfaces
+get the same skill bodies regardless: the portability gap is entirely in
+hook enforcement strength, not in what procedural guidance is available.
 
 ## What hooks must never do
 
@@ -226,10 +279,9 @@ for it:
 
 A new skill needs a repeated, Pantheon-specific procedural gap with clear
 value — not "the format supports it" and not generic language/tooling
-knowledge, per the same evaluation bar `docs/reviews/2026-08-rust-agent-skill-research.md`
-applied. Add it under `.agents/skills/<name>/SKILL.md`, symlink it from
-`.claude/skills/` and `.codex/skills/`, and it is automatically covered by
-`scripts/check-skill-symlinks.sh`.
+knowledge, per the same evaluation bar Issue #22's research applied. Add it
+under `.agents/skills/<name>/SKILL.md`, symlink it from `.claude/skills/`,
+and it is automatically covered by `scripts/check-skill-symlinks.sh`.
 
 A new hook needs a deterministic, fast, inspectable, fail-safe check that
 narrow validators or `./scripts/verify.sh` do not already cover at the right

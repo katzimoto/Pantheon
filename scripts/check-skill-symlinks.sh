@@ -40,8 +40,11 @@ for skill_dir in "$canonical_dir"/*/; do
 done
 
 # Vendor directories that must be symlinks resolving into the canonical
-# directory, never a real independently-editable SKILL.md.
-for vendor_dir in ".claude/skills" ".codex/skills"; do
+# directory, never a real independently-editable SKILL.md. OpenCode and
+# Codex CLI both discover .agents/skills/ natively and need no entry here;
+# Claude Code only looks in its own .claude/skills/, so that is the one
+# vendor directory this mechanism has to bridge.
+for vendor_dir in ".claude/skills"; do
 	[ -d "$vendor_dir" ] || continue
 	for entry in "$vendor_dir"/*; do
 		# -e follows symlinks and is false for a broken one, so check -L

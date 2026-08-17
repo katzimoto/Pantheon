@@ -25,12 +25,22 @@ for pure exploration/question-answering that will not produce a change.
 
 ## Procedure
 
-1. **Read the mission Issue completely.** Identify the required fields:
+1. **Read the mission Issue completely.** Identify the required fields —
    Outcome (what must become true) and Acceptance criteria (what a reviewer
-   checks). Treat Context and Scope and constraints as guidance, not as
-   additional requirements to satisfy beyond the outcome. If the Issue names
-   Architecture entry points, note them — read those first once you reach
-   step 4, not before.
+   checks) — and treat the optional fields for what each actually is, not
+   as one undifferentiated "extra context" bucket:
+   - **Context** is background only: why the mission exists, what triggered
+     it. It is not a requirement to satisfy beyond the outcome, and it is
+     not a place to re-derive the system — canonical architecture already
+     does that.
+   - **Scope and constraints** is a canonical boundary, not guidance: what
+     is deliberately excluded, which invariants must survive, which areas
+     are protected. It is also the *only* place a mission grants authority
+     it does not otherwise have — for example, explicit permission to open
+     follow-up Issues for discovered work. Treat it as binding throughout
+     the mission, and re-check it before deciding scope in step 6.
+   - If the Issue names **Architecture entry points**, note them — read
+     those first once you reach step 4, not before.
 
 2. **Do not broaden the mission.** If related work becomes visible while
    reading the Issue or the code, that is not yet in scope. `AGENTS.md`

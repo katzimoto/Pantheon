@@ -77,7 +77,50 @@ run_rc stop_hook "Done." >/dev/null || rc=$?
 [ "$rc" -eq 0 ] ||
 	fail "tree re-verified after change: Stop hook should not block, got exit $rc"
 
-# --- Scenario 3: a sensitive-file edit dispatches its relevant narrow
+# --- Scenario 3: committing an unverified change must not read as a clean,
+# verified tree (regression test for the commit-bypass finding: a dirty tree
+# that gets committed without re-verifying is still stale, not a fresh
+# clean baseline).
+
+echo "more" >>"$tmp/a.txt"
+git -C "$tmp" add a.txt
+git -C "$tmp" commit -qm "unverified change, committed without re-verifying"
+
+rc=0
+run_rc stop_hook "Done, ready to merge." >/dev/null || rc=$?
+[ "$rc" -eq 2 ] ||
+	fail "committed-but-unverified change on an otherwise clean tree: Stop hook should still block with exit 2, got $rc"
+
+rc=0
+run_rc stop_hook '## Handoff\n\n### Remaining\nFinish X.' >/dev/null || rc=$?
+[ "$rc" -eq 0 ] ||
+	fail "committed-but-unverified change with a ## Handoff message: Stop hook should not block, got exit $rc"
+
+"$hooks/record-verified.sh" "$tmp" >/dev/null
+rc=0
+run_rc stop_hook "Done." >/dev/null || rc=$?
+[ "$rc" -eq 0 ] ||
+	fail "tree re-verified after the committed change: Stop hook should not block, got exit $rc"
+
+# --- Scenario 4: a checkout where ./scripts/verify.sh has never once
+# succeeded is out of scope for this drift check and must not block every
+# turn (see lib.sh: pantheon_tree_matches_last_verified).
+
+never_verified=$(mktemp -d)
+git init -q "$never_verified"
+git -C "$never_verified" config user.email test@example.com
+git -C "$never_verified" config user.name test
+echo x >"$never_verified/f.txt"
+git -C "$never_verified" add f.txt
+git -C "$never_verified" commit -qm init
+rc=0
+printf '{"hook_event_name":"Stop","last_assistant_message":"Done."}' |
+	CLAUDE_PROJECT_DIR="$never_verified" run_rc "$hooks/check-stale-verification.sh" >/dev/null || rc=$?
+rm -rf "$never_verified"
+[ "$rc" -eq 0 ] ||
+	fail "never-verified checkout should not block on every turn, got exit $rc"
+
+# --- Scenario 5: a sensitive-file edit dispatches its relevant narrow
 # validator; an unrelated edit dispatches nothing (no full-suite work on
 # every edit). PANTHEON_HOOK_DRY_RUN avoids requiring the pinned Rust
 # toolchain here; the dispatched checks themselves run for real elsewhere in

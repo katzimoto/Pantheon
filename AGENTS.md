@@ -39,13 +39,24 @@ is canonical for that mechanism, the four MVP skills, and what a lifecycle
 hook may and may not do. A skill never outranks this file, canonical
 architecture, or `./scripts/verify.sh` — it only operationalizes them.
 
+Four triggers are mandatory for every coding agent working in this
+repository, regardless of which agent surface is running:
+
+- before planning or implementing an Engineering Mission, use
+  `pantheon-mission-planning`;
+- before reporting repository work complete, use
+  `pantheon-change-verification`;
+- before creating or updating durable pull request evidence, use
+  `pantheon-pr-evidence`;
+- independent review of a Pantheon change must use
+  `pantheon-independent-review`, and only from a principal/context distinct
+  from whoever authored the change.
+
 A local hook may block a completion attempt when the working tree has
 changed since the last successful `./scripts/verify.sh` run; the fix is to
 verify again, or, for genuinely unfinished work, write a proper `## Handoff`
 (`docs/development/change-lifecycle.md`) instead of stopping as if the work
-were done. Independent review of a Pantheon change must come from a
-principal distinct from whoever authored it, in fresh context — never the
-authoring session, regardless of which GitHub credential records it.
+were done.
 
 ## Start here
 
