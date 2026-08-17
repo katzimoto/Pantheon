@@ -196,4 +196,4 @@ Defer machinery that mainly anticipates distributed scale or autonomous self-mod
 
 ## Source of truth
 
-Detailed contracts live under `docs/architecture/<domain>/`; `docs/architecture/README.md` maps subsystems to their canonical documents. When older wording conflicts with newer canonical subsystem documents, the explicit canonical invariants in the current subsystem contracts take precedence; the final integration review should eliminate any remaining stale examples before implementation issues are generated.
+Detailed contracts live under `docs/architecture/<domain>/`; `docs/architecture/README.md` maps subsystems to their canonical documents. When older wording conflicts with newer canonical subsystem documents, the explicit canonical invariants in the current subsystem contracts take precedence. The review and correction sweep that reconciled this overview against those contracts is complete, so implementation follows the current detailed contracts directly; a surviving conflict between two canonical documents is a defect to report, not a stale example awaiting a future sweep.

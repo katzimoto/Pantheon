@@ -34,4 +34,11 @@ routes into the documentation above rather than restating it.
 
 ## Status
 
-Early design phase. The architecture is being specified subsystem-by-subsystem before implementation.
+The v1 architecture is specified subsystem-by-subsystem, and the Rust
+implementation foundation is in place: a workspace under `crates/` whose crate
+boundaries and dependency directions are mechanically enforced. The crates are
+scaffolding — none implements Pantheon behaviour yet.
+
+Run `./scripts/verify.sh` to validate a change. See
+[docs/development/implementation.md](docs/development/implementation.md) for the
+crate map and where new code belongs.

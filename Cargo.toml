@@ -1,0 +1,44 @@
+# Pantheon workspace root.
+#
+# This is a virtual manifest: the root is not a package, it only owns workspace
+# policy. Crate responsibilities, the allowed internal dependency graph, and the
+# rule for when a new crate is justified live in `docs/development/implementation.md`.
+
+[workspace]
+# A virtual workspace does not inherit a resolver from any package edition, so
+# the resolver is stated explicitly. Resolver 3 is MSRV-aware: it refuses to
+# select a dependency version whose `rust-version` exceeds the one below,
+# instead of resolving to something the pinned toolchain cannot build.
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+# Lint policy is small and high-signal on purpose. Every package inherits it
+# with `[lints] workspace = true`, so the policy has exactly one home.
+#
+# Blanket `pedantic`, `restriction` and `nursery` groups, and a global
+# `unwrap_used`/`expect_used` ban, are deliberately absent: they produce far
+# more noise than defects at this stage, and noise trains reviewers and agents
+# to ignore lint output.
+[workspace.lints.rust]
+# `deny`, not `forbid`: a future mission that genuinely needs FFI or a
+# platform syscall must be able to opt in locally, with a justification at the
+# opt-in site, rather than having to edit this policy. Nothing in the workspace
+# uses unsafe today.
+unsafe_code = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Holding a synchronous lock across an await is a deadlock in an async control
+# plane, and Pantheon's engine will be one.
+await_holding_lock = "deny"
+undocumented_unsafe_blocks = "deny"
+# Debug and placeholder macros are fine while writing code and are defects once
+# committed.
+dbg_macro = "deny"
+todo = "deny"
