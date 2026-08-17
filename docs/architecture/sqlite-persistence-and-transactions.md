@@ -236,9 +236,49 @@ CHECK (
 )
 ```
 
-These `CHECK`s prove only that the Task row's responsibility pointer is locally consistent with its phase. They do **not** prove that another nonterminal Run row does or does not exist. The full cross-row ownership invariant remains enforced by a partial unique live-Run mechanism, authoritative controller transactions that re-read Task/Run state, and PersistenceInvariantChecker.
+These `CHECK`s prove only that the Task row's responsibility pointer is locally consistent with its phase. They do **not** prove that another nonterminal Run row does or does not exist.
 
-Use a partial unique index/mechanism on Runs equivalent to one nonterminal Run per Task, with controller transactions also checking Task phase/active_run_id.
+V1 makes the one-live-Run rule structurally enforceable by putting immutable Task ownership beside mutable Run terminality. `runs` retains canonical ownership and exposes a composite parent key; `run_status` carries an immutable copy of that ownership:
+
+```text
+runs
+  id
+  task_id
+  ...
+  UNIQUE (id, task_id)
+
+run_status
+  run_id
+  task_id          immutable copy of runs.task_id
+  phase
+  ...
+```
+
+The copied holder cannot drift from the immutable Run:
+
+```sql
+FOREIGN KEY (run_id, task_id)
+  REFERENCES runs(id, task_id)
+```
+
+The Task's current responsible-Run pointer is also holder-safe:
+
+```sql
+FOREIGN KEY (active_run_id, id)
+  REFERENCES runs(id, task_id)
+```
+
+When `active_run_id` is non-NULL, that Run therefore belongs to the same Task. Pointer/currentness semantics still belong to Task lifecycle transactions; the FK proves holder identity only.
+
+Because `run_status` now contains both `task_id` and `phase`, v1 can enforce at most one nonterminal Run per Task with a real partial unique index:
+
+```sql
+CREATE UNIQUE INDEX one_nonterminal_run_per_task
+ON run_status(task_id)
+WHERE phase IN ('Active', 'Finalizing');
+```
+
+`Active` and `Finalizing` are exactly the nonterminal Run phases. This intentionally keeps a producer Run occupying the live slot while its Task is already `Evaluating` and the Run is still `Finalizing`; a replacement Run cannot commit until that prior Run reaches a terminal phase. Exact Task-phase cardinality (`Active => exactly one`, `Ready|Waiting => zero`) remains controller/invariant-checker logic layered over this relational maximum-one guarantee.
 
 ## Temporal TaskGraph
 
@@ -307,9 +347,11 @@ runs (immutable)
   binding_id
   snapshot/context refs
   created_at
+  UNIQUE (id, task_id)      # composite parent key for holder-safe FKs
 
-run_status (mutable)
-  run_id PK/FK
+run_status (mutable lifecycle + immutable holder copy)
+  run_id PK
+  task_id                   immutable copy of runs.task_id
   phase                    Active|Finalizing|Completed|Failed|Cancelled|Yielded
   terminal_target          nullable while Active; required while Finalizing
   desired_execution
@@ -322,6 +364,15 @@ run_status (mutable)
   lease_valid_until
   updated_at
 ```
+
+`run_status` holder identity is constrained by:
+
+```sql
+FOREIGN KEY (run_id, task_id)
+  REFERENCES runs(id, task_id)
+```
+
+and `tasks.active_run_id`, when present, is constrained to a Run owned by that same Task through the composite `(active_run_id, task.id) -> runs(id, task_id)` relationship described above.
 
 Persistence invariant is:
 
@@ -346,6 +397,14 @@ CHECK (
 ```
 
 These constraints reject impossible Run status rows even if a controller bug or migration tries to persist them; normal lifecycle transactions still own when and why a Run transitions.
+
+The live-Run index is also defined on `run_status`, where both immutable Task ownership and nonterminal phase are available:
+
+```sql
+CREATE UNIQUE INDEX one_nonterminal_run_per_task
+ON run_status(task_id)
+WHERE phase IN ('Active', 'Finalizing');
+```
 
 The obsolete invariant `Run Finalizing => Candidate exists` is invalid.
 
@@ -659,7 +718,7 @@ append Events
 COMMIT
 ```
 
-If cancellation/supersession won the status CAS first, T6 fails with stale/conflict and creates no current Candidate. A restored old-generation AgentControlSession fails before T6 request authority is established.
+If cancellation/supersession won the status CAS first, T6 fails with stale/conflict and creates no current Candidate. A restored old-generation AgentControlSession fails before T6 request authority is established. Because `Finalizing` remains in the live-Run partial index, this producer Run continues to occupy the Task's unique nonterminal Run slot while acceptance proceeds.
 
 ## Acceptance and requeue transaction (T9)
 
@@ -685,7 +744,7 @@ safe accounting/resource updates
 append Events
 ```
 
-This preserves the partial unique live-Run index.
+The prior Run is already outside the `Active|Finalizing` live-Run index before T9 makes the Task schedulable again.
 
 ## Blocking-yield final transaction
 
@@ -1001,6 +1060,9 @@ A deterministic PersistenceInvariantChecker verifies at least:
 
 ```text
 Task phase/active_run_id row-local consistency
+Task active_run_id belongs to the same Task through runs.task_id
+run_status holder matches runs.task_id
+one nonterminal Run per Task
 Active Task -> exactly one nonterminal Run
 Ready/Waiting Task -> zero nonterminal Runs
 GoalRevision acceptance criteria -> exact pinned EvaluatorVersions + evaluator-resolution provenance
@@ -1043,7 +1105,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task row-local pointer facts remain schema `CHECK` constraints. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -1073,6 +1135,8 @@ T16 PLANNING EXTERNAL-CONTACT MARKER
 
 T1 resolves any Goal acceptance logical evaluator refs against the expected active trusted evaluator registry/ConfigurationRevision before commit, then atomically inserts the immutable GoalRevision with exact EvaluatorVersion/evaluator-resolution provenance, advances the current Goal revision through expected-revision CAS, creates reconciliation work and appends Events. No evaluator external call occurs inside T1.
 
+T3 revalidates Task Ready/current Goal/Graph/config/admission authority, creates the immutable Run with `task_id`, inserts the matching `run_status` row with the same immutable `task_id` and `phase=Active`, and atomically moves the Task to `Active` with `active_run_id` pointing at that Run. The composite FKs prove both holder relationships and the `one_nonterminal_run_per_task` partial unique index rejects a second `Active|Finalizing` Run for the Task. No external executor/backend call occurs inside T3.
+
 T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
 
 T4a is a short authoritative recovery transaction used only when the current-generation Attempt is still durably `NOT_CONTACTED` and the raw bearer needed for first launch was lost. It rechecks session/Attempt/Run/ControlLease state plus the expected current credential revision, increments `credential_revision`, replaces `credential_hash`, records non-secret rekey provenance/Event, and commits before rebuilding the launch credential projection. It never changes Attempt ID, LaunchKey, AgentControlSession ID, or RestoreGeneration.
@@ -1101,7 +1165,7 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 6. GoalRevision and TaskSpec acceptance contracts freeze exact permitted EvaluatorVersions before EvaluationRound creation; registry movement never silently rewrites those semantics.
 7. EvaluationRound owns exactly one concrete relational subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`); no opaque generic subject reference or Task-only ownership is used.
 8. Evidence/AcceptanceResult must match the exact EvaluationRound subject and pinned evaluator contract; Task and Goal lifecycle controllers separately recheck current authority before applying results.
-9. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
+9. RunStatus carries immutable Task holder identity constrained back to `runs`; Task `active_run_id` is constrained to a Run of the same Task; and a real partial unique index over `run_status.task_id` enforces at most one `Active|Finalizing` Run per Task. Task phase-specific exact-zero/exact-one semantics remain controller/invariant-checker rules.
 10. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
 11. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
 12. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
