@@ -70,7 +70,7 @@ Producing the exact same Artifact twice yields one content identity and multiple
 
 Only Pantheon computes authoritative digests. An Agent may request `artifact.seal` against authorized Task Workspace/input state, but it cannot supply an authoritative digest or arbitrary host path.
 
-Source-path authorization is not permission to dereference arbitrary filesystem indirection. When Artifact bytes originate from an Agent-writable Workspace, Pantheon resolves/captures them through the trusted-root, root-confined, no-follow object boundary in `workspace-and-git-integration.md`. Symlinks are captured as symlink data where the Artifact kind permits them; privileged sealing never follows an Agent-created symlink to obtain target contents. Unsupported special files fail closed rather than being opened/read as ordinary payload.
+Source-path authorization is not permission to dereference arbitrary filesystem indirection. When Artifact bytes originate from an Agent-writable Workspace, Pantheon resolves/captures them through the trusted-root, root-confined, no-follow object boundary in `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`. Symlinks are captured as symlink data where the Artifact kind permits them; privileged sealing never follows an Agent-created symlink to obtain target contents. Unsupported special files fail closed rather than being opened/read as ordinary payload.
 
 Ordinary local CAS seal ordering:
 

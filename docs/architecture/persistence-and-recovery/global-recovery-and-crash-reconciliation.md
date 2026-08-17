@@ -16,18 +16,18 @@ Pantheon therefore treats restart recovery as ordinary controller reconciliation
 
 See also:
 
-- `docs/architecture/task-lifecycle.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/planner-and-task-decomposition.md`
-- `docs/architecture/evaluation-and-evaluator-registry.md`
-- `docs/architecture/goal-lifecycle-and-completion-controller.md`
-- `docs/architecture/recovery-policy.md`
-- `docs/architecture/scheduler-reservations-ownership-and-leases.md`
-- `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
-- `docs/architecture/scheduler-task-ordering-and-fairness.md`
-- `docs/architecture/budget-usage-and-rate-limits.md`
-- `docs/architecture/artifact-model.md`
-- `docs/architecture/workspace-and-git-integration.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/goals-and-planning/planner-and-task-decomposition.md`
+- `docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`
+- `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
+- `docs/architecture/scheduling/scheduler-reservations-ownership-and-leases.md`
+- `docs/architecture/scheduling/scheduler-dispatch-and-run-intent-reconciliation.md`
+- `docs/architecture/scheduling/scheduler-task-ordering-and-fairness.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
 
 ## 1. Sources of truth
 
@@ -663,7 +663,7 @@ Possible observations:
 - no replacement Attempt is created;
 - schedule future reconciliation.
 
-On ordinary uninterrupted history, an Attempt that is durably `NOT_CONTACTED` and has no independent external evidence may use the launch-contact rule from `run-and-attempt.md` as proof that Pantheon's launch path never crossed the call boundary. In restore mode, a restored `NOT_CONTACTED` value is snapshot evidence only and does **not** establish absence for the post-snapshot interval; fresh backend inventory/inspection or an equivalent current fence is required before launch/replacement decisions rely on it.
+On ordinary uninterrupted history, an Attempt that is durably `NOT_CONTACTED` and has no independent external evidence may use the launch-contact rule from `docs/architecture/execution/run-and-attempt.md` as proof that Pantheon's launch path never crossed the call boundary. In restore mode, a restored `NOT_CONTACTED` value is snapshot evidence only and does **not** establish absence for the post-snapshot interval; fresh backend inventory/inspection or an equivalent current fence is required before launch/replacement decisions rely on it.
 
 If a backend supports inventory of Pantheon-owned executions, recovery should also compare that inventory against durable Attempts to discover dangling executions.
 
@@ -925,7 +925,7 @@ confined Git/filesystem observation
 Workspace reconciliation
 ```
 
-Workspace recovery obeys the hostile-repository boundary in `workspace-and-git-integration.md`. Agent-writable Git state is observation input, never controller authority. In particular, recovery does not derive a trusted repository/common-dir/object-store/configuration path by following an Agent-controlled `.git` gitfile, `commondir`, object alternate, configuration include, remote/helper declaration or equivalent repository indirection.
+Workspace recovery obeys the hostile-repository boundary in `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`. Agent-writable Git state is observation input, never controller authority. In particular, recovery does not derive a trusted repository/common-dir/object-store/configuration path by following an Agent-controlled `.git` gitfile, `commondir`, object alternate, configuration include, remote/helper declaration or equivalent repository indirection.
 
 Durable Pantheon Workspace/repository records define the controller-trusted roots that recovery is allowed to inspect. Any operation that must interpret Agent-owned Git metadata runs inside the Agent Sandbox or an equivalently confined controller-owned helper. Privileged controller Git is permitted only against controller-owned/trusted Git control state using the sterile execution profile; it never points the daemon's ambient authority at Agent-writable repository configuration.
 
@@ -1536,7 +1536,7 @@ Operator command idempotency is scoped by:
 RestoreGeneration + commandId
 ```
 
-A restored database may have lost a `commands` row for a command that already produced an external/control-plane effect. Therefore row absence alone can never make an old-epoch request new. `public-daemon-api-and-cli.md` requires stale command epochs to fail closed.
+A restored database may have lost a `commands` row for a command that already produced an external/control-plane effect. Therefore row absence alone can never make an old-epoch request new. `docs/architecture/operations/public-daemon-api-and-cli.md` requires stale command epochs to fail closed.
 
 The client observes the new command epoch, treats pre-restore command outcome as UNKNOWN, inspects current resource state, then deliberately chooses whether a new command with a new ID is required.
 

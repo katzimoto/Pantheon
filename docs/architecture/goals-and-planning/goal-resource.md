@@ -10,7 +10,7 @@ A `Goal` is the durable revisioned contract for the user's desired outcome. It s
 
 > **Goal describes the desired outcome, not an execution strategy. Task success does not imply Goal success.**
 
-Lifecycle/finalization authority is defined by `goal-lifecycle-and-completion-controller.md`; revision impact is defined by `goal-revision-reconciliation.md`.
+Lifecycle/finalization authority is defined by `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`; revision impact is defined by `docs/architecture/goals-and-planning/goal-revision-reconciliation.md`.
 
 ## Hierarchy
 

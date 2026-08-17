@@ -215,7 +215,7 @@ Exact Rust trait surface is deferred to implementation-boundary design.
 
 ## Durable launch boundary
 
-The Fabric does not treat an adapter call as the durable source of truth. Attempt/LaunchKey and the pre-launch contact marker are persisted by Run Controller before external `ensureExecution` contact, as defined by `run-and-attempt.md`.
+The Fabric does not treat an adapter call as the durable source of truth. Attempt/LaunchKey and the pre-launch contact marker are persisted by Run Controller before external `ensureExecution` contact, as defined by `docs/architecture/execution/run-and-attempt.md`.
 
 If launch semantics are KEYED_IDEMPOTENT, repeated reconciliation addresses the same lineage. If OBSERVATIONAL and contact may have occurred, Pantheon stays UNKNOWN until the adapter/outer environment can prove a safe state; it does not blindly create a new Attempt.
 

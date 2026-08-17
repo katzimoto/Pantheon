@@ -955,7 +955,7 @@ SQLite transaction adds Blob/Artifact/Candidate/Event refs
 
 An orphan durable CAS object is harmless/GC-able; a DB reference to missing bytes is not.
 
-Git-backed code changeset objects need the Git-specific preservation contract in `workspace-and-git-integration.md`: authoritative Git objects must be pinned/preserved before the SQLite Artifact/Candidate reference is committed, or the changeset payload must be independently present in Pantheon CAS.
+Git-backed code changeset objects need the Git-specific preservation contract in `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`: authoritative Git objects must be pinned/preserved before the SQLite Artifact/Candidate reference is committed, or the changeset payload must be independently present in Pantheon CAS.
 
 ## Candidate submission transaction (T6)
 

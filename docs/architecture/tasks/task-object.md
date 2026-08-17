@@ -12,11 +12,11 @@ A Task does **not** define which Logical Agent performs the work or how/where th
 
 See also:
 
-- `docs/architecture/taskgraph-dependencies.md`
-- `docs/architecture/task-lifecycle.md`
-- `docs/architecture/task-acceptance-and-completion.md`
-- `docs/architecture/logical-agent-resolution.md`
-- `docs/architecture/run-and-attempt.md`
+- `docs/architecture/tasks/taskgraph-dependencies.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md`
+- `docs/architecture/agents-and-context/logical-agent-resolution.md`
+- `docs/architecture/execution/run-and-attempt.md`
 
 ## Core hierarchy
 

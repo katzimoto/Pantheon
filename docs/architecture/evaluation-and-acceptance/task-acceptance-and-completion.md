@@ -10,10 +10,10 @@ Canonical Pantheon Task acceptance specification.
 
 See also:
 
-- `artifact-model.md`
-- `evaluation-and-evaluator-registry.md`
-- `task-lifecycle.md`
-- `recovery-policy.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
 
 ## Foundational principles
 
@@ -45,7 +45,7 @@ candidate:
 
 Candidate identity is `candidate://sha256/...` over canonical content. Old opaque examples such as `artifact://change-938` are obsolete.
 
-Submission/cancellation race semantics are defined by `task-lifecycle.md`: authoritative cancellation/supersession committed first causes submission conflict; Candidate committed first remains immutable history even if cancellation follows.
+Submission/cancellation race semantics are defined by `docs/architecture/tasks/task-lifecycle.md`: authoritative cancellation/supersession committed first causes submission conflict; Candidate committed first remains immutable history even if cancellation follows.
 
 ## Acceptance contract
 

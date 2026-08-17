@@ -23,15 +23,15 @@ Model-based rubric/reviewer evaluation is deferred from v1.
 
 See also:
 
-- `docs/architecture/task-acceptance-and-completion.md`
-- `docs/architecture/goal-resource.md`
-- `docs/architecture/goal-lifecycle-and-completion-controller.md`
-- `docs/architecture/artifact-model.md`
-- `docs/architecture/workspace-and-git-integration.md`
-- `docs/architecture/scheduler-resource-ledger-and-admission.md`
-- `docs/architecture/budget-usage-and-rate-limits.md`
-- `docs/architecture/permissions-and-capabilities.md`
-- `docs/architecture/event-and-observability-model.md`
+- `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md`
+- `docs/architecture/goals-and-planning/goal-resource.md`
+- `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
+- `docs/architecture/scheduling/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/security/permissions-and-capabilities.md`
+- `docs/architecture/operations/event-and-observability-model.md`
 
 ## 1. Core resources
 

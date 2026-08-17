@@ -12,10 +12,10 @@ Running Agents may discover bounded additional outcomes, but only Pantheon mater
 
 See also:
 
-- `agent-control-channel.md`
-- `blocking-spawn-and-run-yield.md`
-- `taskgraph-dependencies.md`
-- `task-lifecycle.md`
+- `docs/architecture/execution/agent-control-channel.md`
+- `docs/architecture/tasks/blocking-spawn-and-run-yield.md`
+- `docs/architecture/tasks/taskgraph-dependencies.md`
+- `docs/architecture/tasks/task-lifecycle.md`
 
 ## Authority
 

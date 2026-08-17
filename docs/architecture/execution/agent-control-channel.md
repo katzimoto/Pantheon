@@ -16,13 +16,13 @@ This document defines the logical worker-facing control protocol. Concrete Execu
 
 See also:
 
-- `docs/architecture/permissions-and-capabilities.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/execution-fabric.md`
-- `docs/architecture/task-spawn-and-dynamic-graphs.md`
-- `docs/architecture/artifact-model.md`
-- `docs/architecture/public-daemon-api-and-cli.md`
-- `docs/architecture/sqlite-persistence-and-transactions.md`
+- `docs/architecture/security/permissions-and-capabilities.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/execution/execution-fabric.md`
+- `docs/architecture/tasks/task-spawn-and-dynamic-graphs.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/operations/public-daemon-api-and-cli.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ## 1. Operator Control and Agent Control are different surfaces
 
@@ -480,7 +480,7 @@ Pantheon derives the caller's Task Workspace and trusted capture root and valida
 
 The worker cannot use `artifact.seal` to read/seal arbitrary host paths, control-plane state, another Task's workspace, or inaccessible Artifact content. An apparently valid in-Workspace path also cannot escalate authority through a symlink, mount, device, FIFO, socket or other Agent-controlled filesystem indirection.
 
-Workspace-derived source capture follows the root-confined/no-follow rules in `workspace-and-git-integration.md`: Pantheon inspects/reads the exact object beneath the trusted Workspace root without privileged dereference. A symlink may be sealed as symlink data when the Artifact kind permits it; its target bytes are content, not an instruction to open the referenced path. Unsupported special filesystem objects fail closed with the Workspace/filesystem capture finding rather than being interacted with as payload.
+Workspace-derived source capture follows the root-confined/no-follow rules in `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`: Pantheon inspects/reads the exact object beneath the trusted Workspace root without privileged dereference. A symlink may be sealed as symlink data when the Artifact kind permits it; its target bytes are content, not an instruction to open the referenced path. Unsupported special filesystem objects fail closed with the Workspace/filesystem capture finding rather than being interacted with as payload.
 
 Pantheon computes/verifies all digests itself and follows the Artifact/CAS durability protocol.
 
