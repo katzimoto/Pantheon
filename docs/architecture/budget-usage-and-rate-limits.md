@@ -38,9 +38,11 @@ subject to enforcement mode and account semantics.
 
 A BudgetHold reserves bounded future spending authority/headroom. It is not factual consumption and not a ResourceReservation.
 
-Runs receive an initial bounded tranche at scheduling commit. Extensions are separate atomic transactions. Control operations such as Evaluation may use `holder: control-operation` where billable usage exists.
+Runs receive an initial bounded tranche at scheduling commit. Extensions are separate atomic transactions. Explicitly billable control operations such as EvaluationOperation or PlanningOperation may use `holder: control-operation` with a concrete relational operation owner.
 
-Failed Attempts may consume their real usage; failure does not refund factual spend.
+A PlanningOperation does not borrow the eventual Task/Run budget identity merely because its proposal may create Tasks. Planning cost is bounded/accounted as planning control work.
+
+Failed Attempts/control-operation attempts may consume their real usage; failure does not refund factual spend.
 
 ## UsageRecord
 
@@ -82,14 +84,18 @@ For Attempt usage, Pantheon accepts the record only when:
 
 For control-operation usage, Pantheon accepts a backend-authored record only when:
 
-- the referenced control operation exists;
+- the referenced concrete control operation exists;
 - before external contact, the durable control-operation intent froze an immutable metering-source binding naming the reporting `backend_id`, backend descriptor/revision and metering contract/digest applicable to that operation;
 - the meter/units are valid for that frozen metering contract;
 - the namespaced source identity has not already been ingested with conflicting content.
 
-A control operation with no frozen external metering-source binding cannot accept backend-authored usage. The reporting backend cannot create, select or rewrite that binding. This metering binding is provenance/accounting authority only; it does not turn an EvaluationOperation or another control operation into a normal Run/ExecutionBinding or make the metering backend its lifecycle executor.
+A control operation with no frozen external metering-source binding cannot accept backend-authored usage. The reporting backend cannot create, select or rewrite that binding. This metering binding is provenance/accounting authority only; it does not turn an EvaluationOperation, PlanningOperation or another control operation into a normal Run/ExecutionBinding or make the metering backend its lifecycle controller.
+
+For PlanningOperation specifically, an external Planner/backend path freezes the reporting backend identity/descriptor revision and metering contract in the immutable PlanningOperation before the first PlanningAttempt contact marker. A purely local planning path with no backend-authored metering leaves that binding absent and cannot later accept a provider usage claim merely because a PlanningRecord exists.
 
 Current lifecycle state is not used as a shortcut for usage truth. A valid delayed UsageRecord may arrive after an Attempt/control operation becomes terminal or is administratively resolved. Where the architecture has durable launch/contact evidence, ingestion may reject a lineage that is durably proven never to have crossed the external-contact boundary; absence of such proof is not permission to infer usage.
+
+For PlanningOperation, `PlanningAttempt.contactState = NOT_CONTACTED` on uninterrupted authoritative history plus no independent external-contact evidence can reject impossible backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` only permits factual reconciliation under frozen provenance; it does not prove that usage occurred.
 
 A backend therefore cannot claim usage for another backend's Attempt or control operation merely by choosing a colliding/novel `adapter_operation_key` or another subject ID.
 
@@ -149,6 +155,8 @@ If external execution may have consumed usage but final usage is unknown:
 - do not invent a UsageRecord;
 - do not fabricate a ChargeRecord merely to close the ledger.
 
+This applies equally to UNKNOWN PlanningAttempt/EvaluationAttempt external contact. An unresolved Planner response is not evidence that no billable request occurred.
+
 An operator force-resolution may explicitly release/write off/fence unresolved spending authority as an administrative accounting decision, but it must be represented separately from factual consumption.
 
 Useful concepts include an explicit unresolved/forfeited liability or administrative settlement record. It must never masquerade as provider-reported actual usage.
@@ -170,6 +178,8 @@ A mirror records at least source, observed state/value, freshness and observatio
 Rate limits are temporary replenishing availability, not cumulative budgets. A rate-limited backend/offer may become temporarily unavailable with a retry-after/refresh observation without consuming retry semantics merely because Pantheon waits.
 
 Where an existing backend execution remains continuous while waiting for provider rate availability, Pantheon reconciles the same Attempt rather than creating a new Attempt.
+
+The same principle applies to an already-contacted PlanningAttempt: temporary provider/rate uncertainty does not authorize an overlapping Planner invocation under a new attempt identity.
 
 ## Enforcement modes
 
@@ -199,13 +209,15 @@ RATE-LIMIT STATE
   temporary replenishing upstream availability
 ```
 
-All may influence scheduling feasibility but remain distinct authorities.
+All may influence scheduling/control-operation feasibility but remain distinct authorities.
 
 ## Recovery
 
-UNKNOWN execution retains/fences budget headroom conservatively. Recovery never equates ControlLease expiry with safe budget release.
+UNKNOWN execution/control-operation contact retains/fences budget headroom conservatively. Recovery never equates ControlLease expiry, controller restart or missing response with safe budget release.
 
-Operator force-resolution is audited and can settle unresolved administrative authority, but late legitimate usage can still be ingested afterward if immutable provenance validates it. Such late usage may create overdraw; it is not rejected simply because the execution was administratively tombstoned.
+Planning recovery uses the durable PlanningOperation/PlanningAttempt identity. `CONTACT_MAY_HAVE_OCCURRED` is reconciled against the same external lineage where possible; another Planner call is not issued solely because the result is missing.
+
+Operator force-resolution is audited and can settle unresolved administrative authority, but late legitimate usage can still be ingested afterward if immutable provenance validates it. Such late usage may create overdraw; it is not rejected simply because the execution/control operation was administratively tombstoned.
 
 ## Core invariants
 
@@ -213,10 +225,11 @@ Operator force-resolution is audited and can settle unresolved administrative au
 2. Usage is append-only factual truth and never clamped to a budget limit.
 3. Usage source identity is Pantheon-namespaced by backend + execution/control-operation + adapter key + meter.
 4. A backend may report usage only for an Attempt lineage it owns in the immutable ExecutionBinding or a control-operation metering lineage that durably froze that backend as its reporting source before external contact.
-5. Duplicate source delivery is idempotent; conflicting duplicate content is an integrity error.
-6. Controller lease/epoch rotation does not by itself invalidate delayed factual usage.
-7. UNKNOWN final usage does not authorize fabricated consumption.
-8. Failed work still consumes real usage.
-9. Late usage after administrative force-resolution remains recordable and may create truthful overdraw.
-10. External allowance/rate observations include freshness and never become local fabricated authority.
-11. Control-operation metering provenance does not redefine control-operation execution/lifecycle ownership or require normal Run/ExecutionBinding semantics.
+5. PlanningOperation uses the same control-operation metering rule; PlanningAttempt ambiguity never fabricates usage or authorizes duplicate external planning calls.
+6. Duplicate source delivery is idempotent; conflicting duplicate content is an integrity error.
+7. Controller lease/epoch rotation does not by itself invalidate delayed factual usage.
+8. UNKNOWN final usage does not authorize fabricated consumption.
+9. Failed work still consumes real usage.
+10. Late usage after administrative force-resolution remains recordable and may create truthful overdraw.
+11. External allowance/rate observations include freshness and never become local fabricated authority.
+12. Control-operation metering provenance does not redefine control-operation execution/lifecycle ownership or require normal Run/ExecutionBinding semantics.

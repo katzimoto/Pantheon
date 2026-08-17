@@ -19,6 +19,7 @@ See also:
 - `run-and-attempt.md`
 - `global-recovery-and-crash-reconciliation.md`
 - `budget-usage-and-rate-limits.md`
+- `planner-and-task-decomposition.md`
 
 ## Ownership primitives
 
@@ -81,7 +82,14 @@ Typical Run-scoped resources:
 - Run Sandbox/container/VM slot;
 - Run-specific CPU/memory/executor capacity.
 
-EvaluationOperations and similar explicitly accounted control work use `control-operation` scope.
+Explicitly accounted controller work uses `control-operation` scope. In v1 this includes at least:
+
+```text
+EvaluationOperation
+PlanningOperation
+```
+
+The concrete holder relationship remains relational. `control-operation` is the accounting scope, not permission to store only one unconstrained opaque owner string.
 
 ## Critical rule: Task-scoped reservations are reused, not re-created
 
@@ -115,6 +123,30 @@ where the resource model requires one logical reservation per key. Controller lo
 
 A new Run receives fresh Run-scoped reservations because backend/sandbox/concurrency requirements may differ across Bindings. Released/old Run reservations are historical and are not mutated into ownership for another Run.
 
+## Control-operation reservations
+
+A PlanningOperation/EvaluationOperation that needs reservable capacity acquires it under its own durable control-operation identity before crossing the relevant external contact boundary.
+
+The operation, not an ephemeral adapter request, owns that capacity until reconciliation/finalization proves release safe.
+
+For an external PlanningOperation:
+
+```text
+PlanningOperation intent
+        ↓
+required control-operation Reservations/Holds committed
+        ↓
+PlanningAttempt created
+        ↓
+contact marker committed
+        ↓
+external Planner call
+```
+
+An UNKNOWN PlanningAttempt keeps the operation's relevant reservation `UNCERTAIN`/charged. Pantheon does not release/reassign that capacity merely because a Planner response was lost or a controller process restarted.
+
+A local deterministic planning path that performs no external/resource-bearing work does not create artificial Reservations merely to fit this model.
+
 ## Reservation assessment
 
 Resource Ledger admission is whole-set and revision-aware. It assesses incremental claims against current allocatable capacity and current non-released reservations.
@@ -144,6 +176,8 @@ daemon incarnation ID
 A callback/operation is current only when all required fencing values match durable current ownership. An old controller with a reused/replayed epoch but stale token/incarnation cannot mutate current state.
 
 Lease expiry permits control takeover after durable fencing rotation; it **never** proves a process/session stopped.
+
+Control-operation lifecycle ownership does not reuse a Run ControlLease unless that concrete controller contract explicitly defines one. Evaluation/Planning reconciliation instead uses their durable operation/attempt identities and current controller transaction authority.
 
 ## Atomic scheduler Run-intent commit
 
@@ -186,6 +220,8 @@ Scheduler commits an initial bounded tranche of spend authority, not the entire 
 
 BudgetHold availability is checked against all applicable overlapping accounts/periods.
 
+Control operations such as Planning/Evaluation acquire their own bounded Holds through their controller transaction paths; they do not borrow a Task Run's BudgetHold merely because the work ultimately serves that Goal.
+
 ## Ownership after scheduler commit
 
 After T3:
@@ -200,11 +236,15 @@ initial Holds durable
 
 Scheduler responsibility ends. Run Controller owns preparation, Sandbox/Context readiness, Attempt creation, launch/reconciliation and Run finalization.
 
+Planner control-operation execution is separate from T3. A PlanningOperation cannot create a scheduled Run directly; its resulting PlanningRecord/GraphPatch must first pass Graph Controller validation/materialization.
+
 ## Attempt LaunchKey boundary
 
 LaunchKey does not belong to the scheduler or Run-intent transaction. It belongs to an Attempt created after preparation is LaunchReady.
 
 The Run Controller creates Attempt + LaunchKey + AgentControlSession durably, then separately commits the pre-launch contact marker before crossing the backend launch-call boundary, as defined in `run-and-attempt.md`.
+
+PlanningAttempt is not a Run Attempt and does not receive a LaunchKey. It uses the provider-neutral PlanningAttempt identity/contact marker defined by the Planner architecture.
 
 ## Release rules
 
@@ -219,6 +259,8 @@ Run finalization completed
 ```
 
 UNKNOWN execution/sandbox state retains relevant capacity as `UNCERTAIN`.
+
+Control-operation reservations use the same safety rule: a PlanningOperation/EvaluationOperation releases reserved capacity only when its external attempt/contact and any owned external resource are reconciled/finalized sufficiently to prove reuse safe.
 
 Task-scoped reservations normally survive individual Run terminalization. They are released by Task/Workspace finalization, explicit recovery/reset or other Task-owned lifecycle rules.
 
@@ -244,7 +286,7 @@ UNKNOWN is an observation state, not a timeout-based proof of absence. Normal re
 
 Pantheon additionally provides an explicit operator-only force-resolution path for permanently unrecoverable UNKNOWN obligations. Force resolution must:
 
-- identify the exact Attempt/LaunchKey/Sandbox/external obligation;
+- identify the exact Attempt/LaunchKey/Sandbox/control-operation external obligation;
 - fence/tombstone that lineage so later callbacks cannot reacquire authority;
 - record actor, reason, evidence and acknowledged risk;
 - decide reservation/hold handling explicitly;
@@ -260,6 +302,7 @@ Force resolution is exceptional administrative acceptance of uncertainty, not au
 4. At most one live logical Task-scoped reservation exists per `(task, resource key)` where the resource model is singular.
 5. New Runs receive fresh Run-scoped reservations.
 6. T3 atomically commits Binding + required Reservations + initial Holds + Run + Task Active.
-7. LaunchKey belongs to Attempt after preparation, not Scheduler.
-8. UNKNOWN obligations retain/fence capacity until reconciled or explicitly force-resolved.
-9. Task Workspace capacity survives ordinary Run retry/requeue/yield unless Task-owned policy says otherwise.
+7. LaunchKey belongs to normal Run Attempt after preparation, not Scheduler or PlanningAttempt.
+8. PlanningOperation/EvaluationOperation may own explicit control-operation Reservations/Holds; UNKNOWN external control work retains/fences them until safe release.
+9. UNKNOWN obligations retain/fence capacity until reconciled or explicitly force-resolved.
+10. Task Workspace capacity survives ordinary Run retry/requeue/yield unless Task-owned policy says otherwise.

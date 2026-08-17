@@ -60,13 +60,15 @@ TaskSpec              immutable
 ExecutionBinding      immutable
 Run spec/snapshot     immutable
 Attempt identity      immutable
+PlanningOperation intent/provenance
+PlanningRecord        immutable normalized planning result
 Candidate             immutable
 Evidence              immutable
 ConfigurationRevision immutable
 EvaluatorVersion      immutable
 ContextPlan           immutable
 
-Goal/Task/Run/Attempt/Sandbox/etc. status rows
+Goal/Task/Run/Attempt/Planning/Evaluation/Sandbox/etc. status
                       revisioned mutable controller state
 ```
 
@@ -115,6 +117,8 @@ GOALS / TASK GRAPH
   task_spawns
   task_joins
   continuation_contexts
+  planning_operations
+  planning_attempts
   planning_records
 
 SCHEDULING / EXECUTION
@@ -267,6 +271,8 @@ Critical uniqueness:
 Admission diffs desired Task-scoped claims against existing compatible Task reservations; a new Run does not recreate the Workspace reservation.
 
 Run-scoped reservations remain fresh per Run.
+
+Control-operation reservations likewise retain a concrete relational owner. In v1 accounted holders include EvaluationOperation and PlanningOperation; an implementation must not collapse them into one unconstrained opaque `holder_ref` merely because both share the accounting scope.
 
 ## ExecutionBinding
 
@@ -522,7 +528,7 @@ holder_kind = CONTROL_OPERATION
      AND evaluation_operation_id IS NOT NULL
 ```
 
-Pantheon does not use one opaque polymorphic `holder_ref` as the safety boundary because SQLite could not enforce a real FK to multiple unrelated tables. In v1 the only control-operation Sandbox owner is EvaluationOperation; another control-operation type gains an explicit relational edge when/if it actually needs Sandbox ownership rather than forcing a premature generic supertable.
+Pantheon does not use one opaque polymorphic `holder_ref` as the safety boundary because SQLite could not enforce a real FK to multiple unrelated tables. In v1 the only control-operation Sandbox owner is EvaluationOperation; PlanningOperation does **not** gain Sandbox ownership merely because it is a control operation. Another control-operation type gains an explicit relational edge only when/if its architecture actually requires Sandbox ownership rather than forcing a premature generic supertable.
 
 Provisioning intent and SandboxKey are committed before external runtime calls. The holder cannot be rewritten to another Run/EvaluationOperation after creation.
 
@@ -550,7 +556,7 @@ with a CHECK ensuring exactly one execution/control-operation subject where appl
 
 Attempt usage validates that the immutable ExecutionBinding names the reporting backend and the applicable frozen metering contract.
 
-Backend-authored control-operation usage validates the symmetric immutable provenance on the referenced control-operation record. Any control operation that can accept such usage must freeze, before external contact, relational immutable fields equivalent to:
+Backend-authored control-operation usage validates the symmetric immutable provenance on the referenced concrete control-operation record. Any control operation that can accept such usage must freeze, before external contact, relational immutable fields equivalent to:
 
 ```text
 usage_reporter_backend_id
@@ -558,7 +564,7 @@ usage_reporter_backend_revision
 metering_contract_digest
 ```
 
-The fields are absent together for an operation that does not accept backend-authored usage and complete together for one that does. The reporting backend cannot create or rewrite this ownership. For EvaluationOperations these fields belong to the immutable operation intent; they do not create an ExecutionBinding or transfer lifecycle ownership from the Evaluation Controller.
+The fields are absent together for an operation that does not accept backend-authored usage and complete together for one that does. The reporting backend cannot create or rewrite this ownership. For EvaluationOperations and externally metered PlanningOperations these fields belong to the immutable operation intent; they do not create an ExecutionBinding or transfer lifecycle ownership from the corresponding controller.
 
 Usage ingestion rejects a control-operation record when `backend_id` does not equal the operation's frozen `usage_reporter_backend_id`, when the meter/units are outside the frozen contract, or when no external metering-source binding exists.
 
@@ -605,7 +611,7 @@ external_lineage_tombstones
   created_at
 ```
 
-A tombstoned LaunchKey/session can never regain current control authority. Late observations may be recorded as history/usage but cannot mutate the current execution lineage.
+A tombstoned LaunchKey/session/control-operation attempt can never regain current control authority. Late observations may be recorded as history/usage but cannot mutate the current execution lineage.
 
 ## Artifacts / CAS
 
@@ -701,6 +707,81 @@ Task-scoped Workspace reservation remains live.
 Immutable ConfigurationRevision/components are compiled/validated before touching active state. Activation changes one `active_configuration` pointer and Event in an authoritative transaction, with a short publication barrier between DB/current in-memory snapshot as defined by the configuration architecture.
 
 Historical hash-bearing config rows are never rewritten in place by migration.
+
+## Planning
+
+Every authoritative planning invocation creates one durable `PlanningOperation`. A purely local/deterministic planning path may complete without any external attempt, but an external Planner/backend call uses `PlanningAttempt` contact state before crossing that boundary.
+
+Conceptual operation fields include immutable decision/execution provenance plus revisioned lifecycle state:
+
+```text
+planning_operations
+  id
+  goal_id
+  goal_revision
+  expected_graph_revision
+  trigger_kind / reconciliation_ref
+  planning_input_digest
+  planner_agent_snapshot/version nullable
+  config_revision_id
+  executor_backend_id nullable
+  executor_backend_revision nullable
+  metering_contract_digest nullable
+  state
+  revision
+  created_at
+  finished_at
+```
+
+The external backend/metering fields are absent together for local planning and complete as required for an externally metered Planner path. They are frozen before the first PlanningAttempt contact and are never selected/rewritten by the Planner response.
+
+External attempt lineage is relational:
+
+```text
+planning_attempts
+  id
+  operation_id FK -> planning_operations
+  ordinal
+  state
+  contact_state                    NOT_CONTACTED|CONTACT_MAY_HAVE_OCCURRED
+  contact_initiated_at             nullable until contact transition
+  contact_daemon_incarnation       nullable until contact transition
+  external_attachment_json         nullable adapter-private correlation
+  created_at
+  finished_at
+```
+
+At most one nonterminal PlanningAttempt may exist per PlanningOperation. Because operation ownership and attempt lifecycle state are both present on `planning_attempts`, v1 can use a real partial unique index/constraint over `operation_id` for the nonterminal state domain rather than relying solely on controller convention.
+
+`PlanningAttempt.id` is the provider-neutral reconciliation/correlation identity. Adapter-private IDs may supplement it but do not replace it.
+
+`planning_records` stores immutable normalized results/proposals and binds at least:
+
+```text
+planning_operation_id
+planning_attempt_id nullable for local planning
+proposal_digest / canonical proposal
+parse/normalization provenance
+created_at
+```
+
+A PlanningRecord is not lifecycle authority and is never proof that its proposal was materialized. Graph Controller separately rechecks GoalRevision/GraphRevision/current policy before GraphPatch commit.
+
+PlanningOperation may own concrete control-operation ResourceReservations/BudgetHolds. It does not own a normal Run/ExecutionBinding, AgentControlSession or v1 Sandbox. A future Planner Sandbox requires an explicit concrete `sandbox_instances` holder FK/architecture change rather than piggybacking on the generic control-operation accounting scope.
+
+Crash/contact semantics on uninterrupted history are:
+
+```text
+NOT_CONTACTED + no independent external evidence
+  -> Pantheon's external Planner call boundary was not crossed
+
+CONTACT_MAY_HAVE_OCCURRED
+  -> external result/usage may exist
+  -> reconcile same PlanningAttempt identity
+  -> no overlapping attempt while unresolved
+```
+
+Restore-mode negative evidence uses the same restore-specific rule as other external domains: a restored `NOT_CONTACTED` row is snapshot evidence only until fresh inspection/fencing establishes the post-snapshot interval.
 
 ## Evaluation
 
@@ -863,15 +944,19 @@ AgentControlSession credential_revision >= 1
 AgentControlSession pre-contact rekey only while parent Attempt is current-generation NOT_CONTACTED
 AgentControlSession credential revision/verifier frozen after CONTACT_MAY_HAVE_OCCURRED
 accepted Agent Control request -> session.restore_generation == current RestoreGeneration
+one nonterminal PlanningAttempt per PlanningOperation
+PlanningAttempt contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
+PlanningRecord binds existing PlanningOperation and matching external PlanningAttempt when applicable
+external PlanningOperation metering backend/contract frozen before PlanningAttempt contact
 one nonterminal EvaluationAttempt per EvaluationOperation
 EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 one live Task-scoped reservation per singular (Task, ResourceKey)
-Reservation holder validity
+Reservation holder validity, including concrete PlanningOperation/EvaluationOperation control-operation holder
 Sandbox holder XOR/FK validity (Run xor EvaluationOperation)
 at most one current/non-RELEASED Sandbox per Run/EvaluationOperation holder
 SandboxVerification holder/SandboxKey identity matches SandboxInstance
 Budget aggregate == immutable ledger reconstruction
-Usage provenance/backend ownership for Attempt and control-operation subjects
+Usage provenance/backend ownership for Attempt and concrete control-operation subjects
 Grant/CapabilityTicket redemption generation == current RestoreGeneration
 new/executable broker operation generation == current RestoreGeneration
 old-generation broker operations are reconciliation-only
@@ -883,7 +968,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -908,6 +993,7 @@ T12 INTEGRATION STATE
 T13 CONFIGURATION ACTIVATION
 T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
 T15 EVALUATION LAUNCH CONTACT MARKER
+T16 PLANNING EXTERNAL-CONTACT MARKER
 ```
 
 T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
@@ -920,6 +1006,10 @@ T11 creates/transitions Sandbox desired state only after re-reading the concrete
 
 T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
 
+PlanningOperation intent, immutable input/Goal/Graph/config/backend/metering provenance and required control-operation Reservations/Holds are committed before external planning contact. A corresponding PlanningAttempt is created `NOT_CONTACTED` before T16.
+
+T16 is a short authoritative transaction that verifies the PlanningOperation/PlanningAttempt is current, the expected Goal/Graph planning fence is still applicable for issuing the call, required Holds/Reservations remain valid, and the attempt is still `NOT_CONTACTED`; it then atomically changes `contact_state = CONTACT_MAY_HAVE_OCCURRED`, records daemon/time provenance and appends its Event. Only after T16 commits may Pantheon invoke the external Planner/backend. A later stale Goal/Graph revision can invalidate Graph materialization without erasing factual PlanningAttempt/Usage history.
+
 Never perform network/Git/process/backend/secret-store/container-runtime calls inside a SQLite transaction.
 
 ## Core invariants
@@ -931,17 +1021,18 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 5. Task-scoped reservations are unique/reused across Runs.
 6. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
 7. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
-8. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
+8. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
 9. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
-10. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-11. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-12. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
-13. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
-14. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
-15. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-16. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
-17. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-18. Requeue occurs only after previous responsible Run terminal.
-19. Force-resolution tombstones stale lineages without fabricating factual Usage.
-20. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-21. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+10. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
+11. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+12. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+13. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+14. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+15. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
+16. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+17. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+18. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+19. Requeue occurs only after previous responsible Run terminal.
+20. Force-resolution tombstones stale lineages without fabricating factual Usage.
+21. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+22. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.

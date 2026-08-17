@@ -18,6 +18,7 @@ See also:
 
 - `docs/architecture/task-lifecycle.md`
 - `docs/architecture/run-and-attempt.md`
+- `docs/architecture/planner-and-task-decomposition.md`
 - `docs/architecture/recovery-policy.md`
 - `docs/architecture/scheduler-reservations-ownership-and-leases.md`
 - `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
@@ -48,6 +49,7 @@ SQLite status / findings / events
 The authoritative sources are:
 
 - immutable Goal/Task/Run/Attempt/Binding/Candidate/Artifact records;
+- durable PlanningOperation/PlanningAttempt identities plus immutable PlanningRecord results where external planning exists;
 - durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
 - durable SandboxInstance holder/SandboxKey identity and SandboxVerification facts;
 - durable desired-state fields;
@@ -282,6 +284,7 @@ Load at least:
 - nonterminal Goals and Tasks;
 - Active/Evaluating/Finalizing Tasks;
 - nonterminal Runs and Attempts;
+- nonterminal PlanningOperations and PlanningAttempts plus unresolved planning control-operation accounting;
 - nonterminal EvaluationOperations and EvaluationAttempts;
 - ExecutionBindings;
 - every SandboxInstance not RELEASED plus its durable holder and latest SandboxVerification;
@@ -294,7 +297,7 @@ Load at least:
 - unresolved cleanup/finalization obligations;
 - prior unresolved RecoveryFindings.
 
-Sandbox inventory is **not derived only by walking Runs**. Verification Sandboxes belong to EvaluationOperations and must remain discoverable/reconcilable even when no Run owns them.
+Sandbox inventory is **not derived only by walking Runs**. Verification Sandboxes belong to EvaluationOperations and must remain discoverable/reconcilable even when no Run owns them. PlanningOperations do not own Sandboxes in v1 unless a future architecture adds an explicit concrete holder edge.
 
 In restore mode the inventory also includes Grants, CapabilityTickets, broker operations, Commands, AgentControlSessions, and the matching restore RecoveryPass because restored rows may represent authority/idempotency history older than external reality.
 
@@ -311,6 +314,8 @@ In restore mode, the new RestoreGeneration has already been committed before thi
 Controllers inspect their external domains and either establish current state or place affected resources into conservative fenced states.
 
 Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox.
+
+Planning Controller independently reconciles nonterminal PlanningAttempts by their durable PlanningAttempt identity/correlation. An unresolved `CONTACT_MAY_HAVE_OCCURRED` Planner call is not permission to issue an overlapping replacement call.
 
 Restore mode has an additional certainty rule: negative observations recovered only from the snapshot are historical facts about the snapshot point. They do not prove that an external effect did not occur after that point. Fresh external inspection/inventory or an equivalent current fence must establish absence before a replacement/conflicting effect is authorized.
 
@@ -337,6 +342,8 @@ In restore mode the barrier also requires the matching restore RecoveryPass/T0 g
 
 Only after the barrier is satisfied may the Scheduler commit new Runs.
 
+Planner/Graph reconciliation may also continue only within its own safe fences: creating a new external PlanningAttempt is effect-creating control work and cannot bypass an unresolved prior PlanningAttempt or the global recovery barrier.
+
 ## 7. Recovery barrier versus global freeze
 
 Pantheon should minimize blast radius.
@@ -354,7 +361,7 @@ unrelated resources = reconciled
 → new work may use remaining safe capacity on B
 ```
 
-A single uncertain Run must not freeze all Goals indefinitely.
+A single uncertain Run or PlanningOperation must not freeze all Goals indefinitely when its accounting/authority blast radius can be safely fenced.
 
 Global dispatch remains disabled only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure, unreconciled installation ownership, or an incomplete disaster-restore generation fence.
 
@@ -384,6 +391,7 @@ Each domain provides an idempotency/reconciliation identity appropriate to the o
 
 ```text
 Attempt launch      → LaunchKey
+Planning call       → PlanningAttempt ID + contact marker
 Evaluation launch   → EvaluationAttempt ID + launch-contact marker
 Agent Control       → AgentControlSession + RestoreGeneration + Attempt request identity
 Run control         → ControlLease leaseToken + epoch
@@ -428,11 +436,12 @@ Therefore any negative fact whose only evidence is the restored snapshot is not 
 
 ```text
 Attempt.launchContactState = NOT_CONTACTED
+PlanningAttempt.contactState = NOT_CONTACTED
 EvaluationAttempt.launchContactState = NOT_CONTACTED
 observed execution/sandbox = ABSENT
 broker operation row absent or PENDING
 Agent request/Operator command row absent
-no later Event/Evidence row present
+no later Event/Evidence/PlanningRecord row present
 ```
 
 These facts remain useful historical evidence about the snapshot point, but they cannot establish `NOT_APPLIED` for the post-snapshot interval. The external domain must be freshly inventoried/inspected, or an explicit isolation/fencing property must make a conflicting effect impossible, before Pantheon may authorize replacement work or conclude that an external side effect did not occur.
@@ -475,10 +484,10 @@ A resource may enter a logical terminating/finalizing state before its obligatio
 
 Typical obligations include:
 
-- executor/evaluator termination confirmed;
+- executor/evaluator/planner external contact/termination/result certainty where applicable;
 - Run/control-operation reservations safe to release;
 - BudgetHold settled;
-- candidate/evidence state durably sealed;
+- candidate/evidence/planning result state durably sealed where required;
 - workspace outputs preserved before deletion;
 - managed Git ref/integration state reconciled;
 - Run or verification Sandbox cleanup confirmed where required.
@@ -492,8 +501,9 @@ Recovery-critical records are retained at least through finalization and configu
 Pantheon must not physically delete:
 
 - nonterminal Run/Attempt identity;
+- nonterminal PlanningOperation/PlanningAttempt identity and contact facts;
 - nonterminal EvaluationOperation/EvaluationAttempt identity;
-- LaunchKeys and evaluation launch-contact facts;
+- LaunchKeys and evaluation/planning launch-contact facts;
 - ExecutionBindings;
 - non-RELEASED SandboxInstance holder/SandboxKey identity and required verification history;
 - unresolved Reservations/Holds;
@@ -570,6 +580,42 @@ A mismatch fails closed. The old session row is not rewritten to current. A stil
 
 Pantheon does not automatically mint a replacement current-generation AgentControlSession for the same Attempt solely because recovery would otherwise stall. Same-Attempt credential/session rotation is a separate protocol and cannot be invented implicitly by restore recovery.
 
+### PlanningOperation and PlanningAttempt recovery
+
+For every nonterminal PlanningOperation with external execution:
+
+```text
+load current nonterminal PlanningAttempt, if any
+        ↓
+interpret contact_state
+        ↓
+inspect/reconcile same PlanningAttempt identity/correlation where external contact may have occurred
+        ↓
+recover immutable PlanningRecord if a valid result can be established
+        ↓
+Graph Controller independently revalidates Goal/Graph/policy before materialization
+```
+
+On uninterrupted authoritative history:
+
+```text
+NOT_CONTACTED + no independent external evidence
+→ Pantheon's external Planner call path did not cross its call boundary
+
+CONTACT_MAY_HAVE_OCCURRED
+→ provider may have executed, charged, or produced a result
+→ reconcile same PlanningAttempt identity
+→ no overlapping PlanningAttempt while unresolved
+```
+
+If the Planner/backend supports stable request lookup/correlation, Pantheon uses the original PlanningAttempt identity/adapter attachment. If the backend cannot establish whether an ambiguously contacted request executed, the attempt remains UNKNOWN/fenced rather than being blindly resent.
+
+PlanningOperation holds relevant control-operation ResourceReservations/BudgetHolds until finalization/reconciliation proves them safe to release. A local deterministic PlanningOperation with no external attempt has no invented external recovery obligation.
+
+A recovered Planner response has **zero direct Graph authority**. Pantheon may record the immutable PlanningRecord/result as historical truth, but a stale GoalRevision/GraphRevision means Graph Controller rejects materialization rather than rewriting the operation or applying an old proposal.
+
+In restore mode, a restored PlanningAttempt `NOT_CONTACTED` value or absence of a PlanningRecord is historical snapshot evidence only. Fresh planner-domain inspection/correlation or an equivalent current fence must establish that no post-snapshot request/result exists before replacement external planning relies on that negative fact.
+
 ### Sandbox holder reconciliation
 
 Recovery independently walks **every non-RELEASED SandboxInstance**, resolves its immutable holder, and re-inspects the same SandboxKey.
@@ -594,6 +640,8 @@ For a valid live holder:
 If the holder is terminal but Sandbox cleanup is incomplete, the Sandbox remains a cleanup/finalization obligation and capacity is not released merely because the holder stopped executing.
 
 If the durable holder is missing, the holder-kind/FK relationship is inconsistent, or an inventoried external Sandbox has no corresponding durable SandboxInstance, quarantine it. Do not reinterpret it as free capacity or automatically destroy it.
+
+PlanningOperation is deliberately absent from this Sandbox holder list in v1. If future planning gains a Sandbox, recovery gains the matching concrete holder edge/inventory rule rather than treating all control operations as implicit Sandbox owners.
 
 ### EvaluationOperation and EvaluationAttempt recovery
 
@@ -631,7 +679,9 @@ inventory Pantheon-owned executions for installation ID
 
 Inventory is optional for ordinary restart correctness when all durable Attempt records are intact, but it becomes highly valuable for disaster recovery and orphan detection.
 
-If a restored control-plane snapshot is older than external execution state and a backend cannot inventory Pantheon-owned work, Pantheon must conservatively block new execution on that backend until an operator resolves the ambiguity or isolation guarantees prove duplicate execution impossible.
+Planner backends/adapters should likewise preserve the strongest feasible correlation/inspection contract for a known PlanningAttempt ID/attachment. A provider may expose native idempotency or request lookup; another may only support conservative observation. Pantheon does not claim keyed idempotency when the external mechanism lacks it.
+
+If a restored control-plane snapshot is older than external execution state and a backend cannot inventory/correlate Pantheon-owned work, Pantheon must conservatively block conflicting new execution on that backend/domain until an operator resolves the ambiguity or isolation guarantees prove duplicate execution impossible.
 
 SandboxBackend similarly reconciles by the durable SandboxKey and may inventory Pantheon-owned runtime objects by installation identity. Inventory does not become ownership authority: a matching durable SandboxInstance and valid holder relationship remain required.
 
@@ -657,6 +707,8 @@ holder missing / inconsistent
 
 For Sandbox capacity, an unresolved SandboxInstance is independent evidence that capacity may still be occupied. A Run/EvaluationOperation becoming terminal does not by itself release that capacity; Sandbox absence/release must be established according to its own lifecycle.
 
+For PlanningOperation control-operation capacity, an unresolved PlanningAttempt independently means the external planner work may still be using/charging the reserved resource. The reservation remains charged/UNCERTAIN until the planning lineage is reconciled or explicitly resolved.
+
 Missing ownership evidence is never interpreted as free capacity.
 
 Capacity publishers may refresh `allocatable`, but existing reservations remain accounting authority until safe release is proven.
@@ -670,13 +722,15 @@ On restart:
 - replay/ingest backend usage using stable operation/source IDs;
 - de-duplicate previously processed usage;
 - convert confirmed held quantity to consumed quantity;
-- never reduce consumed usage because an Attempt failed;
-- keep unused hold headroom reserved while external execution is UNKNOWN;
+- never reduce consumed usage because an Attempt/control-operation attempt failed;
+- keep unused hold headroom reserved while external execution/contact is UNKNOWN;
 - settle/release only the provably unused remainder when Run/control work is finalized.
 
 If external billing/allowance state is authoritative, refresh the external snapshot and record freshness before relying on new headroom.
 
 If actual external usage exceeds a Pantheon limit, record the true usage and mark the budget overdrawn; do not clamp history to the configured ceiling.
+
+PlanningOperation backend-authored usage is accepted only under the immutable metering-source provenance frozen before PlanningAttempt contact. A missing Planner response does not prove zero usage; UNKNOWN contact retains/fences unresolved hold headroom conservatively.
 
 During disaster restore, restored negative contact/usage observations are not assumed to describe the post-snapshot interval. Usage remains factual and may arrive late under immutable source provenance even while worker/control authority from the old generation is fenced.
 
@@ -826,6 +880,8 @@ If a worker had mutable output but no Candidate was durably committed before the
 
 After disaster restore, a still-running worker from the pre-restore history cannot use an old-generation AgentControlSession to submit that missing Candidate. Its external process may be reconciled/finalized, but worker semantic authority remains fenced unless a separately defined recovery protocol creates new current authority.
 
+PlanningRecord recovery is separate from Candidate/Acceptance: a recovered Planner result is immutable planning provenance and may be retained even when its proposed GraphPatch is stale. It never becomes a Candidate or bypasses Graph Controller validation.
+
 ## 20. Logical invariant scanner
 
 External reconciliation is not enough. Pantheon also scans durable relational invariants.
@@ -844,6 +900,14 @@ Attempt nonterminal
 
 AgentControlSession accepted for semantic request
 → session RestoreGeneration must equal current RestoreGeneration
+
+PlanningAttempt nonterminal
+→ parent PlanningOperation must exist and no sibling PlanningAttempt is nonterminal
+→ external metering provenance, when present, must match the immutable PlanningOperation
+
+PlanningRecord
+→ parent PlanningOperation exists
+→ external attempt reference, when present, belongs to that operation
 
 EvaluationAttempt nonterminal
 → parent EvaluationOperation must exist and no sibling EvaluationAttempt is nonterminal
@@ -921,6 +985,7 @@ Examples:
 - rebuild disposable in-memory queue;
 - refresh a derived condition;
 - reattach a known Attempt using the same LaunchKey on ordinary uninterrupted history;
+- resume/reconcile a known PlanningAttempt by the same durable attempt identity when external correlation makes that safe;
 - re-inspect a known Sandbox by the same SandboxKey and durable holder;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
@@ -930,7 +995,7 @@ Examples:
 
 Inspect external state before deciding, for example:
 
-- uncertain executor/evaluator launch/termination;
+- uncertain executor/evaluator/planner external contact/termination/result;
 - restored negative launch/contact state that cannot establish the post-snapshot interval;
 - pre-restore worker execution whose Agent Control session is old-generation;
 - Sandbox existence/cleanup UNKNOWN for a Run or EvaluationOperation;
@@ -944,6 +1009,7 @@ Examples:
 
 - active Task with missing immutable Run identity;
 - nonterminal Run missing immutable ExecutionBinding;
+- nonterminal PlanningAttempt whose parent PlanningOperation/meters cannot be established;
 - non-RELEASED Sandbox with missing/inconsistent holder;
 - runtime Sandbox discovered with no corresponding durable SandboxInstance ownership record;
 - reservation whose holder disappeared from authoritative state;
@@ -964,6 +1030,10 @@ Examples:
 ```text
 one backend unavailable
 → block/reroute new work requiring that backend only
+
+one PlanningAttempt UNKNOWN
+→ fence that PlanningOperation and retain its accounting authority
+→ unrelated planning/work may continue if resource/budget/authority boundaries remain safe
 
 one verification Sandbox UNKNOWN
 → fence that EvaluationOperation and retain its capacity
@@ -1097,10 +1167,11 @@ DO NOT redeem restored Grants/Tickets
 DO NOT execute restored pending broker operations
 DO NOT accept an old command epoch as a new command
 DO NOT accept semantic Agent Control from restored old-generation sessions
+DO NOT blindly resend restored PlanningAttempts whose post-snapshot outcome is unknown
 DO NOT treat restored negative observations as proof that later external effects never happened
 ```
 
-External executors, Sandboxes, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
+External executors, Planner/evaluator calls, Sandboxes, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
 
 Restore recovery therefore:
 
@@ -1114,8 +1185,8 @@ Restore recovery therefore:
 8. treats every restored old-generation broker operation as reconciliation-only: inspect by the original stable identity where possible, never reissue merely because restored SQLite says `PENDING`/incomplete;
 9. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
 10. rejects semantic Agent Control from any session whose immutable session RestoreGeneration differs from current **before** `agent_requests` lookup/creation; the external Attempt may still be inspected/terminated/reconciled by controllers;
-11. inventories every external domain capable of containing Pantheon-owned state, including Run- and EvaluationOperation-owned Sandboxes, and reconciles/fences effects newer than or absent from the restored database;
-12. treats snapshot-only `NOT_CONTACTED`, `ABSENT`, row absence and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
+11. inventories/reconciles every external domain capable of containing Pantheon-owned state, including known PlanningAttempt correlations and Run-/EvaluationOperation-owned Sandboxes, and fences effects newer than or absent from the restored database;
+12. treats snapshot-only PlanningAttempt/Attempt/EvaluationAttempt `NOT_CONTACTED`, `ABSENT`, missing result rows and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
 13. requires operator action for un-inventoriable ambiguous domains/operations;
 14. opens normal mutation/dispatch only after the recovery barrier is satisfied.
 
@@ -1201,7 +1272,7 @@ Recommended sequence:
 ```text
 close dispatch gate
         ↓
-stop creating new Attempts/external work
+stop creating new Attempts/control-operation external work
         ↓
 persist final controller observations possible within shutdown policy
         ↓
@@ -1212,11 +1283,11 @@ record best-effort incarnation stoppedAt as final durable daemon step
 release installation lock
 ```
 
-Clean daemon shutdown does not inherently mean cancelling every external Attempt. Backend execution lifetime is independent where the backend supports that behavior.
+Clean daemon shutdown does not inherently mean cancelling every external Attempt/PlanningAttempt. External lifetime is independent where the backend supports that behavior.
 
 Explicit `cancel work` and `stop daemon` are different user intents.
 
-A backend whose native execution necessarily dies with the daemon will simply be reconciled as EXITED on the next start.
+A backend whose native execution necessarily dies with the daemon will simply be reconciled as EXITED/failed on the next start according to its domain contract.
 
 ## 29. Crash/fault-injection testing is required
 
@@ -1228,12 +1299,14 @@ The v1 test plan must inject process termination/crash boundaries around at leas
 Run-intent transaction commit
 Attempt creation before ensureExecution
 backend ensure after external start before acknowledgement
+PlanningOperation/PlanningAttempt creation before external Planner contact
+PlanningAttempt contact marker before/after external Planner request acknowledgement/result
 verification Sandbox intent before/after SandboxBackend ensure
 EvaluationAttempt creation/contact marker before/after evaluator launch
 usage ingestion before/after budget debit
 candidate Artifact durable put before/after SQLite metadata
 Task candidate commit before lifecycle transition
-executor/evaluator termination before reservation release
+executor/planner/evaluator termination or result certainty before reservation release
 Sandbox release before reservation release
 workspace remove before reservation release
 integration commit-object creation before CAS ref update
@@ -1251,6 +1324,7 @@ old-generation CapabilityTicket cannot redeem
 restored PENDING broker operation cannot execute again without reconciliation proof
 old commandEpoch + commandId cannot become a new command when its row is absent
 old-generation AgentControlSession cannot create/replay agent_requests or submit/spawn/invoke
+restored PlanningAttempt NOT_CONTACTED/missing PlanningRecord does not authorize resend until fresh domain reconciliation establishes absence
 restored NOT_CONTACTED/ABSENT snapshot facts do not authorize replacement work until fresh domain reconciliation proves current absence
 fresh RestoreGeneration is different from every value recovered from the snapshot
 Run- and EvaluationOperation-owned Sandboxes are inventoried/reconciled by durable SandboxKey+holder
@@ -1261,11 +1335,13 @@ For each crash point, restart Pantheon and assert that the resulting state is eq
 Property/invariant tests should continuously assert:
 
 - no duplicate active Attempt created under UNKNOWN execution;
+- no overlapping PlanningAttempt under ambiguous external planning contact;
 - no overlapping EvaluationAttempt under ambiguous evaluation contact;
 - no overlapping current Sandbox for one Run/EvaluationOperation holder;
 - no non-RELEASED Sandbox without exactly one valid durable holder;
 - no released reservation while external use/Sandbox existence is uncertain;
 - no BudgetHold double-debit from replayed usage;
+- no PlanningRecord treated as Graph authority without current revision/precondition validation;
 - no acceptance against corrupt/mismatched Artifact bytes;
 - no shared Git ref overwrite after stale CAS expectation;
 - no Active Task without exactly one responsible nonterminal Run in valid state;
@@ -1316,7 +1392,7 @@ Storage / Installation Authority validation
         ↓
 RestoreGeneration T0 fence / matching RecoveryPass (restore mode only)
         ↓
-Run ControlLease adoption + EvaluationOperation intent inventory
+Run ControlLease adoption + PlanningOperation/EvaluationOperation intent inventory
         ↓
 Authorization / broker-operation / Agent Control generation reconciliation
         ↓
@@ -1324,20 +1400,20 @@ Workspace/materialization ownership reconciliation
         ↓
 Sandbox holder + SandboxKey reconciliation
         ↓
-Run Attempt + EvaluationAttempt external-execution reconciliation
+Run Attempt + PlanningAttempt + EvaluationAttempt external-execution/contact reconciliation
         ↓
 Resource + Budget accounting reconciliation
         ↓
-Artifact / Candidate / Evidence availability
+Artifact / Candidate / Evidence / PlanningRecord availability
         ↓
 Integration reconciliation
         ↓
-Task / Goal lifecycle reconciliation
+Task / Goal lifecycle + planning/graph reconciliation
         ↓
 Scheduler dispatch gate
 ```
 
-This is a dependency graph, not a requirement that every controller execute serially. In particular, execution inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result.
+This is a dependency graph, not a requirement that every controller execute serially. In particular, execution/contact inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result, and a new external PlanningAttempt waits for prior PlanningAttempt certainty/accounting fences.
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
@@ -1358,7 +1434,8 @@ Include:
 - recovery barrier based on reconciled/fenced/quarantined obligations;
 - periodic safety reconciliation using normal controller code;
 - finalization obligations for cleanup safety;
-- Run/Attempt and EvaluationOperation/EvaluationAttempt recovery;
+- Run/Attempt, PlanningOperation/PlanningAttempt and EvaluationOperation/EvaluationAttempt recovery;
+- immutable PlanningRecord recovery with independent GraphRevision/GoalRevision revalidation before materialization;
 - holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey;
 - restore-specific rule that snapshot-only negative observations are not current post-snapshot proof of absence;
 - authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
@@ -1376,6 +1453,7 @@ Defer:
 - automated database page-level salvage;
 - cross-machine CAS replication protocol;
 - live migration of running Attempts;
+- arbitrary executable/Sandbox-capable Planner authority without an explicit future holder/security design;
 - automatic same-Attempt Agent Control credential rotation after disaster restore;
 - global transaction protocol across external systems.
 
@@ -1392,25 +1470,26 @@ Defer:
 9. **Cleanup uses durable finalization obligations; ownership/capacity records are not erased until required cleanup is confirmed.**
 10. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
 11. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
-12. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
-13. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
-14. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
-15. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
-16. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
-17. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
-18. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
-19. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
-20. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
-21. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-22. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
-23. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
-24. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
-25. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
-26. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
-27. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
-28. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
-29. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
-30. **Clean daemon shutdown and cancellation of external work are separate intents.**
-31. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
-32. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-33. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
+12. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
+13. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
+14. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
+15. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
+16. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
+17. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
+18. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
+19. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
+20. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
+21. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
+22. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
+23. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
+24. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
+25. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
+26. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+27. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+28. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+29. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
+30. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
+31. **Clean daemon shutdown and cancellation of external work are separate intents.**
+32. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
+33. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+34. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
