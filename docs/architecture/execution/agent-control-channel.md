@@ -348,10 +348,11 @@ action.invoke
 artifact.seal
 
 task.spawn
-task.graph.propose
 
 task.submit_result
 ```
+
+`task.graph.propose` is reserved post-v1 vocabulary. No v1 `AgentControlSession` may invoke it, and a backend must not expose it as though it were part of the v1 worker contract. Multi-node structural graph planning uses `PlanningOperation -> PlanningRecord -> GraphPatch` instead.
 
 Optional non-authoritative progress reporting may be added without expanding authority.
 
@@ -484,9 +485,9 @@ Workspace-derived source capture follows the root-confined/no-follow rules in `d
 
 Pantheon computes/verifies all digests itself and follows the Artifact/CAS durability protocol.
 
-## 17. `task.spawn` and `task.graph.propose`
+## 17. `task.spawn`
 
-The worker supplies desired bounded outcomes, declared inputs/outputs, relationship semantics, reason, and request identity.
+The v1 worker may supply one bounded child outcome, declared inputs/outputs, blocking relationship semantics, reason, and request identity through `task.spawn`.
 
 Pantheon derives:
 
@@ -498,7 +499,9 @@ Pantheon derives:
 
 Caller-supplied parent identity is never authoritative.
 
-The Graph Controller remains the only component that materializes Tasks or mutates TaskGraph state.
+The Graph Controller remains the only component that materializes Tasks or mutates TaskGraph state. V1 `task.spawn` follows the blocking/yielding protocol in `docs/architecture/tasks/task-spawn-and-dynamic-graphs.md`.
+
+`task.graph.propose` is not a v1 Agent Control operation. Reserved future worker/coordinator semantics must not be inferred from `task.spawn` or from the Planner path.
 
 ## 18. `task.submit_result`
 
@@ -559,19 +562,18 @@ The Sandbox Broker/Controller owns the concrete enforcement mechanism.
 
 Agent Control semantics are normalized execution features, not backend identities.
 
-Examples:
+V1 examples:
 
 ```text
 control.result-submit
 control.artifact-seal
 control.action-invoke
 control.task-spawn
-control.graph-propose
 ```
 
-A Task/Agent-specific ExecutionRequest may require those features.
+`control.graph-propose` is reserved post-v1 and is not a v1 ExecutionRequest requirement. A Task/Agent-specific ExecutionRequest may require only features for worker operations the v1 Agent Control surface actually exposes.
 
-A backend can satisfy them through any adapter-private mechanism.
+A backend can satisfy those features through any adapter-private mechanism.
 
 A backend that cannot provide a required Agent Control semantic is incompatible with that request.
 
@@ -691,12 +693,13 @@ Credential material is never logged.
 15. **Every consequential worker request is Attempt-scoped and idempotent after the session-generation fence passes.**
 16. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
 17. **Spawn/result/action identity is server-derived from the Attempt.**
-18. **`artifact.seal` resolves Workspace sources only through trusted-root, root-confined, no-follow capture; caller paths and filesystem indirection never become ambient host-read authority.**
-19. **Candidate submission is revision-bound and cancellation wins races.**
-20. **New Attempt means new AgentControlSession; ordinary restart reconciliation preserves the same session identity and may use only the bounded pre-contact rekey protocol, while disaster restore fences old-generation semantic Agent Control.**
-21. **Same-user native shell execution is not treated as strong isolation.**
-22. **Required control-plane isolation failures fail closed.**
-23. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
+18. **V1 runtime graph discovery is only bounded blocking `task.spawn`; `task.graph.propose`/`control.graph-propose` are reserved post-v1 vocabulary and confer no v1 worker authority.**
+19. **`artifact.seal` resolves Workspace sources only through trusted-root, root-confined, no-follow capture; caller paths and filesystem indirection never become ambient host-read authority.**
+20. **Candidate submission is revision-bound and cancellation wins races.**
+21. **New Attempt means new AgentControlSession; ordinary restart reconciliation preserves the same session identity and may use only the bounded pre-contact rekey protocol, while disaster restore fences old-generation semantic Agent Control.**
+22. **Same-user native shell execution is not treated as strong isolation.**
+23. **Required control-plane isolation failures fail closed.**
+24. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
 
 ## v1 scope
 
@@ -710,16 +713,16 @@ Include:
 - transport-neutral worker-operation semantics;
 - `action.invoke`;
 - `artifact.seal` with root-confined/no-follow Workspace source capture;
-- `task.spawn`;
-- `task.graph.propose` where policy allows;
+- bounded blocking `task.spawn`;
 - `task.submit_result`;
 - durable Agent request idempotency;
 - strict candidate-submission preconditions;
 - control-plane isolation requirement;
-- execution-feature advertisement for Agent Control semantics.
+- execution-feature advertisement only for v1 Agent Control semantics.
 
 Defer:
 
+- `task.graph.propose` / `control.graph-propose` worker/coordinator authority and its lifecycle/recovery semantics;
 - remote public Agent Control listener;
 - mTLS/SPIFFE workload identity;
 - distributed Agent Control gateway;

@@ -19,17 +19,19 @@ See also:
 
 ## Authority
 
-Normal worker capability:
+Normal v1 worker capability:
 
 ```text
 task.spawn
 ```
 
-Planner/coordinator capability where explicitly granted:
+Reserved post-v1 worker/coordinator vocabulary:
 
 ```text
 task.graph.propose
 ```
+
+No v1 `AgentControlSession` is authorized to invoke `task.graph.propose`. Multi-node structural graph proposals in v1 enter through the PlanningOperation/PlanningRecord/GraphPatch path defined by the Planner architecture, not through a worker control verb.
 
 The worker does not choose child Agent, provider/model/backend, Sandbox or physical concurrency.
 
@@ -39,7 +41,7 @@ Spawn request arrives through Attempt-authenticated Agent Control. Pantheon deri
 
 V1 implements **blocking spawn only**.
 
-Architecture reserves future joined/detached relationships, but they are implementation-deferred because they require additional lifetime/join-point semantics. They are not part of the v1 behavior contract.
+Architecture reserves future joined/detached relationships and `task.graph.propose`, but they are implementation-deferred because they require additional lifetime/join-point/authority semantics. They are not part of the v1 behavior contract.
 
 Blocking means the parent cannot usefully continue until the accepted child result exists.
 
@@ -246,8 +248,10 @@ Provenance does not imply that every parent-child relation is a success dependen
 2. Parent identity is server-derived from Attempt Agent Control, never caller-asserted.
 3. Spawn is exact-idempotent and graph mutation is transactional.
 4. V1 dynamic spawn is blocking only and always yields the old Run rather than suspending it.
-5. Task enters Waiting only after yielded Run is safely terminal and Run-scoped capacity is released.
-6. Child result enters parent continuation only as accepted immutable Artifact binding.
-7. Join satisfaction returns Task Ready; only Scheduler creates the new Run.
-8. Descendants inherit ceilings, never privileges or raw credentials.
-9. Joined/detached/semantic dedup/quorum joins are post-v1.
+5. V1 exposes `task.spawn` as the runtime worker graph-discovery operation; `task.graph.propose` is reserved post-v1 vocabulary and has no v1 Agent Control authority.
+6. Multi-node structural graph planning in v1 enters through PlanningOperation -> PlanningRecord -> GraphPatch, not through a worker control verb.
+7. Task enters Waiting only after yielded Run is safely terminal and Run-scoped capacity is released.
+8. Child result enters parent continuation only as accepted immutable Artifact binding.
+9. Join satisfaction returns Task Ready; only Scheduler creates the new Run.
+10. Descendants inherit ceilings, never privileges or raw credentials.
+11. Joined/detached/semantic dedup/quorum joins are post-v1.

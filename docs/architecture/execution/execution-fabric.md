@@ -115,17 +115,18 @@ It contains no provider/model allowlist in core.
 
 ## Agent Control execution features
 
-Runtime Agent interaction is expressed as abstract execution features, for example:
+Runtime Agent interaction is expressed as abstract execution features. The v1 set includes, for example:
 
 ```text
 control.result-submit
 control.artifact-seal
 control.action-invoke
 control.task-spawn
-control.graph-propose
 ```
 
-A backend may implement these through native structured tools, a private bridge, function calls or another adapter-private mechanism. Core cares only that the required semantic feature exists.
+`control.graph-propose` is reserved post-v1 vocabulary and is not a v1 ExecutionRequest requirement or backend-selection feature. No v1 AgentControlSession has the corresponding `task.graph.propose` authority. Multi-node structural planning uses the PlanningOperation/PlanningRecord/GraphPatch control-plane path instead.
+
+A backend may implement v1 Agent Control features through native structured tools, a private bridge, function calls or another adapter-private mechanism. Core cares only that the required semantic feature exists.
 
 ## ExecutionOffer
 
@@ -296,5 +297,5 @@ for semantic business logic is an architecture violation. Concrete-specific beha
 8. Launch semantics are explicit `KEYED_IDEMPOTENT|OBSERVATIONAL`; unsafe observational offers are filtered before Run commitment.
 9. Attempt/LaunchKey/contact marker, not adapter memory, are durable launch truth.
 10. Sandbox guarantees are controller-validated, not backend self-authorization.
-11. Agent Control features are semantic execution features independent of transport/harness.
+11. V1 Agent Control execution features cover only operations exposed by the v1 worker surface; `control.graph-propose` is reserved post-v1 and cannot affect v1 routing/admission.
 12. Backend usage is validated/namespaced against immutable Attempt ExecutionBinding ownership or immutable control-operation metering-source ownership; metering provenance never reclassifies a control operation as a Run.

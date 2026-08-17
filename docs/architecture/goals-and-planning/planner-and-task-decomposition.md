@@ -252,7 +252,21 @@ The immutable PlanningOperation input identity must be sufficient to determine w
 
 ## Dynamic spawn relationship
 
-Normal workers use `task.spawn` for one bounded blocking child where required. Planner/coordinator may propose multi-node GraphPatch structure through its Planner result, but the external Planner backend itself does not receive worker `task.graph.propose` authority in v1.
+Normal workers use `task.spawn` for one bounded blocking child where required. Multi-node structural graph proposals in v1 enter only through the Planner result path:
+
+```text
+PlanningOperation
+        ↓
+PlanningAttempt when external
+        ↓
+PlanningRecord
+        ↓
+Graph Controller
+        ↓
+GraphPatch
+```
+
+The external Planner backend itself does not receive worker `task.graph.propose` authority in v1. `task.graph.propose` is reserved post-v1 worker/coordinator vocabulary and is not an alias or alternate transport for a PlanningOperation. If a future executing coordinator receives that worker verb, its lifecycle, yield/join behavior, authority and recovery semantics require a separate explicit architecture correction.
 
 In v1, runtime worker spawn is blocking/yielding only. Joined/detached/semantic-dedup/autonomous graph optimization are deferred.
 
@@ -276,7 +290,8 @@ A late successful response may create immutable historical PlanningRecord proven
 6. Backend-authored planning usage is accepted only under immutable PlanningOperation metering-source provenance frozen before contact.
 7. External Planner output has zero direct Graph authority; Goal/Graph/policy preconditions are re-read before GraphPatch materialization.
 8. V1 external Planner invocation receives no normal AgentControlSession/worker operation authority by default.
-9. V1 planning is DIRECT or SHALLOW; progressive autonomous planning is deferred.
-10. Replanning is event-driven and patch-based; immutable Task history is preserved.
-11. Runtime dynamic discovery uses bounded blocking spawn rather than unrestricted self-expanding planning.
-12. Planner output is structured/auditable without storing hidden chain-of-thought.
+9. V1 multi-node structural graph planning enters through PlanningOperation -> PlanningRecord -> GraphPatch; `task.graph.propose` is reserved post-v1 and is not an alternate v1 planning path.
+10. V1 planning is DIRECT or SHALLOW; progressive autonomous planning is deferred.
+11. Replanning is event-driven and patch-based; immutable Task history is preserved.
+12. Runtime dynamic discovery uses bounded blocking spawn rather than unrestricted self-expanding planning.
+13. Planner output is structured/auditable without storing hidden chain-of-thought.
