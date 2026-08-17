@@ -1,0 +1,289 @@
+name: Bootstrap v0.1.0 Metadata
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  bootstrap:
+    if: github.repository == 'katzimoto/Pantheon' && github.head_ref == 'ops/bootstrap-v0.1.0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create v0.1.0 Milestone and changelog labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repo = os.environ["REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          api = f"https://api.github.com/repos/{repo}"
+
+          description = r'''## Release outcome
+
+          From the Pantheon CLI, a user can submit one local coding Goal against a repository and Pantheon can durably turn it into one bounded Task, select a configured logical Agent and compatible execution backend, execute it in an isolated local container workspace, independently verify the resulting candidate, recover safely across daemon restart without duplicate authority, and report an accepted code changeset.
+
+          ## Product proof
+
+          A release candidate must demonstrate this complete path on the supported release platform:
+
+          ```text
+          fresh local Pantheon installation
+            ↓
+          start pantheond
+            ↓
+          create a coding Goal from the CLI against a local repository
+            ↓
+          persist Goal + DIRECT planning operation/record
+            ↓
+          materialize one Task and make it Ready
+            ↓
+          resolve one logical Agent and compatible execution offer
+            ↓
+          create immutable execution binding, Run, Attempt and launch identity
+            ↓
+          execute the coding work inside the supported container isolation profile
+            ↓
+          seal the resulting code changeset and submit a CandidateResult
+            ↓
+          independently execute the registered deterministic verification check
+            ↓
+          accept the Task and complete the Goal
+            ↓
+          CLI reports success and exposes the accepted changeset
+          ```
+
+          The same lineage must remain safe when `pantheond` is deliberately terminated and restarted at the release-critical persistence, launch, candidate-submission, evaluation and finalization boundaries: recovery may continue or fence uncertain work, but must not blindly create duplicate authority or duplicate execution.
+
+          ## Primary user workflow
+
+          1. The user starts `pantheond` locally.
+          2. The user creates a coding Goal through the `pantheon` CLI, providing a repository input and bounded objective.
+          3. Pantheon durably DIRECT-plans that Goal into one Task.
+          4. Pantheon schedules the Task, resolves one logical Agent, selects one compatible backend offer and records an immutable binding.
+          5. Pantheon prepares an isolated task-owned workspace/container and launches one Attempt through the backend abstraction.
+          6. The Agent edits the workspace and submits a sealed candidate changeset through Agent Control.
+          7. Pantheon independently runs the registered deterministic acceptance check in a verification sandbox.
+          8. On PASS, Pantheon accepts the Task, binds the deliverable, completes the Goal and reports the accepted changeset through Operator Control/CLI.
+          9. The user may inspect/apply the changeset; Pantheon does not automatically merge, push or deploy it in this version.
+
+          ## Included capabilities
+
+          - One authoritative local SQLite control-plane database with migrations, serialized authoritative writes, revision/CAS discipline, installation RestoreGeneration and the minimum durable schema needed by this vertical slice.
+          - Durable command identity/idempotency and append-only Event Journal behavior for authoritative mutations used by the MVP.
+          - `pantheond` as the only control-plane authority, exposing the minimum local UDS HTTP Operator API required by the CLI.
+          - CLI support for system inspection plus creating, reading, listing, watching and cancelling Goals needed by the product proof.
+          - One active immutable configuration revision sufficient to define the MVP Agent registry, backend, sandbox profile, evaluator registry and basic policy.
+          - Deterministic DIRECT planning from one coding Goal to one bounded TaskGraph containing one Task.
+          - The real Task lifecycle and failure/cancellation paths needed by the product proof; no temporary MVP-only lifecycle semantics.
+          - A minimal deterministic scheduler with a deliberate single active execution slot.
+          - One logical coding Agent defined by semantic competencies rather than provider/model identity.
+          - Provider-neutral ExecutionRequest/Offer/Binding/Run/Attempt semantics with one real credential-free local executor backend and one fake backend for deterministic tests.
+          - Strict local container isolation for model-controlled arbitrary shell/process execution, with task-owned workspace state and no direct reach to Pantheon control-plane authority or host credential/control sockets.
+          - Task-owned workspace handling, immutable WorkspaceRevision capture, Artifact CAS support needed by the slice, and an accepted `code.changeset` deliverable.
+          - Minimum Agent Control capabilities required to seal artifacts and submit the candidate result.
+          - Independent deterministic `check` evaluation in a fresh verification sandbox, immutable Evidence, Task finalization and structural Goal completion.
+          - Recovery/reconciliation sufficient to preserve the same authoritative execution lineage across daemon restart at release-critical boundaries.
+
+          ## Explicitly deferred
+
+          - SHALLOW or progressive multi-task AI planning.
+          - Dynamic `task.spawn` and graph-proposal control features.
+          - Multiple concurrently executing Agents or general multi-resource scheduling/fairness.
+          - Agent Genome learning, memory/learning history or adaptive model quality routing.
+          - Multiple production execution backends, provider/model optimization and remote credentialed model providers.
+          - SecretProvider/credential brokering, credential rotation/recovery, temporary grants and approval workflows.
+          - HARDENED VM/microVM isolation and adversarial malware/CTF execution profiles.
+          - Remote/TCP Operator Control, multi-user authority and distributed workers.
+          - Web UI, Kubernetes/fleet orchestration or plugin marketplace behavior.
+          - Automatic Git merge/push, deployment or other integration effects after candidate acceptance.
+          - Model-judge/rubric/quorum evaluators and human-evaluator workflow.
+          - Backup/restore UI and full disaster-restore product workflow beyond the persistence/recovery semantics strictly needed by the MVP.
+          - Automatic release publication, binary signing/attestation and package distribution until Pantheon has release artifacts worth publishing.
+
+          ## Supported envelope
+
+          ### Platform
+
+          - Release-gated execution platform: local single-user Linux x86_64 host.
+          - macOS arm64 remains a portability target for the Rust workspace/control-plane code but is not claimed as an end-to-end container-execution release platform unless the final product proof is explicitly exercised there.
+          - No Windows support claim in v0.1.0.
+
+          ### Execution
+
+          - Exactly one production local executor-backend implementation behind the provider-neutral Execution Fabric, plus a fake backend for tests.
+          - The production reference profile is credential-free and local; concrete model/runtime/harness identity remains adapter-private rather than entering Pantheon core semantics.
+          - Model-controlled arbitrary process/shell work runs only in the supported strict local CONTAINER isolation profile.
+          - Maximum concurrent execution Runs: 1.
+
+          ### Workloads
+
+          - One bounded local coding task against a repository/workspace.
+          - Primary output is an inspectable `code.changeset` candidate plus deterministic verification evidence.
+          - General research, CTF, multi-agent workflows and arbitrary integration/deployment tasks are outside this release envelope.
+
+          ### Interfaces
+
+          - Local `pantheond` daemon.
+          - Local HTTP/1.1 + JSON Operator API over Unix-domain socket under `/api/v1` for the endpoints required by this slice.
+          - `pantheon` CLI as the supported user interface for the product proof.
+
+          ## Safety and correctness properties
+
+          - The CLI, UI-equivalent callers and executor processes never open or mutate Pantheon's authoritative SQLite database directly; all authority flows through `pantheond` Operator Control.
+          - Authoritative state transitions used by the MVP are durable, revision-checked and commit their required Event Journal observation atomically with state.
+          - Same-epoch command retries are idempotent; command identity cannot be replayed across a rotated RestoreGeneration.
+          - At most one nonterminal responsible Run exists for the Task, and recovery cannot manufacture a second authoritative lineage after restart.
+          - External executor contact occurs only after durable Attempt/LaunchKey identity exists; ambiguous observational state is fenced/UNKNOWN rather than treated as absent.
+          - Model-controlled execution cannot directly reach the Operator socket, state database, raw config/policy/secret stores, host credential agents, Docker socket, peer workspaces or shared authoritative Git refs.
+          - Worker-submitted CandidateResults are never self-accepting; success requires independent deterministic verification against the exact immutable candidate subject.
+          - Task/Goal terminal states are never reopened, and Task success is not inferred merely from worker/run completion.
+          - Accepted deliverables are immutable and provenance-bound strongly enough for the product proof to identify exactly what was verified and accepted.
+
+          ## Architecture entry points
+
+          - `docs/architecture/overview.md`
+          - `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
+          - `docs/architecture/goals-and-planning/goal-resource.md`
+          - `docs/architecture/goals-and-planning/planner-and-task-decomposition.md`
+          - `docs/architecture/tasks/task-object.md`
+          - `docs/architecture/tasks/task-lifecycle.md`
+          - `docs/architecture/execution/execution-fabric.md`
+          - `docs/architecture/execution/agent-control-channel.md`
+          - `docs/architecture/security/sandbox-broker-and-isolation.md`
+          - `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md`
+          - `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
+          - `docs/architecture/operations/public-daemon-api-and-cli.md`
+
+          ## Integration checkpoints
+
+          ### Durable operator-control checkpoint
+
+          Must demonstrate a fresh installation can start `pantheond`, create/read/list a Goal through CLI → UDS Operator API → engine/store, survive daemon restart, and preserve command/event/state identity without any CLI database access.
+
+          Required before execution/scheduling work is considered integrated.
+
+          ### Authoritative execution-lineage checkpoint
+
+          Must demonstrate Goal → DIRECT plan → Task → scheduling claim → Run → Attempt → sandbox/backend launch as one durable lineage using the fake backend, including restart reconciliation before external execution is considered production-ready.
+
+          Required before the real executor backend is accepted into the MVP path.
+
+          ### Candidate-to-acceptance checkpoint
+
+          Must demonstrate workspace changeset capture → CandidateResult submission → fresh verification sandbox → deterministic Evidence → Task finalization → Goal completion, without relying on worker self-report as acceptance.
+
+          Required before the final real-backend product proof.
+
+          ### Recovery product checkpoint
+
+          Must run the complete product proof with deliberate daemon termination/restart around the critical authoritative and external-effect boundaries and show continuation, reconciliation or safe fencing of the same lineage without duplicate execution authority.
+
+          Required for release.
+
+          ## Release gate
+
+          - [ ] Every Engineering Mission assigned to this Milestone that is required for release is complete.
+          - [ ] Every assigned Engineering Mission has exactly one `changelog:*` classification, including explicit `changelog:none` for intentionally internal work.
+          - [ ] Canonical repository verification passes from the final integrated tree.
+          - [ ] The Product Proof succeeds end to end on the claimed release execution platform using the real local executor backend.
+          - [ ] The durable operator-control, authoritative execution-lineage, candidate-to-acceptance and recovery integration checkpoints all pass on the final integrated tree.
+          - [ ] Deliberate daemon-kill/restart tests at the Goal/Task/Run/Attempt/Candidate/evaluation/finalization critical boundaries demonstrate no duplicate authoritative execution.
+          - [ ] Container-isolation tests demonstrate the model-controlled executor cannot reach Pantheon authority surfaces or prohibited host control/credential sockets.
+          - [ ] The accepted result is an inspectable immutable `code.changeset`; the release path does not automatically merge, push or deploy it.
+          - [ ] Supported-envelope behavior has been exercised for every platform/configuration actually claimed by this Milestone.
+          - [ ] No unresolved correctness, security, data-integrity or canonical-architecture blocker remains.
+          - [ ] Version-specific user/developer documentation accurately describes what v0.1.0 actually supports and defers.
+          - [ ] An independent integrated review finds no blocking issue.
+
+          ## Release evidence
+
+          At release time this Milestone must contain or link durable evidence for the final integrated revision: canonical verification, the full CLI-to-accepted-changeset product proof, the four integration checkpoints above, fault-injection/restart runs, isolation-boundary tests, supported-platform CI, generated Milestone-driven changelog/release-note candidate, independent integrated review, and any limitations consciously accepted inside the supported envelope.
+
+          Generic GitHub check state need not be copied into prose when the native check already records it; the release evidence should identify the runs/artifacts that prove the version-specific claims.
+
+          ## Known limitations
+
+          - v0.1.0 intentionally proves one bounded coding Goal and one execution slot; it is not a general multi-agent orchestration release yet.
+          - Only one production local executor backend is supported; backend diversity and quality/cost routing are deferred.
+          - The production execution profile is credential-free/local; remote secret-bearing provider execution is deferred.
+          - CONTAINER is the strongest supported model-controlled isolation class in this release; HARDENED VM/microVM execution is deferred.
+          - Accepted changes are delivered as an inspectable changeset and are not automatically integrated into shared Git state.
+          - Public Operator/API/config/database/artifact/agent-protocol compatibility is pre-1.0 and intentionally not stable beyond the guarantees explicitly required inside this release.
+
+          ## Compatibility
+
+          `v0.1.0` makes no long-term compatibility commitment for Operator API shapes, configuration format, SQLite schema, artifact metadata or Agent Control protocol. Those surfaces may change in later pre-1.0 releases when canonical architecture requires it. Within this release, persisted state and wire behavior used by the product proof must remain internally coherent across ordinary daemon restart; disaster restore and cross-version migration guarantees are not expanded beyond the canonical contracts implemented by the assigned Missions.
+
+          ## Completion
+
+          `v0.1.0 — MVP` is released only when every release-gating Mission is complete, the final integrated product proof and recovery/isolation gates pass against the exact release candidate revision, the accepted changelog/release-note candidate accurately reflects the completed Milestone Missions, and the release tag/artifact is created from that same accepted revision. Closing all Missions or seeing green component CI alone is not sufficient.
+          '''
+          description = "\n".join(line[10:] if line.startswith("          ") else line for line in description.splitlines()).strip()
+
+          labels = {
+              "changelog:added": ("0e8a16", "User-visible capability added."),
+              "changelog:changed": ("1d76db", "Existing user-visible behavior changed."),
+              "changelog:deprecated": ("fbca04", "User-visible behavior marked for future removal."),
+              "changelog:removed": ("b60205", "User-visible behavior removed."),
+              "changelog:fixed": ("5319e7", "User-visible defect fixed."),
+              "changelog:security": ("d93f0b", "User-visible security hardening or security fix."),
+              "changelog:none": ("ededed", "Intentionally omitted from user-facing release notes."),
+          }
+
+          def request(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  api + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      body = resp.read()
+                      return resp.status, json.loads(body) if body else None
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode(errors="replace")
+                  raise RuntimeError(f"GitHub API {method} {path} failed: {exc.code} {body}") from exc
+
+          _, milestones = request("GET", "/milestones?state=all&per_page=100")
+          matches = [m for m in milestones if m["title"] == "v0.1.0 — MVP"]
+          if len(matches) > 1:
+              raise RuntimeError("More than one v0.1.0 — MVP milestone already exists")
+          if matches:
+              milestone = matches[0]
+              request("PATCH", f"/milestones/{milestone['number']}", {"description": description, "state": "open"})
+              print(f"Updated milestone #{milestone['number']}")
+          else:
+              _, milestone = request("POST", "/milestones", {"title": "v0.1.0 — MVP", "description": description, "state": "open"})
+              print(f"Created milestone #{milestone['number']}")
+
+          for name, (color, label_description) in labels.items():
+              encoded = urllib.parse.quote(name, safe="")
+              try:
+                  request("GET", f"/labels/{encoded}")
+              except RuntimeError as exc:
+                  if "failed: 404" not in str(exc):
+                      raise
+                  request("POST", "/labels", {"name": name, "color": color, "description": label_description})
+                  print(f"Created label {name}")
+              else:
+                  request("PATCH", f"/labels/{encoded}", {"new_name": name, "color": color, "description": label_description})
+                  print(f"Reconciled label {name}")
+          PY
