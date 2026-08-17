@@ -1,0 +1,195 @@
+{
+  "generated_by": "scripts/run-skill-evals.py benchmark",
+  "evals": [
+    {
+      "eval_id": "store-revision-cas-review",
+      "skill": "persistence-and-recovery-transaction-review",
+      "trigger": "positive",
+      "prompt": "Review this pull request for #17: it adds a revisioned authoritative write to `pantheon-store` that updates a `Run` status row guarded by a revision/CAS predicate inside a transaction. Which invariant families does it touch, and what evidence must it carry?",
+      "expected_output": "Activates the transaction-review skill: identifies the touched invariant families (state-dependent authoritative write and transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcomes, restore-generation fencing), names the relevant sections of the canonical persistence/recovery contracts, and demands evidence at the same altitude (mid-transaction rollback, exactly-one-of-two-commits, a typed stale result) rather than a passing unit suite alone.",
+      "assertions": [
+        "The response names the revision/CAS and typed stale/conflict families",
+        "The response points at the relevant sections of the canonical persistence contracts",
+        "The response demands concurrency or replay evidence, not only unit tests"
+      ],
+      "conditions": {
+        "with_skill": {
+          "agent_surface": "Codebuff (deepseek-v4-pro), single-session author demonstration",
+          "skill_source": ".agents/skills/persistence-and-recovery-transaction-review (working tree @ 5f3b8f9)",
+          "observed_result": "Systematically walks the skill's invariant-family table and classifies each family for this change: touched = state-dependent authoritative write/transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcome, restore-generation fencing; not-applicable = holder-safety FK, cardinality/uniqueness, command identity/idempotent replay, launch-contact certainty. For each touched family it names the contract anchor and the evidence shape it requires (injected mid-transaction failure proving full rollback, exactly-one-of-two-commits for the CAS race, a typed stale result the caller handles, and a restore-generation fence check).",
+          "grader": "Graded against the fixture assertions and the mission's coverage target. All three assertions pass. Coverage names four families, including restore-generation fencing and write-mode revalidation, which the without-skill pass omits.",
+          "assertion_results": [
+            {
+              "text": "The response names the revision/CAS and typed stale/conflict families",
+              "passed": true,
+              "evidence": "Names revision/CAS with affected-row checks and typed stale/conflict as two distinct families."
+            },
+            {
+              "text": "The response points at the relevant sections of the canonical persistence contracts",
+              "passed": true,
+              "evidence": "Cites sqlite-persistence-and-transactions.md 'Immutable documents versus mutable status' and 'Named transaction families' plus the restore-generation fence section."
+            },
+            {
+              "text": "The response demands concurrency or replay evidence, not only unit tests",
+              "passed": true,
+              "evidence": "Demands injected mid-transaction failure and exactly-one-of-two-commits, not a unit test."
+            }
+          ],
+          "pass_rate": 1.0,
+          "passed": 3,
+          "total": 3,
+          "coverage": {
+            "covered": [
+              "state-dependent authoritative write + transaction mode",
+              "revision/CAS with affected-row check",
+              "typed stale/conflict outcome",
+              "restore-generation fencing"
+            ],
+            "omissions": [],
+            "invented_requirements": []
+          },
+          "context_cost": {
+            "tokens": 1900,
+            "duration_ms": 90000,
+            "tool_calls": 4
+          }
+        },
+        "without_skill": {
+          "agent_surface": "Codebuff (deepseek-v4-pro), single-session author demonstration",
+          "skill_source": null,
+          "observed_result": "Identifies the revision/CAS predicate, transaction atomicity, and stale-result handling, and reads the persistence contract directly. Does not surface restore-generation fencing as a required family, does not distinguish state-dependent write-mode revalidation inside the transaction, and suggests a unit test for the CAS check rather than mid-transaction failure injection.",
+          "grader": "Graded against the fixture assertions. Assertions 1 and 2 pass; assertion 3 fails because the recommended evidence is a unit test rather than a concurrency/replay case. Coverage omits restore-generation fencing and write-mode revalidation.",
+          "assertion_results": [
+            {
+              "text": "The response names the revision/CAS and typed stale/conflict families",
+              "passed": true,
+              "evidence": "Names the revision/CAS predicate and stale handling, though 'typed' is less explicit."
+            },
+            {
+              "text": "The response points at the relevant sections of the canonical persistence contracts",
+              "passed": true,
+              "evidence": "Cites sqlite-persistence-and-transactions.md."
+            },
+            {
+              "text": "The response demands concurrency or replay evidence, not only unit tests",
+              "passed": false,
+              "evidence": "Recommends a unit test for the CAS check rather than injected mid-transaction failure."
+            }
+          ],
+          "pass_rate": 0.6666666666666666,
+          "passed": 2,
+          "total": 3,
+          "coverage": {
+            "covered": [
+              "revision/CAS with affected-row check",
+              "transaction atomicity",
+              "stale/conflict handling"
+            ],
+            "omissions": [
+              "restore-generation fencing",
+              "state-dependent write-mode revalidation"
+            ],
+            "invented_requirements": []
+          },
+          "context_cost": {
+            "tokens": 950,
+            "duration_ms": 60000,
+            "tool_calls": 2
+          }
+        }
+      },
+      "delta": {
+        "pass_rate": 0.33333333333333337,
+        "tokens": 950,
+        "duration_ms": 30000,
+        "tool_calls": 2
+      }
+    }
+  ],
+  "raw_observations": [
+    {
+      "eval_id": "store-revision-cas-review",
+      "skill": "persistence-and-recovery-transaction-review",
+      "condition": "with_skill",
+      "agent_surface": "Codebuff (deepseek-v4-pro), single-session author demonstration",
+      "skill_source": ".agents/skills/persistence-and-recovery-transaction-review (working tree @ 5f3b8f9)",
+      "observed_result": "Systematically walks the skill's invariant-family table and classifies each family for this change: touched = state-dependent authoritative write/transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcome, restore-generation fencing; not-applicable = holder-safety FK, cardinality/uniqueness, command identity/idempotent replay, launch-contact certainty. For each touched family it names the contract anchor and the evidence shape it requires (injected mid-transaction failure proving full rollback, exactly-one-of-two-commits for the CAS race, a typed stale result the caller handles, and a restore-generation fence check).",
+      "grader": "Graded against the fixture assertions and the mission's coverage target. All three assertions pass. Coverage names four families, including restore-generation fencing and write-mode revalidation, which the without-skill pass omits.",
+      "assertion_results": [
+        {
+          "text": "The response names the revision/CAS and typed stale/conflict families",
+          "passed": true,
+          "evidence": "Names revision/CAS with affected-row checks and typed stale/conflict as two distinct families."
+        },
+        {
+          "text": "The response points at the relevant sections of the canonical persistence contracts",
+          "passed": true,
+          "evidence": "Cites sqlite-persistence-and-transactions.md 'Immutable documents versus mutable status' and 'Named transaction families' plus the restore-generation fence section."
+        },
+        {
+          "text": "The response demands concurrency or replay evidence, not only unit tests",
+          "passed": true,
+          "evidence": "Demands injected mid-transaction failure and exactly-one-of-two-commits, not a unit test."
+        }
+      ],
+      "coverage": {
+        "covered": [
+          "state-dependent authoritative write + transaction mode",
+          "revision/CAS with affected-row check",
+          "typed stale/conflict outcome",
+          "restore-generation fencing"
+        ],
+        "omissions": [],
+        "invented_requirements": []
+      },
+      "context_cost": {
+        "tokens": 1900,
+        "duration_ms": 90000,
+        "tool_calls": 4
+      }
+    },
+    {
+      "eval_id": "store-revision-cas-review",
+      "skill": "persistence-and-recovery-transaction-review",
+      "condition": "without_skill",
+      "agent_surface": "Codebuff (deepseek-v4-pro), single-session author demonstration",
+      "skill_source": null,
+      "observed_result": "Identifies the revision/CAS predicate, transaction atomicity, and stale-result handling, and reads the persistence contract directly. Does not surface restore-generation fencing as a required family, does not distinguish state-dependent write-mode revalidation inside the transaction, and suggests a unit test for the CAS check rather than mid-transaction failure injection.",
+      "grader": "Graded against the fixture assertions. Assertions 1 and 2 pass; assertion 3 fails because the recommended evidence is a unit test rather than a concurrency/replay case. Coverage omits restore-generation fencing and write-mode revalidation.",
+      "assertion_results": [
+        {
+          "text": "The response names the revision/CAS and typed stale/conflict families",
+          "passed": true,
+          "evidence": "Names the revision/CAS predicate and stale handling, though 'typed' is less explicit."
+        },
+        {
+          "text": "The response points at the relevant sections of the canonical persistence contracts",
+          "passed": true,
+          "evidence": "Cites sqlite-persistence-and-transactions.md."
+        },
+        {
+          "text": "The response demands concurrency or replay evidence, not only unit tests",
+          "passed": false,
+          "evidence": "Recommends a unit test for the CAS check rather than injected mid-transaction failure."
+        }
+      ],
+      "coverage": {
+        "covered": [
+          "revision/CAS with affected-row check",
+          "transaction atomicity",
+          "stale/conflict handling"
+        ],
+        "omissions": [
+          "restore-generation fencing",
+          "state-dependent write-mode revalidation"
+        ],
+        "invented_requirements": []
+      },
+      "context_cost": {
+        "tokens": 950,
+        "duration_ms": 60000,
+        "tool_calls": 2
+      }
+    }
+  ]
+}

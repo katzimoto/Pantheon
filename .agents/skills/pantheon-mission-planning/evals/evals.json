@@ -1,0 +1,28 @@
+{
+  "skill_name": "pantheon-mission-planning",
+  "evals": [
+    {
+      "id": "start-mission-48",
+      "trigger": "positive",
+      "prompt": "Start working on issue #48 — establish a skill conformance and evaluation harness. What do I read and decide before editing anything?",
+      "expected_output": "Activates mission-planning: treats the Issue's outcome and acceptance criteria as the requested outcome, reads the named architecture entry points before editing, and decides the smallest correct change rather than broadening the mission.",
+      "files": [],
+      "assertions": [
+        "The response treats the Issue's outcome and acceptance criteria as the requested outcome",
+        "The response reads the named entry points before editing",
+        "The response does not broaden the mission scope"
+      ]
+    },
+    {
+      "id": "answer-no-change-question",
+      "trigger": "negative",
+      "prompt": "What does `pantheon-store` own, and what must it not own? I am just trying to understand the crate map, not change anything.",
+      "expected_output": "Does not activate mission-planning; answers the question from the implementation map without walking the mission-planning procedure.",
+      "files": [],
+      "assertions": [
+        "The response does not walk the mission-planning procedure",
+        "The response answers the question without planning a change"
+      ]
+    }
+  ]
+}

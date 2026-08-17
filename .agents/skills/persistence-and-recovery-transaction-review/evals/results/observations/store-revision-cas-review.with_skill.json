@@ -1,0 +1,41 @@
+{
+  "eval_id": "store-revision-cas-review",
+  "skill": "persistence-and-recovery-transaction-review",
+  "condition": "with_skill",
+  "agent_surface": "Codebuff (deepseek-v4-pro), single-session author demonstration",
+  "skill_source": ".agents/skills/persistence-and-recovery-transaction-review (working tree @ 5f3b8f9)",
+  "observed_result": "Systematically walks the skill's invariant-family table and classifies each family for this change: touched = state-dependent authoritative write/transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcome, restore-generation fencing; not-applicable = holder-safety FK, cardinality/uniqueness, command identity/idempotent replay, launch-contact certainty. For each touched family it names the contract anchor and the evidence shape it requires (injected mid-transaction failure proving full rollback, exactly-one-of-two-commits for the CAS race, a typed stale result the caller handles, and a restore-generation fence check).",
+  "grader": "Graded against the fixture assertions and the mission's coverage target. All three assertions pass. Coverage names four families, including restore-generation fencing and write-mode revalidation, which the without-skill pass omits.",
+  "assertion_results": [
+    {
+      "text": "The response names the revision/CAS and typed stale/conflict families",
+      "passed": true,
+      "evidence": "Names revision/CAS with affected-row checks and typed stale/conflict as two distinct families."
+    },
+    {
+      "text": "The response points at the relevant sections of the canonical persistence contracts",
+      "passed": true,
+      "evidence": "Cites sqlite-persistence-and-transactions.md 'Immutable documents versus mutable status' and 'Named transaction families' plus the restore-generation fence section."
+    },
+    {
+      "text": "The response demands concurrency or replay evidence, not only unit tests",
+      "passed": true,
+      "evidence": "Demands injected mid-transaction failure and exactly-one-of-two-commits, not a unit test."
+    }
+  ],
+  "coverage": {
+    "covered": [
+      "state-dependent authoritative write + transaction mode",
+      "revision/CAS with affected-row check",
+      "typed stale/conflict outcome",
+      "restore-generation fencing"
+    ],
+    "omissions": [],
+    "invented_requirements": []
+  },
+  "context_cost": {
+    "tokens": 1900,
+    "duration_ms": 90000,
+    "tool_calls": 4
+  }
+}

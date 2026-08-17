@@ -1,0 +1,30 @@
+[
+  {
+    "eval_id": "store-revision-cas-review",
+    "skill": "persistence-and-recovery-transaction-review",
+    "trigger": "positive",
+    "prompt": "Review this pull request for #17: it adds a revisioned authoritative write to `pantheon-store` that updates a `Run` status row guarded by a revision/CAS predicate inside a transaction. Which invariant families does it touch, and what evidence must it carry?",
+    "expected_output": "Activates the transaction-review skill: identifies the touched invariant families (state-dependent authoritative write and transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcomes, restore-generation fencing), names the relevant sections of the canonical persistence/recovery contracts, and demands evidence at the same altitude (mid-transaction rollback, exactly-one-of-two-commits, a typed stale result) rather than a passing unit suite alone.",
+    "assertions": [
+      "The response names the revision/CAS and typed stale/conflict families",
+      "The response points at the relevant sections of the canonical persistence contracts",
+      "The response demands concurrency or replay evidence, not only unit tests"
+    ],
+    "condition": "with_skill",
+    "skill_path": ".agents/skills/persistence-and-recovery-transaction-review/SKILL.md"
+  },
+  {
+    "eval_id": "store-revision-cas-review",
+    "skill": "persistence-and-recovery-transaction-review",
+    "trigger": "positive",
+    "prompt": "Review this pull request for #17: it adds a revisioned authoritative write to `pantheon-store` that updates a `Run` status row guarded by a revision/CAS predicate inside a transaction. Which invariant families does it touch, and what evidence must it carry?",
+    "expected_output": "Activates the transaction-review skill: identifies the touched invariant families (state-dependent authoritative write and transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcomes, restore-generation fencing), names the relevant sections of the canonical persistence/recovery contracts, and demands evidence at the same altitude (mid-transaction rollback, exactly-one-of-two-commits, a typed stale result) rather than a passing unit suite alone.",
+    "assertions": [
+      "The response names the revision/CAS and typed stale/conflict families",
+      "The response points at the relevant sections of the canonical persistence contracts",
+      "The response demands concurrency or replay evidence, not only unit tests"
+    ],
+    "condition": "without_skill",
+    "skill_path": null
+  }
+]
