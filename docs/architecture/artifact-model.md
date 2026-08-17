@@ -70,9 +70,12 @@ Producing the exact same Artifact twice yields one content identity and multiple
 
 Only Pantheon computes authoritative digests. An Agent may request `artifact.seal` against authorized Task Workspace/input state, but it cannot supply an authoritative digest or arbitrary host path.
 
+Source-path authorization is not permission to dereference arbitrary filesystem indirection. When Artifact bytes originate from an Agent-writable Workspace, Pantheon resolves/captures them through the trusted-root, root-confined, no-follow object boundary in `workspace-and-git-integration.md`. Symlinks are captured as symlink data where the Artifact kind permits them; privileged sealing never follows an Agent-created symlink to obtain target contents. Unsupported special files fail closed rather than being opened/read as ordinary payload.
+
 Ordinary local CAS seal ordering:
 
 ```text
+confined source-object read/capture
 write temporary bytes
 fsync/finalize
 atomic rename into digest location
@@ -161,9 +164,24 @@ Each changed-path entry is canonical data, conceptually:
 ```yaml
 - path: <lossless canonical path representation>
   operation: add | modify | delete
-  mode: <canonical repository file mode>
+  mode: <canonical repository file mode/type>
   blob: sha256:<Pantheon CAS blob digest>   # add/modify only
 ```
+
+For v1 Git-style code trees, supported content modes/types are conceptually:
+
+```text
+regular file
+executable file
+symbolic link
+declared gitlink/submodule only where repository policy explicitly supports it
+```
+
+For a regular/executable file, `blob` is the digest of that file's bytes captured from the exact confined source object.
+
+For a symbolic link, `mode` identifies symlink semantics (for Git, conventionally mode `120000`) and `blob` is the digest of the **link-target bytes themselves**. Pantheon never dereferences the link while constructing the Artifact. An absolute or escaping-looking target remains inert manifest/content data unless a later authorized materializer deliberately interprets it under its own safe policy.
+
+FIFOs, Unix sockets, block/character devices and undeclared filesystem/mount escapes are not valid v1 `code.changeset` payload entries. Capture rejects them rather than interacting with them as files.
 
 Entries are sorted by canonical path bytes. Deletion has no payload Blob. Rename is not a distinct identity requirement in v1; it may be represented as delete+add because semantic candidate identity is resulting content, not a diff heuristic.
 
@@ -181,7 +199,7 @@ If Pantheon ever standardizes a canonical patch representation, its exact format
 
 `baseCommit`, observed/result tree OIDs and worker commit OIDs are useful immutable Git identifiers and may be recorded for integration/reconciliation. But retaining those OIDs does not make Git's ODB the Artifact store.
 
-Pantheon CAS stores the changed file payload Blobs required to reconstruct/apply the changeset even if Git GC later prunes Task-local objects.
+Pantheon CAS stores the changed regular/executable file bytes and symlink target bytes required to reconstruct/apply the changeset even if Git GC later prunes Task-local objects.
 
 ### Optional Git object pinning
 
@@ -215,9 +233,11 @@ Sealing a code candidate:
 
 ```text
 Task Workspace mutable state
-  ↓ controller captures WorkspaceRevision
+  ↓ controller pins trusted capture root
+  ↓ controller captures WorkspaceRevision through root-confined/no-follow source reads
   ↓ compare canonical final state to immutable base
-  ↓ copy changed-file bytes into Pantheon CAS
+  ↓ copy regular/executable bytes and symlink-target bytes into Pantheon CAS
+  ↓ reject unsupported special filesystem objects
   ↓ build canonical code.changeset manifest
   ↓ verify completeness/digests
   ↓ optional Git object pins
@@ -232,13 +252,15 @@ Integration Controller consumes accepted immutable `code.changeset` content. It 
 
 An integration conflict does not invalidate the accepted Artifact; it means current external target state differs from the integration precondition.
 
+Materialization treats symlink-target bytes as symlink content according to the declared changeset mode; it does not substitute the contents of the path to which that symlink happens to resolve on the materializing host.
+
 ## Large evaluator/output content
 
 Logs, test reports and other large evaluation output become normal Artifacts referenced from Evidence; Events/Evidence rows contain metadata/digests rather than unbounded content.
 
 ## Secrets excluded
 
-Active credential material is never an Artifact kind. `artifact.seal` cannot read SecretProvider material or use Artifact retention as a secret-storage lifecycle.
+Active credential material is never an Artifact kind. `artifact.seal` cannot read SecretProvider material or use Artifact retention as a secret-storage lifecycle. Filesystem indirection from an authorized Workspace path is never a mechanism for reaching SecretProvider/control-plane/host credential material.
 
 ## Garbage collection
 
@@ -254,5 +276,7 @@ GC follows reachability/retention metadata, not mere age. Before deleting a Blob
 6. `code.changeset` is complete from canonical manifest + Pantheon CAS payload; it never relies solely on prunable Git ODB state.
 7. Git-generated patch text is not authoritative changeset identity in v1.
 8. Git OIDs/optional controller refs are useful verification/retention metadata, not a substitute for CAS-complete payload.
-9. Artifact refs are not bearer capabilities.
-10. Active secrets are never Artifacts.
+9. Workspace-derived Artifact capture uses trusted-root, root-confined, no-follow source-object resolution; symlink payload is link-target bytes, never dereferenced target content.
+10. Unsupported special filesystem objects do not become v1 `code.changeset` payloads.
+11. Artifact refs are not bearer capabilities.
+12. Active secrets are never Artifacts.

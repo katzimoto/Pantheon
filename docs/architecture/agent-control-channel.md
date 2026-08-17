@@ -476,9 +476,11 @@ Authorization remains binary PERMIT/DENY.
 
 The worker may request that content from its own authorized workspace/output surface be sealed.
 
-Pantheon derives the caller's Task workspace and validates the source path/resource itself.
+Pantheon derives the caller's Task Workspace and trusted capture root and validates the requested logical source itself. Caller-supplied paths are never host-path authority.
 
-The worker cannot use `artifact.seal` to read/seal arbitrary host paths, control-plane state, another Task's workspace, or inaccessible Artifact content.
+The worker cannot use `artifact.seal` to read/seal arbitrary host paths, control-plane state, another Task's workspace, or inaccessible Artifact content. An apparently valid in-Workspace path also cannot escalate authority through a symlink, mount, device, FIFO, socket or other Agent-controlled filesystem indirection.
+
+Workspace-derived source capture follows the root-confined/no-follow rules in `workspace-and-git-integration.md`: Pantheon inspects/reads the exact object beneath the trusted Workspace root without privileged dereference. A symlink may be sealed as symlink data when the Artifact kind permits it; its target bytes are content, not an instruction to open the referenced path. Unsupported special filesystem objects fail closed with the Workspace/filesystem capture finding rather than being interacted with as payload.
 
 Pantheon computes/verifies all digests itself and follows the Artifact/CAS durability protocol.
 
@@ -689,11 +691,12 @@ Credential material is never logged.
 15. **Every consequential worker request is Attempt-scoped and idempotent after the session-generation fence passes.**
 16. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
 17. **Spawn/result/action identity is server-derived from the Attempt.**
-18. **Candidate submission is revision-bound and cancellation wins races.**
-19. **New Attempt means new AgentControlSession; ordinary restart reconciliation preserves the same session identity and may use only the bounded pre-contact rekey protocol, while disaster restore fences old-generation semantic Agent Control.**
-20. **Same-user native shell execution is not treated as strong isolation.**
-21. **Required control-plane isolation failures fail closed.**
-22. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
+18. **`artifact.seal` resolves Workspace sources only through trusted-root, root-confined, no-follow capture; caller paths and filesystem indirection never become ambient host-read authority.**
+19. **Candidate submission is revision-bound and cancellation wins races.**
+20. **New Attempt means new AgentControlSession; ordinary restart reconciliation preserves the same session identity and may use only the bounded pre-contact rekey protocol, while disaster restore fences old-generation semantic Agent Control.**
+21. **Same-user native shell execution is not treated as strong isolation.**
+22. **Required control-plane isolation failures fail closed.**
+23. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
 
 ## v1 scope
 
@@ -706,7 +709,7 @@ Include:
 - bounded pre-contact Agent Control credential rekey after daemon/adapter loss;
 - transport-neutral worker-operation semantics;
 - `action.invoke`;
-- `artifact.seal`;
+- `artifact.seal` with root-confined/no-follow Workspace source capture;
 - `task.spawn`;
 - `task.graph.propose` where policy allows;
 - `task.submit_result`;

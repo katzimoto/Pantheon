@@ -142,6 +142,58 @@ These configuration controls are **defense in depth, not the security boundary**
 
 Pantheon does not follow an Agent-controlled `gitdir`, `commondir`, alternates path, config include, remote/helper declaration or similar indirection into a more privileged host location and then treat the target as trusted. Controller-trusted repository paths and roots come from durable Pantheon/controller state. An operation that cannot establish the required projection or confinement fails closed with `workspace.hostile-repository-state` and fences/quarantines the affected Workspace rather than executing with greater authority.
 
+## Hostile filesystem state and privileged capture
+
+Agent-writable filesystem structure is untrusted input independently of Git metadata. A path that appears to be beneath the Workspace must never cause a privileged Pantheon process to dereference Agent-controlled filesystem indirection using ambient daemon/control-plane authority.
+
+The capture invariant is:
+
+> **Privileged Workspace/Artifact capture reaches source objects only through a trusted, root-confined, no-follow traversal rooted in durable Pantheon Workspace state. Agent-created symlinks are captured as symlinks; they are never followed to obtain payload bytes.**
+
+Conceptually:
+
+```text
+durable Workspace capture root
+        ↓
+pin/open trusted root object
+        ↓
+enumerate descendants relative to trusted directory objects
+        ↓
+inspect each entry itself without following filesystem indirection
+        ↓
+regular/executable file → read that opened object
+symlink                 → read/capture link target bytes as data
+directory               → descend through a confined child-directory object
+unsupported special     → fail closed
+        ↓
+CAS + canonical manifest
+```
+
+This is a semantic portability requirement, not a Linux syscall contract. A platform implementation may use `openat2`-style beneath/no-symlink resolution, directory-handle-relative APIs, or another mechanism only if it provides the same no-escape/no-follow guarantee and binds validation to the exact object being read.
+
+Pantheon does **not** use a `realpath`/prefix check followed by a later path reopen as the security boundary. Validation and payload reads must refer to the same confined object identity so an Agent cannot win a path-replacement or symlink TOCTOU race between check and use.
+
+V1 source-object treatment is:
+
+```text
+regular file      allowed
+executable file   allowed
+symlink           allowed as repository data; never dereferenced
+directory         traversed only through root-confined handles/objects
+FIFO              rejected
+Unix socket       rejected
+block device      rejected
+character device  rejected
+undeclared mount / filesystem escape
+                  rejected
+```
+
+A symlink target may itself contain relative or absolute path text. Those bytes are repository content, not capture instructions. Whether the target is semantically acceptable is repository/project policy; privileged capture still never follows it.
+
+Declared gitlinks/submodules or other repository structures are handled only by an explicit supported materialization policy. Pantheon never silently traverses them into another filesystem/repository tree because an Agent-created path points there.
+
+If safe object resolution cannot be established, capture fails closed with `workspace.hostile-filesystem-state`. The Workspace remains fenced/quarantined as appropriate; Pantheon does not fall back to an ambient-privilege pathname read.
+
 ## Workspace phases
 
 Workspace lifecycle can remain small, for example:
@@ -178,7 +230,7 @@ workspaceRevision:
 
 `tree`/observed Git IDs provide immutable repository-state metadata; they are not the sole portable Artifact payload.
 
-Pantheon captures WorkspaceRevision without mutating the worker's normal staging/index workflow. For Git implementations this may use a controller-owned **sterile repository projection and temporary index** anchored to the durable immutable base to construct the exact resulting tree. Agent-writable `.git` state is never the privileged controller's Git control plane for this capture.
+Pantheon captures WorkspaceRevision without mutating the worker's normal staging/index workflow. For Git implementations this may use a controller-owned **sterile repository projection and temporary index** anchored to the durable immutable base to construct the exact resulting tree. Agent-writable `.git` state is never the privileged controller's Git control plane for this capture. Any Workspace bytes supplied to that sterile projection are obtained through the root-confined/no-follow filesystem capture boundary above.
 
 Ignored/ephemeral build output is excluded from code candidate snapshots by default unless the Task explicitly declares it as an output.
 
@@ -199,13 +251,15 @@ Canonical flow:
 ```text
 quiesce/fence Workspace mutation for submission transaction
   ↓
+pin trusted Workspace capture root
+  ↓
 capture WorkspaceRevision through sterile projection/confined inspection
   ↓
-validate allowed path/scope changes
+validate allowed path/scope + filesystem-object types
   ↓
 compare immutable base to final logical state
   ↓
-copy changed-file payload bytes into Pantheon CAS
+copy changed-file/symlink payload bytes through root-confined no-follow reads into Pantheon CAS
   ↓
 build canonical ordered code.changeset manifest
   ↓
@@ -218,7 +272,9 @@ The authoritative changeset payload is CAS-complete as defined by `artifact-mode
 
 ## Path/scope validation
 
-Before sealing, Pantheon validates that changed paths/effects fit Task/Run authority and repository rules. A worker cannot submit changes outside the Task Workspace by naming arbitrary host paths.
+Before sealing, Pantheon validates that changed paths/effects fit Task/Run authority and repository rules. A worker cannot submit changes outside the Task Workspace by naming arbitrary host paths, and an in-Workspace pathname does not authorize following a symlink, mount, device, socket or other filesystem indirection into a different authority domain.
+
+Path/scope validation and filesystem-object confinement are distinct checks: lexical/canonical repository path validity does not substitute for no-follow object resolution.
 
 Repository-submodule layouts or other Git structures that make isolation ambiguous may require isolated clone/copy or may be rejected/fail closed; Pantheon does not silently choose a known-unsafe layout.
 
@@ -226,7 +282,7 @@ Repository-submodule layouts or other Git structures that make isolation ambiguo
 
 Candidate/yield checkpointing requires a settled Workspace boundary. Pantheon prevents new semantic Agent actions and ensures the controller observes a stable filesystem state before computing the WorkspaceRevision/changeset.
 
-This is a controller/Sandbox responsibility, not a request that the model promise it stopped writing.
+This is a controller/Sandbox responsibility, not a request that the model promise it stopped writing. Quiescence reduces mutation races but is not the filesystem security boundary; root-confined no-follow object capture remains mandatory even for a Workspace believed to be settled.
 
 ## Acceptance independence
 
@@ -315,7 +371,7 @@ shared target ref differs from pending IntegrationIntent
 → integration reconciliation
 ```
 
-Reconciliation of Agent-writable Git state follows the hostile-repository rule above. It never promotes paths/configuration discovered by following Agent-controlled Git metadata into controller authority.
+Reconciliation of Agent-writable Git state follows the hostile-repository rule above. It never promotes paths/configuration discovered by following Agent-controlled Git metadata into controller authority. Filesystem inspection/capture during reconciliation follows the same trusted-root/no-follow rule; an observed symlink or special file is data/finding, never permission for privileged dereference.
 
 ## Cleanup
 
@@ -336,7 +392,7 @@ host credential agents
 host container runtime socket
 ```
 
-The inverse boundary is equally mandatory: Agent-writable Workspace/repository state never causes Pantheon to execute repository-configurable behavior with ambient control-plane authority.
+The inverse boundary is equally mandatory: Agent-writable Workspace/repository state never causes Pantheon to execute repository-configurable behavior **or dereference filesystem indirection** with ambient control-plane authority.
 
 Workspace policy and Sandbox policy jointly enforce these boundaries.
 
@@ -354,4 +410,6 @@ Workspace policy and Sandbox policy jointly enforce these boundaries.
 10. IntegrationIntent precedes external shared-ref mutation and Git target update is CAS-protected/reconciled.
 11. Sandbox and Workspace isolation are distinct and both are required where applicable.
 12. Agent-writable repository state is untrusted input; Pantheon never executes a repository-configurable tool against it with ambient daemon/control-plane authority.
-13. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.
+13. Agent-writable filesystem structure is untrusted input; privileged capture is rooted in durable Workspace state, root-confined and no-follow, and never dereferences Agent-created indirection with ambient authority.
+14. Symlinks may be repository content but are captured as link-target bytes, never as dereferenced target content; unsupported special filesystem objects fail closed in v1.
+15. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.
