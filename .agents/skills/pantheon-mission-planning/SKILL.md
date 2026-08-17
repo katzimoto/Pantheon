@@ -53,9 +53,10 @@ for pure exploration/question-answering that will not produce a change.
    system model. Skip both if you already have them from earlier in the
    session — do not re-read what you have already established.
 
-4. **Use `docs/architecture/README.md` to find the domain.** It carries
-   reading recipes for common kinds of change. Follow the matching recipe
-   instead of reading the architecture tree freely. If the Issue named
+4. **Use `docs/architecture/README.md` to find the domain.** It maps the
+   domains and links the change-specific reading recipes in
+   `docs/architecture/recipes.md`; follow the matching recipe instead of
+   reading the architecture tree freely. If the Issue named
    entry points, start there and widen only when a dependency, invariant,
    schema, or implementation path gives a concrete reason to.
 
