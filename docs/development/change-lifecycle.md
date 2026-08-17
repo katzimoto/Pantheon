@@ -401,13 +401,33 @@ as `agent-working`, `ready-to-merge`, `validation-passed`, or
 If future automation needs a state GitHub does not represent, add it only when a
 real consumer and ownership rule exist.
 
+### How a pull request lands
+
+A pull request lands on `main` as a merge commit. GitHub's squash and rebase
+options are not used.
+
+A pull request is the candidate change and its evidence, and the merge commit is
+where that unit enters `main`. Its second parent states which commits formed one
+reviewed change, so that boundary survives in the repository itself rather than
+only in GitHub. Squashing discards the boundary's interior; rebasing discards
+the boundary and rewrites the commits as well, so what lands is not the history
+that was reviewed and verified.
+
+The tradeoff is accepted rather than overlooked. History is not linear, and
+reading `main` shows every intermediate commit rather than one entry per change;
+`git log --first-parent` recovers the per-change view when that is what is
+wanted.
+
+Every merge to `main` so far has used this method, so the contract and the
+repository describe the same thing.
+
+Restricting GitHub's merge button to this method is mechanical enforcement, and
+follows the same rule as the rest of this section: the semantic contract comes
+first.
+
 ### Deferred enforcement
 
-The merge method is intentionally not chosen yet. Merge commit, squash, and
-rebase create different history tradeoffs, and Pantheon does not yet have enough
-implementation history to choose responsibly.
-
-The following are also deliberately deferred:
+The following are deliberately deferred:
 
 - required reviews;
 - required checks beyond current repository validation;
