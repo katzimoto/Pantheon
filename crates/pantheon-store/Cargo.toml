@@ -5,5 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+# Pantheon's vetted bundled SQLite: `bundled` compiles SQLite from source
+# instead of linking whatever the host happens to have installed, per
+# docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md
+# ("Pantheon bundles/tests against a vetted SQLite version containing
+# required WAL safety fixes rather than trusting an arbitrary host
+# library"). Default features are disabled: rusqlite 0.40's defaults pull in
+# `ffi-sqlite-wasm-rs` (a WASM SQLite backend) and a statement-caching layer
+# this crate does not use.
+rusqlite = { version = "0.40.2", default-features = false, features = [
+    "bundled",
+] }
+
 [lints]
 workspace = true
