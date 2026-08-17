@@ -8,7 +8,7 @@ Pantheon is a local-first multi-agent orchestration system designed to coordinat
 - Keep orchestration state deterministic and inspectable rather than hidden inside an LLM conversation.
 - Give each persistent agent a portable identity, memory, skill set, and learning history independent of the model executing it.
 - Route work based on capability, cost/quota, privacy, and security constraints.
-- Isolate coding work with Git worktrees and risky execution with sandbox profiles.
+- Separate Task coding state from authoritative Git refs, and contain risky execution with sandbox profiles.
 - Make agent self-improvement evidence-driven, versioned, testable, and reversible.
 
 ## Documentation

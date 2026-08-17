@@ -2,7 +2,7 @@
 
 ## Status
 
-Canonical Pantheon physical execution containment and ambient-authority specification, accepted as an architecture correction.
+Canonical Pantheon physical execution containment and ambient-authority specification.
 
 ## Purpose
 
