@@ -146,6 +146,7 @@ Do not create a checkpoint for every mission. Use them where interface or lifecy
 The version may be released only when all of the following are true:
 
 - [ ] Every Engineering Mission assigned to this Milestone that is required for release is complete.
+- [ ] Every assigned Engineering Mission has exactly one `changelog:*` classification, including explicit `changelog:none` for intentionally internal work.
 - [ ] Canonical repository verification passes from the final integrated tree.
 - [ ] The Product Proof succeeds end to end.
 - [ ] Supported-envelope behavior has been exercised on every platform/configuration claimed by this version.
@@ -170,6 +171,7 @@ Record or link:
 - relevant recovery/fault-injection results;
 - supported-platform CI results;
 - integrated review;
+- generated changelog/release-note candidate;
 - any known limitations accepted for this version.
 
 Evidence should describe what was proven without copying generic CI or mission state already visible in GitHub.
