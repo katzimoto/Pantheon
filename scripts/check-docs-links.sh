@@ -1,5 +1,6 @@
 #!/bin/sh
-# Validate documentation structure. Two independent checks:
+# Validate documentation structure and agent-contract wiring. Three
+# independent checks:
 #
 #   1. Every reference resolves. Pantheon docs reference each other with
 #      repository-root-relative paths written as inline code, e.g.
@@ -11,6 +12,10 @@
 #      docs/architecture/README.md exactly once, and every contract the map
 #      lists must exist. A contract missing from the map is invisible to agents
 #      navigating by it, which check 1 cannot detect.
+#
+#   3. The agent contract is wired up. AGENTS.md is the single canonical agent
+#      operating contract, and CLAUDE.md must import it rather than carry a
+#      second copy that can drift out of agreement with it.
 #
 # Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
@@ -29,9 +34,11 @@ report() {
 
 files=$(find . -path ./.git -prune -o -name '*.md' -print | sed 's|^\./||' | sort)
 
-# 1. Inline-code references of the form `docs/.../file.md` or `schemas/file.json`.
+# 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`
+#    or `scripts/check.sh`. Covering scripts/ means a validation command cited in
+#    documentation or in AGENTS.md fails the check once it stops existing.
 for f in $files; do
-	grep -noE '`(docs|schemas)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
+	grep -noE '`(docs|schemas|scripts)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
 		target=$(printf '%s' "$match" | tr -d '`')
 		case "$target" in
 		*/) [ -d "$target" ] || echo "MISS $f $line $target" ;;
@@ -115,6 +122,20 @@ if [ -f "$map" ]; then
 	fi
 else
 	echo "missing architecture map: $map" >&2
+	status=1
+fi
+
+# 4. Agent contract wiring. Claude Code reads CLAUDE.md and not AGENTS.md, so
+# CLAUDE.md carries an @AGENTS.md import. Claude Code ignores imports written
+# inside backticks or code fences, so require a bare import line.
+if [ ! -f AGENTS.md ]; then
+	echo "missing canonical agent contract: AGENTS.md" >&2
+	status=1
+elif [ ! -f CLAUDE.md ]; then
+	echo "missing CLAUDE.md: it must import AGENTS.md" >&2
+	status=1
+elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md; then
+	echo "CLAUDE.md: no bare '@AGENTS.md' import line; agent instructions must not be duplicated" >&2
 	status=1
 fi
 
