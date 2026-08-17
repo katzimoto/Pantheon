@@ -124,9 +124,11 @@ A new crate requires a real boundary. Any one of these is enough:
 architecture document with this name" is not a boundary either.
 
 When a crate is justified, add it under `crates/`, give it a `//!` boundary
-statement, add its line to the allowlist in `scripts/check-crate-deps.sh`, and
-add it here. Verification fails until the allowlist knows about it, which is
-deliberate: a new crate must state its boundary rather than quietly inherit none.
+statement, add its name to the explicit `members` list in the workspace root
+`Cargo.toml`, add its line to the allowlist in `scripts/check-crate-deps.sh`,
+and add it here. Verification fails until the workspace and the allowlist both
+know about it, which is deliberate: a new crate must state its boundary and
+join the workspace explicitly rather than quietly inherit none.
 
 ## When a dependency is justified
 

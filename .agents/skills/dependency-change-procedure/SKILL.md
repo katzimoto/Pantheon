@@ -77,7 +77,8 @@ Non-triggers:
    `docs/development/implementation.md` ("When a new crate is justified")
    for the canonical boundary rules, then, only when a real boundary
    applies, add together in the same change: the crate's `//!` boundary
-   statement, and its allowlist entry in `scripts/check-crate-deps.sh`
+   statement, its name in the explicit `members` list in the workspace root
+   `Cargo.toml`, and its allowlist entry in `scripts/check-crate-deps.sh`
    naming exactly which Pantheon crates it may depend on. This skill does
    not decide that a new crate is architecturally warranted — that
    determination belongs to `docs/development/implementation.md`'s
