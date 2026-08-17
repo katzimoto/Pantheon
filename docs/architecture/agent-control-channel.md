@@ -103,6 +103,7 @@ BEGIN
   create Attempt
   assign LaunchKey
   create AgentControlSession
+  bind current RestoreGeneration
   persist credential verifier
 COMMIT
       ↓
@@ -117,10 +118,13 @@ Conceptual record:
 agentControlSession:
   id: acs_123
   attempt: attempt_456
+  restoreGeneration: restoregen_...
   state: ACTIVE
   credentialVerifier: sha256:...
   createdAt: ...
 ```
+
+`restoreGeneration` is copied from the current installation RestoreGeneration when the session is created and is immutable for that session. A normal daemon restart preserves the generation; a disaster restore rotates it and therefore fences restored Agent Control sessions from the prior history.
 
 Run, Task, Goal, Agent, Binding, and policy context are derived from the Attempt relationship. They are not caller-controlled identity claims.
 
@@ -180,6 +184,8 @@ Agent Control gateway
       ↓
 authenticate AgentControlSession
       ↓
+verify session.restoreGeneration == current RestoreGeneration
+      ↓
 derive Attempt / Run / Task / Agent / Goal
       ↓
 validate current lifecycle/state preconditions
@@ -192,6 +198,8 @@ PERMIT / DENY
       ↓
 controller or privileged broker
 ```
+
+The RestoreGeneration check occurs before Pantheon looks up or creates an `agent_requests` idempotency row or applies any semantic worker mutation. Therefore restoring an older database cannot make a request whose row was rewound away become fresh authority for a worker credential minted in the pre-restore history.
 
 The Agent cannot self-declare another Task, Run, Agent, Goal, or principal.
 
@@ -214,19 +222,36 @@ A session is revoked when its Attempt can no longer exercise worker authority, i
 
 Policy tightening does not necessarily revoke identity. The Attempt may remain authenticated while new operations are denied under the current policy.
 
-Late requests from a revoked session cannot mutate authoritative state.
+An `ACTIVE` row is not sufficient authority after disaster restore. If its immutable `restoreGeneration` differs from the current installation generation, the Agent Control gateway rejects semantic requests before request idempotency lookup/creation. The row remains historical evidence; Pantheon does not rewrite it to the new generation.
+
+Late requests from a revoked or old-generation session cannot mutate authoritative state.
 
 ## 9. Recovery continuity
 
-Daemon restart or adapter restart does not rotate AgentControlSession identity when the same Attempt may still be alive.
+Ordinary daemon restart or adapter restart does not rotate AgentControlSession identity when the same Attempt may still be alive.
 
 ```text
+same RestoreGeneration
 same Attempt
 same LaunchKey
 same AgentControlSession
 ```
 
 This matches Pantheon's rule that reconciliation of one execution lineage is not a retry.
+
+Disaster restore is different:
+
+```text
+restored AgentControlSession.restoreGeneration
+        !=
+current RestoreGeneration
+        ↓
+semantic Agent Control authority fenced
+```
+
+A physically running pre-restore worker may still exist and must be inspected/reconciled as external execution, but its restored Agent Control credential cannot submit a Candidate, spawn work, invoke broker effects, or create/replay `agent_requests`. Controllers may still use their own fenced recovery authority to inspect or terminate the external lineage.
+
+Pantheon does not rewrite an old-generation session to current or automatically mint a replacement Agent Control credential/session solely to make progress. Any future same-Attempt credential-rotation mechanism must be a separately defined recovery protocol; absent such a protocol, v1 keeps the worker's semantic authority fenced and converges the enclosing execution through normal recovery/finalization.
 
 A fresh Attempt gets:
 
@@ -235,6 +260,7 @@ new Attempt ID
 new LaunchKey
 new AgentControlSession
 new credential
+current RestoreGeneration
 ```
 
 ## 10. Logical protocol is transport-neutral
@@ -279,7 +305,7 @@ The Agent Control surface does not expose generic operator resource reads or arb
 
 Every consequential worker request has an Attempt-scoped `requestId`.
 
-Canonical identity:
+Canonical identity for a **current-generation AgentControlSession** remains:
 
 ```text
 (attemptId, requestId)
@@ -299,6 +325,8 @@ same requestId + same canonical request hash
 same requestId + different canonical request hash
 → fail closed as request identity misuse
 ```
+
+The enclosing session generation check happens first. RestoreGeneration therefore does not need to be smuggled into every Agent request key: an old-generation session cannot reach request lookup/creation at all.
 
 This generalizes the existing dynamic-spawn duplicate-prevention rule to every worker/control operation.
 
@@ -418,6 +446,7 @@ Candidate submission requires all of the following at commit time:
 
 ```text
 AgentControlSession == ACTIVE
+AgentControlSession.restoreGeneration == current RestoreGeneration
 Attempt is current nonterminal Attempt of Run
 Run.phase == Active
 Task.phase == Active
@@ -525,12 +554,15 @@ agent_control_sessions
 ──────────────────────
 id
 attempt_id UNIQUE
+restore_generation
 credential_hash
 state
 created_at
 revoked_at
 revocation_reason
 ```
+
+`restore_generation` is immutable session provenance/authority fencing. Authentication of an otherwise valid credential still fails for semantic Agent Control when this value does not equal the current installation RestoreGeneration.
 
 and:
 
@@ -552,9 +584,9 @@ PRIMARY KEY(attempt_id, request_id)
 
 Raw Agent Control credentials are never persisted.
 
-AgentControlSession creation belongs to the Attempt-creation transaction.
+AgentControlSession creation belongs to the Attempt-creation transaction and copies the then-current RestoreGeneration.
 
-Session revocation belongs to the transaction that conclusively removes worker authority from the Attempt.
+Session revocation belongs to the transaction that conclusively removes worker authority from the Attempt. Disaster restore does not need to rewrite every old session to `REVOKED`; the generation mismatch is itself a fail-closed authority fence while preserving historical state.
 
 ## 25. Events and audit
 
@@ -577,20 +609,21 @@ Credential material is never logged.
 2. **Two same-user Unix socket paths alone are not a security boundary.**
 3. **The operator endpoint is physically unreachable from untrusted worker sandboxes.**
 4. **Agent Control identity is Attempt-scoped.**
-5. **AgentControlSession is durably created with the Attempt before backend execution.**
+5. **AgentControlSession is durably created with the Attempt before backend execution and binds the current RestoreGeneration immutably.**
 6. **The raw credential is high entropy, scoped to Pantheon Agent Control, and never persisted/logged.**
 7. **Authentication establishes identity only; it grants no operation authority.**
-8. **Current Task/Run/Attempt/policy state is validated for every consequential operation.**
-9. **The Agent Control protocol is semantic/transport-neutral.**
-10. **The Agent surface exposes no operator verbs.**
-11. **Every consequential worker request is Attempt-scoped and idempotent.**
-12. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
-13. **Spawn/result/action identity is server-derived from the Attempt.**
-14. **Candidate submission is revision-bound and cancellation wins races.**
-15. **New Attempt means new AgentControlSession; reconciliation of the same Attempt preserves it.**
-16. **Same-user native shell execution is not treated as strong isolation.**
-17. **Required control-plane isolation failures fail closed.**
-18. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
+8. **A consequential Agent Control request requires `session.restoreGeneration == current RestoreGeneration` before request-idempotency lookup/creation or semantic mutation.**
+9. **Current Task/Run/Attempt/policy state is validated for every consequential operation.**
+10. **The Agent Control protocol is semantic/transport-neutral.**
+11. **The Agent surface exposes no operator verbs.**
+12. **Every consequential worker request is Attempt-scoped and idempotent after the session-generation fence passes.**
+13. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
+14. **Spawn/result/action identity is server-derived from the Attempt.**
+15. **Candidate submission is revision-bound and cancellation wins races.**
+16. **New Attempt means new AgentControlSession; ordinary restart reconciliation of the same Attempt preserves it, while disaster restore fences old-generation semantic Agent Control.**
+17. **Same-user native shell execution is not treated as strong isolation.**
+18. **Required control-plane isolation failures fail closed.**
+19. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
 
 ## v1 scope
 
@@ -598,6 +631,7 @@ Include:
 
 - separate logical operator and Agent Control surfaces;
 - Attempt-scoped AgentControlSession;
+- RestoreGeneration-bound Agent Control authority across disaster restore;
 - opaque high-entropy local credential/verifier;
 - transport-neutral worker-operation semantics;
 - `action.invoke`;

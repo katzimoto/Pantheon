@@ -24,6 +24,8 @@ One database is intentional: Task/Run/Reservation/Budget/Event/authorization sta
 
 `system_state` includes the current installation `restore_generation`: a fresh unpredictable value that persists across normal daemon restart and is rotated only at the disaster-restore authority fence. It is distinct from daemon incarnation, Run ownership epoch/lease token, and JournalEpoch.
 
+The database cannot by itself prove that it has been replaced by an older valid snapshot, because the evidence needed to make that distinction may have been rewound together with the file. Supported disaster restore therefore establishes restore mode through the crash-safe installation maintenance latch defined below before replacing authoritative SQLite state. Raw/manual database replacement outside that procedure is not a supported safe restore path.
+
 ## SQLite operating rules
 
 V1 locks:
@@ -158,6 +160,7 @@ AUTHORIZATION
   broker_operations
 
 RECOVERY
+  recovery_passes
   failure_records
   recovery_decisions
   recovery_counters
@@ -394,7 +397,7 @@ Every Attempt is created with exactly one `attempt_status` row in the same T4/T8
 
 Attempt creation + LaunchKey + AgentControlSession occurs before backend side effect. A second authoritative transaction marks `CONTACT_MAY_HAVE_OCCURRED` immediately before the first external launch call.
 
-Crash semantics:
+Crash semantics on an ordinary uninterrupted database history are:
 
 ```text
 NOT_CONTACTED
@@ -404,17 +407,39 @@ CONTACT_MAY_HAVE_OCCURRED
   -> lost acknowledgement is UNKNOWN until backend/outer supervisor proves state
 ```
 
+A restored snapshot is different. A restored `NOT_CONTACTED`, `ABSENT`, missing row, or other negative observation is only a fact about the snapshot point; it cannot prove that no external effect happened after the snapshot. During restore recovery, fresh domain inspection/inventory/fencing must establish current negative certainty before replacement execution or new conflicting authority is permitted.
+
 ## Agent Control
 
-`agent_control_sessions` stores one Attempt-scoped identity verifier/session state; raw bearer material is not persisted.
+`agent_control_sessions` stores one Attempt-scoped identity verifier/session state plus immutable `restore_generation`; raw bearer material is not persisted.
 
-`agent_requests` enforces:
+Conceptually the safety-relevant identity includes:
+
+```text
+agent_control_sessions
+  id
+  attempt_id UNIQUE
+  restore_generation
+  credential_hash
+  state
+  ...
+```
+
+The session copies the current `system_state.restore_generation` when T4/T8 creates it. A consequential Agent Control request first authenticates the credential and then requires:
+
+```text
+session.restore_generation == system_state.restore_generation
+```
+
+before Pantheon looks up or creates the request-idempotency row or applies semantic worker authority. An old-generation restored session remains historical/fenced even if its persisted state says `ACTIVE`; it is never rewritten to current merely because the Attempt still exists externally.
+
+`agent_requests` enforces for current-generation sessions:
 
 ```text
 PRIMARY/UNIQUE (attempt_id, request_id)
 ```
 
-plus request hash/operation/state/result/problem refs. Same ID+same hash is idempotent; same ID+different hash fails closed.
+plus request hash/operation/state/result/problem refs. Same ID+same hash is idempotent; same ID+different hash fails closed. RestoreGeneration need not be duplicated into every request key because stale-generation sessions fail before request lookup/creation.
 
 ## Sandbox
 
@@ -492,6 +517,8 @@ Usage ingestion rejects a control-operation record when `backend_id` does not eq
 
 Current terminal/running state is not an ownership predicate: delayed otherwise-valid factual usage may arrive after terminalization or administrative resolution. Where a separately durable launch/contact marker proves that the external lineage was never contacted, that evidence may reject impossible usage; the persistence of that launch boundary is a distinct execution-reconciliation invariant.
 
+In restore mode, a negative launch/contact fact recovered only from the restored snapshot is not by itself proof about the post-snapshot external history. Usage/execution reconciliation first applies the restore-specific external-domain certainty rule before treating such a negative fact as current proof.
+
 Controller epoch/incarnation may be stored as provenance but is not a rejection key for delayed otherwise-valid factual usage.
 
 ## Grants and broker operation redemption
@@ -559,7 +586,7 @@ Candidate submission is cancellation/supersession-race-safe:
 BEGIN IMMEDIATE
 
 re-read/validate:
-  AgentControlSession current
+  AgentControlSession current generation + state
   Attempt current
   Run Active/current responsible Run
   Task Active + expected Task status revision
@@ -576,7 +603,7 @@ append Events
 COMMIT
 ```
 
-If cancellation/supersession won the status CAS first, T6 fails with stale/conflict and creates no current Candidate.
+If cancellation/supersession won the status CAS first, T6 fails with stale/conflict and creates no current Candidate. A restored old-generation AgentControlSession fails before T6 request authority is established.
 
 ## Acceptance and requeue transaction (T9)
 
@@ -653,7 +680,7 @@ Creation initializes `launch_contact_state = NOT_CONTACTED`. Immediately before 
 
 At most one nonterminal EvaluationAttempt may exist per EvaluationOperation. Because attempt lifecycle state is relational on `evaluation_attempts`, v1 enforces this with a partial unique index/constraint over `operation_id` for the nonterminal state domain. A new EvaluationAttempt is permitted only after the prior one is definitively terminal/absent under bounded evaluation retry policy.
 
-For usage reconciliation, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen H1 metering-source provenance; it does not prove that usage occurred.
+For usage reconciliation on an uninterrupted history, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen H1 metering-source provenance; it does not prove that usage occurred. After disaster restore, restored negative contact state is historical snapshot evidence only until the external evaluation domain is freshly reconciled.
 
 The EvaluationOperation, not an EvaluationAttempt, owns the verification Sandbox through `sandbox_instances.evaluation_operation_id`. This holder remains stable across bounded sequential EvaluationAttempts while that Sandbox remains valid.
 
@@ -686,15 +713,59 @@ Sensitive secret-set operations are an explicit exception only to persisted requ
 
 ## Disaster-restore authority fence (T0)
 
-Restore is not an ordinary startup. After SQLite integrity/schema validation and acquisition of the installation lock, but before scheduler dispatch, authorization redemption, broker execution, Operator mutations or other new authority-bearing external effects, Pantheon commits one restore fence transaction:
+Restore is not an ordinary startup, and restore mode cannot be inferred reliably from the restored SQLite file itself. V1 therefore supports disaster restore only through an explicit installation-maintenance procedure that establishes a crash-safe **out-of-database restore latch** before replacing authoritative SQLite state.
+
+Conceptually the installation-local marker is:
+
+```text
+restore.pending
+  restore_operation_id      fresh random/non-reused ID
+  expected_installation_id
+  backup_identity/digest
+  created_at
+```
+
+The marker contains no authority, secret material, Grant, credential, or bearer token. It is a safety latch only. It lives outside `pantheon.db`, is excluded from database backup payloads, and is made durable together with its parent-directory metadata before the database replacement starts.
+
+Supported high-level ordering is:
+
+```text
+acquire exclusive installation maintenance lock
+        ↓
+create + fsync restore.pending
+        ↓
+install the selected consistent SQLite snapshot
+        ↓
+open/validate installation identity + schema + integrity
+while all authority/effect gates remain closed
+        ↓
+T0 restore fence
+        ↓
+clear restore.pending durably only after T0 is known committed
+        ↓
+restore-domain reconciliation
+        ↓
+recovery barrier
+        ↓
+normal authority/dispatch
+```
+
+T0 is one authoritative transaction:
 
 ```text
 BEGIN IMMEDIATE
 
-verify restore mode + installation identity
+verify restore mode from restore.pending or matching incomplete restore RecoveryPass
+verify restore_operation_id + installation identity
 write fresh unpredictable system_state.restore_generation
 rotate JournalEpoch as required by event-history semantics
-record restore RecoveryPass/incarnation linkage
+create/update RecoveryPass:
+  mode = restore
+  restore_operation_id = marker ID
+  prior_restored_generation = historical only
+  new_restore_generation = freshly written generation
+  state = IN_PROGRESS
+record daemon-incarnation linkage
 append restore-fence audit Event in the new journal epoch
 
 COMMIT
@@ -702,13 +773,24 @@ COMMIT
 
 The freshly generated RestoreGeneration must not be derived by incrementing a value from the restored snapshot; an old backup may contain a previously used number. Normal daemon restart never performs T0.
 
+The restore-operation ID makes the latch restart-safe:
+
+- crash before T0 -> `restore.pending` remains and the next daemon still knows ordinary startup is forbidden;
+- crash after T0 but before latch removal -> the matching durable `RecoveryPass(mode=restore, restore_operation_id=...)` proves that this restore operation already crossed T0, so startup resumes that pass without rotating another generation merely because the marker remains;
+- latch removal happens only after the matching T0 commit is established;
+- a restored database with an incomplete matching restore RecoveryPass resumes restore recovery even if the external latch was already durably cleared after T0.
+
 After T0:
 
 - old-generation Grants and CapabilityTickets cannot redeem;
 - old-generation broker operations are reconciliation-only;
 - Operator commands carrying an old commandEpoch are rejected before command-row lookup/creation;
+- old-generation AgentControlSessions cannot authorize semantic Agent requests before request-row lookup/creation;
 - Run ControlLease tokens still rotate separately before Run/external commands;
+- restored negative observations are not current proof of absence until the corresponding external domain is freshly inspected/reconciled;
 - domain recovery reconciles/fences external state before normal dispatch resumes.
+
+Pantheon cannot make arbitrary out-of-band replacement of `pantheon.db` safe by inspecting the replaced database after the fact. Raw/manual file replacement without first establishing the supported restore latch is therefore explicitly outside the safe disaster-restore contract and must not be presented as equivalent to normal restore recovery.
 
 ## Migrations / backup
 
@@ -730,6 +812,7 @@ attempt_status holder matches attempts.run_id
 run_status.current_attempt_id belongs to the same Run
 one nonterminal Attempt per Run
 one current AgentControlSession per Attempt
+accepted Agent Control request -> session.restore_generation == current RestoreGeneration
 one nonterminal EvaluationAttempt per EvaluationOperation
 EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 one live Task-scoped reservation per singular (Task, ResourceKey)
@@ -743,6 +826,7 @@ Grant/CapabilityTicket redemption generation == current RestoreGeneration
 new/executable broker operation generation == current RestoreGeneration
 old-generation broker operations are reconciliation-only
 current Operator command epoch == current RestoreGeneration before command creation
+restore RecoveryPass restore_operation_id/generation consistent with any surviving restore latch
 Candidate outputs -> existing Artifacts/Blobs
 Workspace/Sandbox ownership consistency
 IntegrationIntent/Git state consistency
@@ -775,7 +859,7 @@ T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
 T15 EVALUATION LAUNCH CONTACT MARKER
 ```
 
-T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
+T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
 
 T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
 
@@ -795,10 +879,13 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 8. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
 9. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
 10. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-11. Disaster restore rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect; restored Grants/Tickets cannot redeem and restored broker operations cannot be reissued from stale state.
-12. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-13. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-14. Requeue occurs only after previous responsible Run terminal.
-15. Force-resolution tombstones stale lineages without fabricating factual Usage.
-16. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-17. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+11. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+12. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+13. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests.
+14. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+15. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+16. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+17. Requeue occurs only after previous responsible Run terminal.
+18. Force-resolution tombstones stale lineages without fabricating factual Usage.
+19. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+20. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.

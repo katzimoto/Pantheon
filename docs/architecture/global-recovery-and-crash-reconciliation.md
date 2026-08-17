@@ -93,7 +93,7 @@ Periodic safety reconciliation continues after startup so missed events, externa
 
 ## 3. Installation identity, restore generation, and daemon incarnation
 
-Pantheon maintains three distinct identities/fences.
+Pantheon maintains distinct ownership/authority identities and fences.
 
 ### Installation ID
 
@@ -125,7 +125,7 @@ disaster restore of an older SQLite snapshot
 → RestoreGeneration replaced with a fresh unpredictable value
 ```
 
-It fences authority whose durable consumption/idempotency history can be rewound by restore, including runtime Grants, CapabilityTickets, broker operations and Operator command identities.
+It fences authority whose durable consumption/idempotency history can be rewound by restore, including runtime Grants, CapabilityTickets, broker operations, Operator command identities, and Agent Control sessions.
 
 It is deliberately not a monotonic counter restored from the database: an old snapshot can reintroduce a previously used numeric value. The new generation is random/fresh and is committed before any new post-restore authority-bearing mutation or external effect.
 
@@ -135,6 +135,40 @@ It is deliberately not a monotonic counter restored from the database: an old sn
 - daemon incarnation — process/controller lifetime;
 - Run ControlLease epoch/token — Run-control ownership;
 - JournalEpoch — Event-stream continuity.
+
+### Restore-entry latch
+
+A restored database cannot reliably announce that it is an older version of itself. The evidence needed to detect the rewind may have been rewound with the database.
+
+Therefore disaster restore is a **supported installation-maintenance procedure**, not an ordinary daemon startup that Pantheon tries to infer after the fact. Before replacing `pantheon.db`, the maintenance path acquires exclusive installation authority and durably creates a small out-of-database `restore.pending` latch containing at least:
+
+```text
+restoreOperationId       fresh non-reused random ID
+expectedInstallationId
+backup identity/digest
+createdAt
+```
+
+The latch contains no secret, credential, Grant, bearer capability, or external-effect authority. It is only a crash-safe indication that ordinary startup is forbidden until the matching restore authority fence has committed. It is excluded from SQLite backup payloads and is fsynced together with its parent-directory metadata before database replacement begins.
+
+The same `restoreOperationId` is recorded in the durable restore RecoveryPass at T0. This gives restart-safe interpretation:
+
+```text
+latch exists + no matching fenced RecoveryPass
+→ T0 has not been proven committed
+→ perform/complete T0 before authority-bearing work
+
+latch exists + matching IN_PROGRESS restore RecoveryPass
+→ T0 already committed for this restore operation
+→ resume the same restore pass; do not rotate again merely because the latch survived
+
+matching IN_PROGRESS restore RecoveryPass + latch already cleared
+→ resume restore reconciliation from SQLite durable state
+```
+
+The latch is cleared durably only after Pantheon establishes that the matching T0 transaction committed.
+
+Raw/manual replacement of `pantheon.db` without first establishing this supported restore latch is outside the safe disaster-restore contract. Pantheon cannot repair that omission by trusting a rewound database to prove its own rewind.
 
 ### Daemon incarnation ID
 
@@ -159,6 +193,8 @@ Before mutating SQLite or external state, the daemon must acquire an operating-s
 A PID file alone is insufficient because PIDs are reusable and do not provide ownership fencing.
 
 If the installation lock cannot be acquired, the process may offer read-only diagnostics where safe but must not start controllers or scheduling.
+
+The supported disaster-restore maintenance path uses the same exclusive installation authority while establishing/removing the restore latch and replacing the database snapshot. A normal daemon must not race the restore procedure.
 
 Future multi-daemon operation requires a distributed coordination design and is outside v1.
 
@@ -193,7 +229,7 @@ Whenever control is adopted after daemon restart or restore, Pantheon rotates th
 
 Adapters should propagate the fencing identity to native execution controls where practical. A backend inability to enforce fencing internally does not weaken Pantheon's own authoritative-state checks.
 
-RestoreGeneration does not replace ControlLease fencing. RestoreGeneration prevents replay of rewound authorization/command authority; ControlLease token+epoch fences Run-controller ownership.
+RestoreGeneration does not replace ControlLease fencing. RestoreGeneration prevents replay of rewound authorization/command/worker authority; ControlLease token+epoch fences Run-controller ownership.
 
 ## 6. Startup phases
 
@@ -204,7 +240,7 @@ PROCESS START
     ↓
 A. installation lock
     ↓
-B. storage recovery / validation
+B. restore-entry mode check + storage recovery / validation
     ↓
 C. daemon incarnation registration
     ↓
@@ -221,19 +257,23 @@ H. scheduler dispatch enabled
 
 These phases are not user-facing Task phases.
 
-Ordinary restart preserves the existing RestoreGeneration. Disaster restore executes the additional restore authority fence in §27 before any normal authority-bearing mutation or external effect.
+Ordinary restart has no pending restore operation and preserves the existing RestoreGeneration. Supported disaster restore enters startup with the out-of-database restore latch and executes/resumes the matching restore authority fence in §27 before any normal authority-bearing mutation or external effect.
 
 ### A. Installation lock
 
 Acquire exclusive v1 daemon authority.
 
-### B. Storage recovery and validation
+### B. Restore-entry mode and storage recovery/validation
 
-Open SQLite normally so SQLite can perform its own journal/WAL recovery. Validate schema/migration compatibility and run configured database consistency checks before controllers are allowed to perform side effects.
+Before treating the opened database as ordinary history, inspect the installation restore latch. A pending restore operation forces restore mode; the database is never allowed to downgrade that fact to ordinary startup.
+
+Open SQLite normally so SQLite can perform its own journal/WAL recovery. Validate installation identity, schema/migration compatibility and configured database consistency checks before controllers are allowed to perform side effects.
+
+If the latch is present and no matching committed restore RecoveryPass exists, T0 remains required. If the matching restore RecoveryPass is already IN_PROGRESS, startup resumes that pass rather than rotating a second RestoreGeneration.
 
 ### C. Incarnation registration
 
-Persist the new daemon incarnation and keep the global dispatch gate closed.
+Persist the new daemon incarnation and keep the global dispatch gate closed. Incarnation bookkeeping does not grant effect authority and cannot bypass pending T0.
 
 ### D. Durable inventory
 
@@ -256,7 +296,7 @@ Load at least:
 
 Sandbox inventory is **not derived only by walking Runs**. Verification Sandboxes belong to EvaluationOperations and must remain discoverable/reconcilable even when no Run owns them.
 
-In restore mode the inventory also includes Grants, CapabilityTickets, broker operations and Commands because their restored rows may represent authority/idempotency history older than external reality.
+In restore mode the inventory also includes Grants, CapabilityTickets, broker operations, Commands, AgentControlSessions, and the matching restore RecoveryPass because restored rows may represent authority/idempotency history older than external reality.
 
 ### E. Authority rotation and fencing
 
@@ -264,13 +304,15 @@ Adopt required Run control by incrementing ownership epoch and rotating lease to
 
 No old controller incarnation may remain authoritative.
 
-In restore mode, the new RestoreGeneration has already been committed before this point; old-generation Grants/Tickets cannot redeem and old-generation broker operations are reconciliation-only.
+In restore mode, the new RestoreGeneration has already been committed before this point. Old-generation Grants/Tickets cannot redeem, old-generation broker operations are reconciliation-only, and old-generation AgentControlSessions cannot authorize semantic worker requests.
 
 ### F. Domain reconciliation
 
 Controllers inspect their external domains and either establish current state or place affected resources into conservative fenced states.
 
 Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox.
+
+Restore mode has an additional certainty rule: negative observations recovered only from the snapshot are historical facts about the snapshot point. They do not prove that an external effect did not occur after that point. Fresh external inspection/inventory or an equivalent current fence must establish absence before a replacement/conflicting effect is authorized.
 
 ### G. Recovery barrier
 
@@ -288,6 +330,8 @@ inconsistent and explicitly blocked from automated destructive action
 ```
 
 The barrier does **not** require all external uncertainty to disappear.
+
+In restore mode the barrier also requires the matching restore RecoveryPass/T0 generation fence to exist durably. A surviving latch without a matching committed fence is a global stop condition, not a warning.
 
 ### H. Dispatch gate
 
@@ -312,7 +356,7 @@ unrelated resources = reconciled
 
 A single uncertain Run must not freeze all Goals indefinitely.
 
-Global dispatch remains disabled only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure or unreconciled installation ownership.
+Global dispatch remains disabled only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure, unreconciled installation ownership, or an incomplete disaster-restore generation fence.
 
 ## 8. Durable external-operation rule
 
@@ -341,6 +385,7 @@ Each domain provides an idempotency/reconciliation identity appropriate to the o
 ```text
 Attempt launch      → LaunchKey
 Evaluation launch   → EvaluationAttempt ID + launch-contact marker
+Agent Control       → AgentControlSession + RestoreGeneration + Attempt request identity
 Run control         → ControlLease leaseToken + epoch
 Sandbox             → SandboxKey + immutable Run/EvaluationOperation holder
 Workspace           → Workspace ID + deterministic desired path/base
@@ -374,6 +419,25 @@ operation may or may not have happened
 `UNKNOWN` never authorizes an independent replacement side effect.
 
 The controller first inspects/reconciles using the same stable identity. Recovery Policy may act only after the domain has established enough certainty for the proposed recovery scope.
+
+### Restore-specific negative evidence rule
+
+A disaster restore creates a temporal cut: the SQLite snapshot may be older than the current external world.
+
+Therefore any negative fact whose only evidence is the restored snapshot is not current negative proof. Examples include:
+
+```text
+Attempt.launchContactState = NOT_CONTACTED
+EvaluationAttempt.launchContactState = NOT_CONTACTED
+observed execution/sandbox = ABSENT
+broker operation row absent or PENDING
+Agent request/Operator command row absent
+no later Event/Evidence row present
+```
+
+These facts remain useful historical evidence about the snapshot point, but they cannot establish `NOT_APPLIED` for the post-snapshot interval. The external domain must be freshly inventoried/inspected, or an explicit isolation/fencing property must make a conflicting effect impossible, before Pantheon may authorize replacement work or conclude that an external side effect did not occur.
+
+This rule is restore-specific. On an uninterrupted authoritative database history, the normal durable launch/contact markers retain their ordinary negative-proof semantics.
 
 ## 10. Cleanup and finalization obligations
 
@@ -484,9 +548,27 @@ Possible observations:
 - no replacement Attempt is created;
 - schedule future reconciliation.
 
+On ordinary uninterrupted history, an Attempt that is durably `NOT_CONTACTED` and has no independent external evidence may use the launch-contact rule from `run-and-attempt.md` as proof that Pantheon's launch path never crossed the call boundary. In restore mode, a restored `NOT_CONTACTED` value is snapshot evidence only and does **not** establish absence for the post-snapshot interval; fresh backend inventory/inspection or an equivalent current fence is required before launch/replacement decisions rely on it.
+
 If a backend supports inventory of Pantheon-owned executions, recovery should also compare that inventory against durable Attempts to discover dangling executions.
 
 Unknown/dangling native executions are quarantined and reported before destructive cleanup.
+
+### Agent Control after restore
+
+AgentControlSession is part of external-execution authority, not merely authentication metadata.
+
+Every session is immutably bound to the RestoreGeneration in which it was created. Ordinary restart preserves that generation and therefore preserves same-Attempt session continuity. Disaster restore rotates the generation, so restored sessions from the snapshot are old-generation authority even if their row says `ACTIVE`.
+
+Before an Agent request lookup/idempotency decision or semantic worker mutation, Agent Control requires:
+
+```text
+session.restoreGeneration == current RestoreGeneration
+```
+
+A mismatch fails closed. The old session row is not rewritten to current. A still-running pre-restore worker may be inspected/reconciled or terminated by Pantheon controllers, but its credential cannot submit Candidates, spawn Tasks, invoke broker actions, or create/replay Agent requests.
+
+Pantheon does not automatically mint a replacement current-generation AgentControlSession for the same Attempt solely because recovery would otherwise stall. Same-Attempt credential/session rotation is a separate protocol and cannot be invented implicitly by restore recovery.
 
 ### Sandbox holder reconciliation
 
@@ -527,7 +609,9 @@ interpret H3 launch_contact_state
 inspect/reconcile same EvaluationAttempt identity where external contact may have occurred
 ```
 
-`NOT_CONTACTED` with no independent evidence means the evaluator launch path did not cross its call boundary. `CONTACT_MAY_HAVE_OCCURRED` remains UNKNOWN until the same EvaluationAttempt identity is reconciled/terminated. No overlapping EvaluationAttempt or replacement verification Sandbox is created from ambiguity.
+On uninterrupted history, `NOT_CONTACTED` with no independent evidence means the evaluator launch path did not cross its call boundary. `CONTACT_MAY_HAVE_OCCURRED` remains UNKNOWN until the same EvaluationAttempt identity is reconciled/terminated. No overlapping EvaluationAttempt or replacement verification Sandbox is created from ambiguity.
+
+In restore mode, a restored EvaluationAttempt `NOT_CONTACTED` value is historical snapshot evidence only. Fresh evaluation-domain inspection/inventory or a current isolation fence must establish that no post-snapshot evaluator execution exists before the negative value can authorize launch/replacement.
 
 A verification Sandbox can survive from EvaluationAttempt 1 to a later bounded EvaluationAttempt 2 only after attempt 1 is definitively terminal and only while the Sandbox's immutable identity/materialization, verification, resource ownership and current policy remain valid.
 
@@ -593,6 +677,8 @@ On restart:
 If external billing/allowance state is authoritative, refresh the external snapshot and record freshness before relying on new headroom.
 
 If actual external usage exceeds a Pantheon limit, record the true usage and mark the budget overdrawn; do not clamp history to the configured ceiling.
+
+During disaster restore, restored negative contact/usage observations are not assumed to describe the post-snapshot interval. Usage remains factual and may arrive late under immutable source provenance even while worker/control authority from the old generation is fenced.
 
 ## 16. Workspace and Git reconciliation
 
@@ -738,6 +824,8 @@ On restart:
 
 If a worker had mutable output but no Candidate was durably committed before the crash, Pantheon must not infer a candidate from logs or narration. It may later seal the preserved frozen workspace only through the normal candidate-sealing path if Run/Recovery policy still authorizes that operation and the exact intended output can be established.
 
+After disaster restore, a still-running worker from the pre-restore history cannot use an old-generation AgentControlSession to submit that missing Candidate. Its external process may be reconciled/finalized, but worker semantic authority remains fenced unless a separately defined recovery protocol creates new current authority.
+
 ## 20. Logical invariant scanner
 
 External reconciliation is not enough. Pantheon also scans durable relational invariants.
@@ -753,6 +841,9 @@ Run nonterminal
 
 Attempt nonterminal
 → parent Run must be nonterminal and current ownership known
+
+AgentControlSession accepted for semantic request
+→ session RestoreGeneration must equal current RestoreGeneration
 
 EvaluationAttempt nonterminal
 → parent EvaluationOperation must exist and no sibling EvaluationAttempt is nonterminal
@@ -774,7 +865,9 @@ Evidence PASS
 → subject/evaluator bindings must be complete
 ```
 
-In restore mode the scanner additionally checks that any newly redeemable Grant/Ticket, executable broker operation and accepted Operator command belongs to the current RestoreGeneration. Old-generation broker operations may remain only in reconciliation/fenced history.
+In restore mode the scanner additionally checks that any newly redeemable Grant/Ticket, executable broker operation, accepted Operator command, or semantic Agent Control session belongs to the current RestoreGeneration. Old-generation broker operations and AgentControlSessions may remain only as historical/reconciliation state and may not become executable authority.
+
+The scanner also verifies that a restore RecoveryPass carries the same `restoreOperationId` as any still-present restore latch and that the pass records the fresh generation established for that restore operation.
 
 Violations are classified, not silently patched.
 
@@ -827,7 +920,7 @@ Examples:
 
 - rebuild disposable in-memory queue;
 - refresh a derived condition;
-- reattach a known Attempt using the same LaunchKey;
+- reattach a known Attempt using the same LaunchKey on ordinary uninterrupted history;
 - re-inspect a known Sandbox by the same SandboxKey and durable holder;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
@@ -838,6 +931,8 @@ Examples:
 Inspect external state before deciding, for example:
 
 - uncertain executor/evaluator launch/termination;
+- restored negative launch/contact state that cannot establish the post-snapshot interval;
+- pre-restore worker execution whose Agent Control session is old-generation;
 - Sandbox existence/cleanup UNKNOWN for a Run or EvaluationOperation;
 - pending IntegrationIntent after crash;
 - old-generation broker operation whose effect may have occurred after the restored snapshot;
@@ -855,6 +950,7 @@ Examples:
 - unexplained shared Git ref mutation;
 - old-generation broker operation whose external outcome cannot be inventoried/established;
 - database integrity failure;
+- restore latch/install identity mismatch;
 - foreign-key/logical corruption that cannot be repaired from immutable history.
 
 Pantheon must not repair such cases by guessing or deleting evidence.
@@ -887,6 +983,7 @@ Global mutation/dispatch must stop for conditions such as:
 
 - SQLite integrity cannot be established;
 - installation lock/authority is ambiguous;
+- `restore.pending` exists but its matching T0/restore RecoveryPass cannot be established;
 - disaster-restore RestoreGeneration fence has not been durably committed;
 - schema is unsupported/incompletely migrated;
 - global resource/budget accounting is internally contradictory in a way that could cause unsafe double allocation.
@@ -897,7 +994,9 @@ Once the storage gate is safe, Pantheon may expose inspection/status APIs before
 
 Desired-state writes that do not create immediate external side effects may be accepted and queued during ordinary startup, but the dispatch gate remains closed until the recovery barrier is satisfied.
 
-During disaster restore, no authority-broadening or effect-creating Operator mutation may be accepted until the new RestoreGeneration has been committed. Requests carrying a pre-restore command epoch fail closed rather than being reinterpreted as new commands.
+During disaster restore, no authority-broadening or effect-creating Operator mutation may be accepted until the matching T0 has committed the new RestoreGeneration. Requests carrying a pre-restore command epoch fail closed rather than being reinterpreted as new commands.
+
+Agent Control is stricter: an old-generation session cannot perform semantic Agent requests even after T0. Its external Attempt remains recovery state, not worker authority under the new generation.
 
 Safety-reducing operations should remain available where possible, including:
 
@@ -966,7 +1065,27 @@ Create consistent snapshots using SQLite-supported online backup mechanisms. Rec
 - backup digest/checksum;
 - application version.
 
-The snapshot necessarily includes the then-current RestoreGeneration, Grants, CapabilityTickets, broker operations and Commands. Those rows are historical after an older backup is restored until the post-restore authority fence is established.
+The snapshot necessarily includes the then-current RestoreGeneration, Grants, CapabilityTickets, broker operations, Commands and AgentControlSessions. Those rows are historical authority after an older backup is restored until the post-restore authority fence is established.
+
+The `restore.pending` latch is installation-maintenance state and is deliberately not part of the SQLite backup payload.
+
+### Supported restore entry
+
+Pantheon cannot safely distinguish a normal restart from arbitrary rollback of `pantheon.db` by consulting the rolled-back database alone. Safe v1 disaster restore therefore begins **before** the database is replaced:
+
+```text
+acquire exclusive installation maintenance lock
+        ↓
+validate selected backup metadata enough to identify intended installation
+        ↓
+create durable restore.pending with fresh restoreOperationId
+        ↓
+replace/install the selected consistent SQLite snapshot
+        ↓
+start/open Pantheon in forced restore mode
+```
+
+If the process crashes after the database replacement but before T0, the external latch survives and forces restore mode on the next startup. Raw file replacement that skips this step is not equivalent to the supported recovery procedure.
 
 ### Restore authority fence
 
@@ -977,31 +1096,67 @@ DO NOT immediately enable Scheduler dispatch
 DO NOT redeem restored Grants/Tickets
 DO NOT execute restored pending broker operations
 DO NOT accept an old command epoch as a new command
+DO NOT accept semantic Agent Control from restored old-generation sessions
+DO NOT treat restored negative observations as proof that later external effects never happened
 ```
 
 External executors, Sandboxes, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
 
 Restore recovery therefore:
 
-1. acquires installation authority and validates that the snapshot belongs to the intended installation;
-2. opens/validates SQLite schema/integrity while all effect-creating gates remain closed;
-3. creates a new daemon incarnation;
-4. **commits a fresh unpredictable RestoreGeneration as the first post-restore authority transition**, and rotates JournalEpoch separately for event continuity;
-5. rotates all active Run ControlLease tokens before Run/executor commands;
-6. treats every restored Grant/CapabilityTicket from the old generation as non-redeemable historical authority; re-affirmation creates a new current-generation Grant rather than reactivating the old row;
-7. treats every restored old-generation broker operation as reconciliation-only: inspect by the original stable identity where possible, never reissue merely because restored SQLite says `PENDING`/incomplete;
-8. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
-9. inventories every external domain capable of containing Pantheon-owned state, including Run- and EvaluationOperation-owned Sandboxes, and reconciles/fences effects newer than or absent from the restored database;
-10. requires operator action for un-inventoriable ambiguous domains/operations;
-11. opens normal mutation/dispatch only after the recovery barrier is satisfied.
+1. verifies exclusive installation authority and the durable `restore.pending` operation identity;
+2. opens/validates the restored SQLite installation identity, schema and integrity while all effect-creating gates remain closed;
+3. creates a new daemon incarnation as bookkeeping without granting effect authority;
+4. **commits a fresh unpredictable RestoreGeneration as T0 for this `restoreOperationId`**, rotates JournalEpoch separately for event continuity, and records `RecoveryPass(mode=restore, restoreOperationId, priorRestoredGeneration, newRestoreGeneration, IN_PROGRESS)` in the same transaction;
+5. durably clears `restore.pending` only after the matching T0 commit is established; if a crash occurs before clearing it, the matching RecoveryPass causes resume rather than another generation rotation;
+6. rotates all active Run ControlLease tokens before Run/executor commands;
+7. treats every restored Grant/CapabilityTicket from the old generation as non-redeemable historical authority; re-affirmation creates a new current-generation Grant rather than reactivating the old row;
+8. treats every restored old-generation broker operation as reconciliation-only: inspect by the original stable identity where possible, never reissue merely because restored SQLite says `PENDING`/incomplete;
+9. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
+10. rejects semantic Agent Control from any session whose immutable session RestoreGeneration differs from current **before** `agent_requests` lookup/creation; the external Attempt may still be inspected/terminated/reconciled by controllers;
+11. inventories every external domain capable of containing Pantheon-owned state, including Run- and EvaluationOperation-owned Sandboxes, and reconciles/fences effects newer than or absent from the restored database;
+12. treats snapshot-only `NOT_CONTACTED`, `ABSENT`, row absence and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
+13. requires operator action for un-inventoriable ambiguous domains/operations;
+14. opens normal mutation/dispatch only after the recovery barrier is satisfied.
 
 A restored database snapshot is never permission to blindly replay historical external operations.
+
+### Restore-operation crash semantics
+
+The restore latch and durable RecoveryPass form one handshake:
+
+```text
+restore.pending exists
++ no matching RecoveryPass/T0
+→ restore fence still required
+
+restore.pending exists
++ matching IN_PROGRESS RecoveryPass with new generation
+→ T0 already committed
+→ resume same restore operation
+→ clear stale latch when safe
+
+restore.pending absent
++ matching IN_PROGRESS RecoveryPass
+→ T0 committed and latch was already cleared
+→ continue reconciliation
+```
+
+Pantheon never rotates repeated generations merely because the process crashed after T0.
 
 ### Grant replay prevention
 
 A one-use Grant consumed after the backup may appear unused again after restore. The RestoreGeneration mismatch makes it impossible to redeem that restored Grant, independent of the restored use counter.
 
 If the operator wants the same authority again, they explicitly approve/re-affirm it under the current generation. Pantheon therefore preserves the semantic meaning of a bounded human approval even when the database history recording its consumption was lost.
+
+### Agent Control replay prevention
+
+An AgentControlSession is minted under one RestoreGeneration. A worker may still physically possess its raw credential after the database is restored, while the restored `agent_requests` table may lack requests that the worker already made after the snapshot.
+
+Therefore Agent Control first requires the session generation to equal the current RestoreGeneration. An old-generation request never reaches request-row lookup/creation, so row absence cannot convert a previously executed worker request into fresh authority.
+
+This fence does not assert that the external worker stopped. The Attempt/executor is reconciled independently. The session remains historical/fenced and is not rewritten to current. Automatic same-Attempt credential reminting is not part of this restore correction.
 
 ### Broker-operation reconciliation after restore
 
@@ -1017,7 +1172,9 @@ inspect external system using original stable operation/idempotency identity
 CONFIRMED | NOT_APPLIED | UNKNOWN
 ```
 
-If CONFIRMED, record the reconciled historical outcome. If NOT_APPLIED is provable, Recovery Policy/operator may intentionally create new current-generation authority if the effect is still desired. If UNKNOWN, remain fenced; do not rotate the operation identity and retry.
+If CONFIRMED, record the reconciled historical outcome. If NOT_APPLIED is provable under current external evidence, Recovery Policy/operator may intentionally create new current-generation authority if the effect is still desired. If UNKNOWN, remain fenced; do not rotate the operation identity and retry.
+
+A restored PENDING/ABSENT row is not by itself `NOT_APPLIED`; the restore-specific negative evidence rule applies.
 
 ### Operator command identity after restore
 
@@ -1084,13 +1241,17 @@ CAS ref update before IntegrationIntent acknowledgement
 finalization obligation satisfaction before terminal transition
 ```
 
-Restore tests additionally construct an older consistent snapshot, perform newer external/control effects, restore the old snapshot, and assert at least:
+Restore tests additionally construct an older consistent snapshot, perform newer external/control effects, then execute the **supported restore-entry procedure** and assert at least:
 
 ```text
+restore.pending survives crash after DB replacement but before T0
+crash after T0 but before latch removal resumes the same restoreOperationId without a second generation rotation
 consumed one-use Grant cannot redeem again
 old-generation CapabilityTicket cannot redeem
 restored PENDING broker operation cannot execute again without reconciliation proof
 old commandEpoch + commandId cannot become a new command when its row is absent
+old-generation AgentControlSession cannot create/replay agent_requests or submit/spawn/invoke
+restored NOT_CONTACTED/ABSENT snapshot facts do not authorize replacement work until fresh domain reconciliation proves current absence
 fresh RestoreGeneration is different from every value recovered from the snapshot
 Run- and EvaluationOperation-owned Sandboxes are inventoried/reconciled by durable SandboxKey+holder
 ```
@@ -1111,7 +1272,9 @@ Property/invariant tests should continuously assert:
 - no controller command accepted under stale lease token;
 - no Grant/CapabilityTicket redeemed across RestoreGeneration;
 - no old-generation broker operation reissued as an external effect;
-- no Operator command accepted under a stale commandEpoch.
+- no Operator command accepted under a stale commandEpoch;
+- no semantic Agent Control request accepted from an old-generation AgentControlSession;
+- no snapshot-only negative observation treated as current post-restore proof of absence.
 
 ## 30. Recovery passes
 
@@ -1122,6 +1285,10 @@ recoveryPass:
   id: recovery-pass_...
   mode: startup | periodic | manual | restore
   daemonIncarnation: ...
+  restoreOperationId: restore-op_...      # restore mode only
+  priorRestoredGeneration: ...            # historical metadata only
+  newRestoreGeneration: ...               # restore mode only
+  state: IN_PROGRESS | BARRIER_SATISFIED | COMPLETE
   startedAt: ...
   barrierSatisfiedAt: ...
   completedAt: ...
@@ -1130,7 +1297,9 @@ recoveryPass:
     quarantined: 1
 ```
 
-Restore-mode RecoveryPass records the old restored generation (as historical metadata where available) and the newly committed RestoreGeneration without treating the old value as authority.
+Restore-mode RecoveryPass records the old restored generation as historical metadata, the newly committed RestoreGeneration, and the external restore-operation identity. The old generation is never treated as current authority.
+
+A matching IN_PROGRESS restore pass is also the durable proof that T0 already committed for that `restoreOperationId`; a surviving `restore.pending` latch after such a crash does not cause another generation rotation.
 
 A pass is not required to reach zero findings before scheduler dispatch. It must only reach the recovery barrier: every relevant unresolved item is safely fenced.
 
@@ -1141,13 +1310,15 @@ Pantheon should avoid one giant global recovery controller.
 A practical startup dependency order is:
 
 ```text
-Storage / Installation Authority
+Installation lock + restore-entry latch interpretation
         ↓
-RestoreGeneration fence (restore mode only)
+Storage / Installation Authority validation
+        ↓
+RestoreGeneration T0 fence / matching RecoveryPass (restore mode only)
         ↓
 Run ControlLease adoption + EvaluationOperation intent inventory
         ↓
-Authorization / broker-operation reconciliation
+Authorization / broker-operation / Agent Control generation reconciliation
         ↓
 Workspace/materialization ownership reconciliation
         ↓
@@ -1170,7 +1341,7 @@ This is a dependency graph, not a requirement that every controller execute seri
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
-The global Recovery Coordinator owns only startup gating, restore-generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic.
+The global Recovery Coordinator owns only startup gating, restore-entry/generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic.
 
 ## 32. v1 scope
 
@@ -1178,8 +1349,10 @@ Include:
 
 - single-daemon installation lock;
 - stable Installation ID and per-start daemon incarnation ID;
+- explicit crash-safe restore-entry latch outside the restored SQLite snapshot;
+- one restoreOperationId/T0/RecoveryPass handshake that prevents both missed and repeated generation rotation;
 - fresh RestoreGeneration rotation on disaster restore;
-- generation-bound Grants/CapabilityTickets/broker operations and Operator commands;
+- generation-bound Grants/CapabilityTickets/broker operations, Operator commands, and Agent Control sessions;
 - Run ControlLease token rotation plus ownership epoch;
 - staged startup and global dispatch gate;
 - recovery barrier based on reconciled/fenced/quarantined obligations;
@@ -1187,10 +1360,11 @@ Include:
 - finalization obligations for cleanup safety;
 - Run/Attempt and EvaluationOperation/EvaluationAttempt recovery;
 - holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey;
+- restore-specific rule that snapshot-only negative observations are not current post-snapshot proof of absence;
 - authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
 - durable RecoveryFindings;
 - invariant scanning and quarantine;
-- SQLite integrity/version checks and supported backup procedure;
+- SQLite integrity/version checks and supported backup/restore procedure;
 - restore-specific recovery mode;
 - crash/fault-injection tests around every external-side-effect boundary.
 
@@ -1202,6 +1376,7 @@ Defer:
 - automated database page-level salvage;
 - cross-machine CAS replication protocol;
 - live migration of running Attempts;
+- automatic same-Attempt Agent Control credential rotation after disaster restore;
 - global transaction protocol across external systems.
 
 ## Key decisions
@@ -1227,11 +1402,15 @@ Defer:
 19. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
 20. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
 21. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-22. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human-authority consumption histories may be newer than the snapshot.**
-23. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
-24. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
-25. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
-26. **Clean daemon shutdown and cancellation of external work are separate intents.**
-27. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
-28. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-29. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
+22. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
+23. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
+24. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
+25. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+26. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+27. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+28. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
+29. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
+30. **Clean daemon shutdown and cancellation of external work are separate intents.**
+31. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
+32. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+33. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
