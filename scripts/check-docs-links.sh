@@ -213,8 +213,12 @@ else
 	# Order is part of the contract, so check it — but only once all three are
 	# present, since otherwise this would restate the error just reported.
 	if [ -z "$missing" ]; then
-		order=$(sed -n 's/^## \(Mission\|Change\|Evidence\)[[:space:]]*$/\1/p' \
-			"$template" | tr '\n' ' ')
+		# `\(...\|...\)` alternation inside a sed BRE is a GNU extension, not
+		# POSIX and not supported by BSD sed (macOS). `grep -E` alternation
+		# is POSIX ERE and behaves identically on both; the sed pass after it
+		# only strips a fixed prefix/suffix, no alternation needed.
+		order=$(grep -E '^## (Mission|Change|Evidence)[[:space:]]*$' "$template" |
+			sed -e 's/^## //' -e 's/[[:space:]]*$//' | tr '\n' ' ')
 		if [ "$order" != "Mission Change Evidence " ]; then
 			printf '%s: stable headings are out of order: %s\n' \
 				"$template" "$order" >&2
