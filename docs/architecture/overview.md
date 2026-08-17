@@ -133,6 +133,18 @@ inspect/reconcile
 persist result
 ```
 
+Every Pantheon identity that is transmitted to, or later matched against, an external system to create, ensure, deduplicate, inspect, reconcile, terminate or otherwise address one external-effect lineage is **rewind-resistant**. This includes the external identities named by Global Recovery's durable external-operation rule, such as `LaunchKey`, `SandboxKey`, Planning/Evaluation attempt correlation identities and broker-operation idempotency identities.
+
+```text
+existing/restored external lineage
+→ preserve its exact original external identity for reconciliation
+
+genuinely new external lineage/effect
+→ mint a fresh globally non-reused identity before external contact
+```
+
+For v1, a newly minted external-effect identity uses cryptographically strong fresh randomness. It must never be derived solely from SQLite row IDs, attempt ordinals, monotonic counters, resource IDs or other state that a supported disaster restore can rewind and later reproduce. A `UNIQUE` constraint inside the current database is necessary where specified but is not proof of non-reuse across database rewind. Ordinary internal resource IDs that are never used to address an external effect do not acquire this requirement merely by being durable identifiers.
+
 Ordinary content-addressed CAS is the deliberate inverse: durable immutable bytes are completed before SQLite references them because orphan CAS bytes are harmless while DB references to missing bytes are unsafe.
 
 ## Code Workspaces / Artifacts
