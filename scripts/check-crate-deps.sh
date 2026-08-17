@@ -18,12 +18,19 @@
 # The graph comes from `cargo tree`, which reads Cargo's own resolved
 # dependencies. Pantheon deliberately does not grep the manifests: a dependency
 # can be declared under `[dev-dependencies]`, `[build-dependencies]` or a
-# `[target.'cfg(...)'.dependencies]` table, renamed with `package = `, or
-# inherited from the workspace, and a TOML grep that misses any of those
-# reports a clean graph while the edge exists.
+# `[target.'cfg(...)'.dependencies]` table, renamed with `package = `, inherited
+# from the workspace, or hidden behind an optional feature. A TOML grep or a
+# default-feature-only graph can therefore report a clean boundary while a
+# forbidden edge remains declarable.
 #
-# Three flags are load-bearing, and each was chosen against observed behaviour:
+# Four flags are load-bearing, and each exists to expose a class of dependency
+# edge that must not bypass the architecture boundary:
 #
+#   --all-features       Optional dependencies are still architectural edges.
+#                        This checker asks what a crate *can* depend on, not
+#                        which feature combination is a meaningful product
+#                        build. Normal build/test verification deliberately does
+#                        not use --all-features.
 #   --target all         Without it, cargo tree reports only the host platform,
 #                        so an edge behind `cfg(windows)` is invisible on Linux
 #                        and CI passes while the boundary is broken.
@@ -74,7 +81,7 @@ tmp=${TMPDIR:-/tmp}/pantheon-crate-deps.$$
 trap 'rm -f "$tmp".*' EXIT HUP INT TERM
 : >"$tmp.errors"
 
-cargo tree --workspace --locked --depth 1 --prefix depth --no-dedupe \
+cargo tree --workspace --locked --all-features --depth 1 --prefix depth --no-dedupe \
 	-e normal,build,dev --target all >"$tmp.tree"
 
 # `--prefix depth` prints the depth immediately before the package name, so
@@ -127,10 +134,12 @@ allowed_for() {
 # 1. Every internal edge is allowed. Only edges whose target is itself a
 #    workspace member are internal; everything else is a third-party crate.
 sed -n 's/^EDGE //p' "$tmp.records" | sort -u >"$tmp.edges"
+: >"$tmp.internal-edges"
 while read -r from to; do
 	[ -n "${to:-}" ] || continue
 	grep -qxF "$to" "$tmp.members" || continue
 	if [ "$from" = "$to" ]; then continue; fi
+	printf '%s %s\n' "$from" "$to" >>"$tmp.internal-edges"
 	allowed=$(allowed_for "$from")
 	case " $allowed " in
 	*" $to "*) ;;
@@ -148,4 +157,4 @@ fi
 
 printf 'crate dependency check: OK (%s crates, %s internal edges)\n' \
 	"$(wc -l <"$tmp.members" | tr -d ' ')" \
-	"$(wc -l <"$tmp.edges" | tr -d ' ')"
+	"$(wc -l <"$tmp.internal-edges" | tr -d ' ')"
