@@ -14,7 +14,7 @@ See also:
 - `blocking-spawn-and-run-yield.md`
 - `task-acceptance-and-completion.md`
 - `recovery-policy.md`
-- `goal-revision-and-reconciliation.md`
+- `goal-revision-reconciliation.md`
 
 ## Foundational invariants
 
