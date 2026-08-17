@@ -113,6 +113,16 @@ Before reporting a change complete:
 - every line of the diff traces to the task;
 - work you found but did not do is reported.
 
+A change reaches `main` through a pull request carrying the evidence for those
+claims and an independent review. `docs/development/change-lifecycle.md` is that
+contract, including the distinction between a logical reviewer and the GitHub
+credential that records the review.
+
+If you stop before the work is finished — the session ends, ownership changes,
+or you are blocked — leave a handoff as that contract describes: on the pull
+request when one exists, otherwise on the mission Issue. What you know and do
+not record is lost with the session.
+
 ## About this file
 
 `AGENTS.md` is the canonical contract for every coding agent. `CLAUDE.md`

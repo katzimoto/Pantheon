@@ -1,5 +1,5 @@
 #!/bin/sh
-# Validate documentation structure and agent-contract wiring. Five independent
+# Validate documentation structure and agent-contract wiring. Six independent
 # checks, numbered as they appear below:
 #
 #   1. Inline-code references resolve. Pantheon docs reference each other with
@@ -25,6 +25,12 @@
 #      the Engineering Mission form is the default way a human authors one.
 #      This verifies that the form still exists and that blank issues stay
 #      disabled, so the form is still what the template chooser offers.
+#
+#   6. The pull request template exists and keeps its stable headings. A pull
+#      request is the candidate change and its evidence
+#      (docs/development/change-lifecycle.md), and the headings under which that
+#      evidence is written are the part other tools read. This checks the
+#      template only. Nothing inspects the body of an actual pull request.
 #
 # Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
@@ -175,6 +181,39 @@ if [ ! -f "$chooser" ]; then
 elif ! grep -qE '^blank_issues_enabled:[[:space:]]*false[[:space:]]*$' "$chooser"; then
 	echo "$chooser: blank_issues_enabled is not false; a blank issue is a creation path again" >&2
 	status=1
+fi
+
+# 6. The pull request template exists and still carries its stable headings.
+# docs/development/change-lifecycle.md fixes three of them, in that order,
+# because agents and future Pantheon adapters read them; the optional fourth
+# section is deleted when a change has nothing to put in it, so it is not
+# required here. The template is one authoring interface and not the contract,
+# which is why this checks the file and stops there: grading the prose of a real
+# pull request body is a judgement, and review is what makes it.
+template=.github/pull_request_template.md
+if [ ! -f "$template" ]; then
+	echo "missing pull request template: $template" >&2
+	status=1
+else
+	missing=
+	for heading in Mission Change Evidence; do
+		if ! grep -q "^## $heading[[:space:]]*$" "$template"; then
+			printf '%s: missing stable heading: ## %s\n' "$template" "$heading" >&2
+			missing=yes
+			status=1
+		fi
+	done
+	# Order is part of the contract, so check it — but only once all three are
+	# present, since otherwise this would restate the error just reported.
+	if [ -z "$missing" ]; then
+		order=$(sed -n 's/^## \(Mission\|Change\|Evidence\)[[:space:]]*$/\1/p' \
+			"$template" | tr '\n' ' ')
+		if [ "$order" != "Mission Change Evidence " ]; then
+			printf '%s: stable headings are out of order: %s\n' \
+				"$template" "$order" >&2
+			status=1
+		fi
+	fi
 fi
 
 if [ "$status" -eq 0 ]; then
