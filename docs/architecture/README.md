@@ -22,7 +22,7 @@ opens with a `## Status` section stating how far its authority extends.
 | `docs/architecture/evaluation-and-acceptance/` | Verification of results and the authority to accept a Task |
 | `docs/architecture/artifacts-and-workspaces/` | Immutable results, mutable workspaces, and Git integration |
 | `docs/architecture/security/` | Authorization, physical isolation, and secret brokering |
-| `docs/architecture/persistence-and-recovery/` | Durable state, crash reconciliation, and retry/escalation policy |
+| `docs/architecture/persistence-and-recovery/` | Durable state, crash reconciliation, backup/restore, and retry/escalation policy |
 | `docs/architecture/operations/` | Configuration, accounting, observability, and the operator interface |
 
 ---
@@ -165,18 +165,20 @@ Durable truth and how it is restored after things go wrong.
 |---|---|
 | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` | The relational model, transaction boundaries, and the rule that external effects never occur inside a transaction |
 | `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` | Reconstructing safe control after crashes, partial external effects and divergence; fencing and recovery barriers |
+| `docs/architecture/persistence-and-recovery/backup-and-restore.md` | DB-only versus payload-complete backup guarantees, snapshot-derived CAS closure, GC exclusion during capture, and restore-input verification |
 | `docs/architecture/persistence-and-recovery/recovery-policy.md` | Converting failure/condition evidence into the next permitted action: retry, escalate, or reconcile UNKNOWN first |
 
-These three are frequently consulted together: persistence defines what is
-durable, global recovery defines what must be reconciled or fenced, and
-recovery policy decides what happens next. External-domain contracts may add
-mandatory domain-specific reconciliation semantics; SecretProvider mutations
-and CredentialLeases are defined in
+These contracts are frequently consulted together: persistence defines what is
+durable, global recovery defines what must be reconciled or fenced, backup and
+restore defines what a restorable backup actually contains, and recovery policy
+decides what happens next. External-domain contracts may add mandatory
+domain-specific reconciliation semantics; SecretProvider mutations and
+CredentialLeases are defined in
 `docs/architecture/security/secret-store-and-credential-brokering.md` and
 participate in the same global recovery barrier/fencing model.
 
-Read when: changing schema, transaction boundaries, external-effect ordering,
-crash behaviour, or retry/escalation.
+Read when: changing schema, transaction boundaries, backup/restore guarantees,
+external-effect ordering, crash behaviour, or retry/escalation.
 
 ## operations/
 
@@ -233,13 +235,27 @@ only if dispatch commit conditions change.
 2. `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`
 3. `docs/architecture/persistence-and-recovery/recovery-policy.md`
 
-Consult `docs/architecture/operations/event-and-observability-model.md` if the
-Event Journal or transactional outbox is involved,
+Consult `docs/architecture/persistence-and-recovery/backup-and-restore.md` if
+backup completeness, CAS capture, backup verification, or restore-input scope is
+involved; `docs/architecture/operations/event-and-observability-model.md` if the
+Event Journal or transactional outbox is involved;
 `docs/architecture/execution/run-and-attempt.md` if Attempt contact state or
-fencing is involved, and
+fencing is involved; and
 `docs/architecture/security/secret-store-and-credential-brokering.md` if a
 SecretProvider, `SecretMutationIntent`, `SecretDescriptor`, credential use, or
 `CredentialLease` is involved.
+
+**Changing backup or restore guarantees**
+
+1. `docs/architecture/persistence-and-recovery/backup-and-restore.md`
+2. `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`
+3. `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
+
+Consult `docs/architecture/artifacts-and-workspaces/artifact-model.md` if
+retention roots, CAS completeness or GC semantics change, and
+`docs/architecture/security/secret-store-and-credential-brokering.md` if secret
+metadata/provider reconciliation scope changes. Backup payload completeness
+never replaces Global Recovery's external-domain fencing.
 
 **Changing execution routing or backend integration**
 
