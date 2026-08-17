@@ -558,7 +558,7 @@ plus request hash/operation/state/result/problem refs. Same ID+same hash is idem
 
 ## Sandbox
 
-SandboxInstance has immutable SandboxKey/Plan identity, immutable relational holder ownership, and separate mutable desired/observed status. V1 Sandbox holders are exactly:
+SandboxInstance has immutable SandboxKey/Plan identity and immutable relational holder ownership. Mutable controller lifecycle and mutable external existence observation live together in `sandbox_status` but remain separate facts. V1 Sandbox holders are exactly:
 
 ```text
 RUN
@@ -594,7 +594,34 @@ Pantheon does not use one opaque polymorphic `holder_ref` as the safety boundary
 
 Provisioning intent and SandboxKey are committed before external runtime calls. The holder cannot be rewritten to another Run/EvaluationOperation after creation.
 
-V1 requires at most one current/non-RELEASED SandboxInstance per Run holder and per EvaluationOperation holder. Because mutable Sandbox lifecycle is kept in `sandbox_status`, the architecture does not prescribe a fictitious cross-table partial index here: the Sandbox desired-state transaction serializes and rechecks this rule, and PersistenceInvariantChecker verifies it. Exact DDL may denormalize an active-holder key or use another relational technique if implementation needs declarative uniqueness without collapsing immutable identity and mutable status.
+The mutable shape is explicit:
+
+```text
+sandbox_status
+  sandbox_id PK/FK -> sandbox_instances
+  phase                      REQUESTED|PREPARING|READY|RELEASING|RELEASED|ERROR
+  observed_presence          PRESENT|ABSENT|UNKNOWN
+  revision
+  observed_at
+  observation_provenance
+  updated_at
+```
+
+`phase` is controller lifecycle. `observed_presence` is factual external existence certainty. `UNKNOWN` is not a lifecycle phase, and `ERROR` does not imply `ABSENT`.
+
+Normal release requires:
+
+```text
+phase = RELEASING
++ observed_presence = ABSENT
+→ phase = RELEASED
+```
+
+`phase=RELEASED` with `observed_presence=PRESENT` is invalid. `phase=RELEASED` with `observed_presence=UNKNOWN` is permitted only for an explicit audited force-resolution lineage that has a matching durable `external_lineage_tombstone`/fence; the factual observation remains UNKNOWN rather than being rewritten to ABSENT.
+
+V1 requires at most one current/replacement-authoritative SandboxInstance per Run holder and per EvaluationOperation holder. Ordinarily any Sandbox whose phase is not `RELEASED`, or whose presence is unresolved, occupies that holder slot. A force-resolved `RELEASED+UNKNOWN` lineage is excluded only because its durable tombstone/fence prevents the old SandboxKey from regaining authority. A bare lifecycle rewrite never frees the slot.
+
+Because mutable Sandbox lifecycle/presence is kept in `sandbox_status`, the architecture does not prescribe a fictitious cross-table partial index here: the Sandbox desired-state transaction serializes and rechecks holder occupancy, observation certainty and any tombstone exception, and PersistenceInvariantChecker verifies them. Exact DDL may denormalize an active-holder key or use another relational technique if implementation needs declarative uniqueness without collapsing immutable identity and mutable status.
 
 SandboxVerification records factual verification of expected SandboxKey, immutable holder identity, environment identity, mounts/materialization, network, privilege controls, Agent Control exposure where applicable, and limits before `SandboxReady=True`. A normal Attempt requires its Run Sandbox verification; an externally executing EvaluationAttempt requires its owning EvaluationOperation verification Sandbox to be READY first.
 
@@ -673,7 +700,7 @@ external_lineage_tombstones
   created_at
 ```
 
-A tombstoned LaunchKey/session/control-operation attempt can never regain current control authority. Late observations may be recorded as history/usage but cannot mutate the current execution lineage.
+A tombstoned LaunchKey/session/control-operation attempt can never regain current control authority. The same rule applies to a force-resolved SandboxKey: a `RELEASED+UNKNOWN` Sandbox may be considered closed only when its matching durable tombstone/fence prevents that uncertain external runtime from regaining Pantheon authority or being mistaken for the replacement Sandbox. Late observations may be recorded as history/usage but cannot mutate the current execution lineage.
 
 ## Artifacts / CAS
 
@@ -1090,7 +1117,11 @@ EvaluationAttempt launch-contact state valid/monotonic; contact provenance prese
 one live Task-scoped reservation per singular (Task, ResourceKey)
 Reservation holder validity, including concrete PlanningOperation/EvaluationOperation control-operation holder
 Sandbox holder XOR/FK validity (Run xor EvaluationOperation)
-at most one current/non-RELEASED Sandbox per Run/EvaluationOperation holder
+Sandbox phase is in REQUESTED|PREPARING|READY|RELEASING|RELEASED|ERROR
+Sandbox observed_presence is independently PRESENT|ABSENT|UNKNOWN
+Sandbox RELEASED+PRESENT is invalid
+Sandbox RELEASED+UNKNOWN requires a matching durable force-resolution tombstone/fence
+at most one current/replacement-authoritative Sandbox per Run/EvaluationOperation holder
 SandboxVerification holder/SandboxKey identity matches SandboxInstance
 Budget aggregate == immutable ledger reconstruction
 Usage provenance/backend ownership for Attempt and concrete control-operation subjects
@@ -1105,7 +1136,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task row-local pointer facts remain schema `CHECK` constraints. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task row-local pointer facts remain schema `CHECK` constraints. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -1145,7 +1176,7 @@ T4b verifies the same current Attempt/Run/control authority **and the exact curr
 
 T7 loads the EvaluationRound's concrete typed subject and exact pinned criterion/EvaluatorVersion, rechecks the owning lifecycle object's currentness, creates immutable Evidence, updates criterion/Aggregate AcceptanceResult state and settles applicable control-operation accounting in one authoritative transaction. For `TASK_CANDIDATE`, Task must still be Evaluating with that exact current Candidate. For `GOAL_COMPLETION_CANDIDATE`, Goal must still be Evaluating with that exact current completion candidate and represented GoalRevision current for completion. T7 never lets the evaluator itself transition Task or Goal lifecycle; owning controllers apply current aggregate results through their lifecycle transitions.
 
-T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
+T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs, SandboxKey and initial `sandbox_status` before any runtime call. Lifecycle phase and external observed presence are updated independently from factual inspection. Ordinary release commits `RELEASED` only after `ABSENT` is established; an administratively force-resolved `RELEASED+UNKNOWN` lineage requires the matching durable tombstone/fence in the same authoritative recovery path. Release never erases holder identity or factual observation needed for audit/reconciliation.
 
 T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
 
@@ -1179,6 +1210,7 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 20. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
 21. Cancellation/supersession can beat Candidate submission through Task revision CAS.
 22. Requeue occurs only after previous responsible Run terminal.
-23. Force-resolution tombstones stale lineages without fabricating factual Usage.
+23. Force-resolution tombstones stale lineages without fabricating factual Usage or external absence.
 24. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-25. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+25. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
+26. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.

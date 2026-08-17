@@ -55,7 +55,7 @@ The authoritative sources are:
 - durable PlanningOperation/PlanningAttempt identities plus immutable PlanningRecord results where external planning exists;
 - immutable EvaluationRound typed-subject identity, exact pinned evaluator set, Evidence and AcceptanceResult records;
 - durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
-- durable SandboxInstance holder/SandboxKey identity and SandboxVerification facts;
+- durable SandboxInstance holder/SandboxKey identity, Sandbox lifecycle phase, external presence observation and SandboxVerification facts;
 - durable desired-state fields;
 - ResourceReservations and BudgetHolds;
 - current control ownership/fencing records;
@@ -293,7 +293,7 @@ Load at least:
 - nonterminal PlanningOperations and PlanningAttempts plus unresolved planning control-operation accounting;
 - active/current EvaluationRounds, their concrete typed subjects, Evidence/AcceptanceResults and nonterminal EvaluationOperations/EvaluationAttempts;
 - ExecutionBindings;
-- every SandboxInstance not RELEASED plus its durable holder and latest SandboxVerification;
+- every SandboxInstance whose phase is not RELEASED, plus any `RELEASED+UNKNOWN` Sandbox lacking a valid force-resolution tombstone/fence, together with its durable holder/latest status/SandboxVerification;
 - ResourceReservations not RELEASED;
 - BudgetHolds not settled/released;
 - WorkspaceRecords not RELEASED;
@@ -321,7 +321,7 @@ In restore mode, the new RestoreGeneration has already been committed before thi
 
 Controllers inspect their external domains and either establish current state or place affected resources into conservative fenced states.
 
-Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox.
+Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox. Sandbox lifecycle `phase` and factual `observedPresence` are reconciled independently; lifecycle ERROR/RELEASING never substitutes for proof of external absence.
 
 Planning Controller independently reconciles nonterminal PlanningAttempts by their durable PlanningAttempt identity/correlation. An unresolved `CONTACT_MAY_HAVE_OCCURRED` Planner call is not permission to issue an overlapping replacement call.
 
@@ -508,7 +508,7 @@ Typical obligations include:
 - candidate/evidence/planning result state durably sealed where required;
 - workspace outputs preserved before deletion;
 - managed Git ref/integration state reconciled;
-- Run or verification Sandbox cleanup confirmed where required.
+- Run or verification Sandbox cleanup confirmed absent, or explicitly force-resolved with a durable lineage fence plus a separate safe capacity/accounting disposition where physical occupancy remains uncertain.
 
 This is Pantheon's equivalent of a finalizer pattern: durable deletion intent plus controller-owned cleanup, not immediate record disappearance.
 
@@ -526,6 +526,7 @@ Pantheon must not physically delete:
 - ExecutionBindings;
 - current GoalCompletionCandidate/Task Candidate identities referenced by active acceptance;
 - non-RELEASED SandboxInstance holder/SandboxKey identity and required verification history;
+- `RELEASED+UNKNOWN` Sandbox history/tombstone/fence needed to explain why replacement authority was safe despite unresolved physical existence;
 - unresolved Reservations/Holds;
 - Workspace ownership records;
 - IntegrationIntents;
@@ -554,7 +555,7 @@ load current nonterminal Attempt, if any
 inspect backend by Attempt attachment / LaunchKey
 ```
 
-A normal Attempt may not be newly launched/relaunched until its required Run-owned Sandbox is reconciled and verified. Existing external execution may be inspected concurrently, but unresolved Sandbox state is never interpreted as permission to provision a replacement Sandbox.
+A normal Attempt may not be newly launched/relaunched until its required Run-owned Sandbox is reconciled and verified. Existing external execution may be inspected concurrently, but unresolved Sandbox presence is never interpreted as permission to provision a replacement Sandbox.
 
 Possible observations:
 
@@ -640,7 +641,19 @@ In restore mode, a restored PlanningAttempt `NOT_CONTACTED` value or absence of 
 
 ### Sandbox holder reconciliation
 
-Recovery independently walks **every non-RELEASED SandboxInstance**, resolves its immutable holder, and re-inspects the same SandboxKey.
+Recovery treats Sandbox controller lifecycle and external existence certainty as separate durable facts:
+
+```text
+phase:
+  REQUESTED | PREPARING | READY | RELEASING | RELEASED | ERROR
+
+observedPresence:
+  PRESENT | ABSENT | UNKNOWN
+```
+
+`UNKNOWN` is never a lifecycle phase. `ERROR` or a cleanup timeout never proves absence.
+
+Recovery independently walks every Sandbox whose phase is not `RELEASED`, and also any `RELEASED+UNKNOWN` row that lacks a valid matching force-resolution tombstone/fence. It resolves the immutable holder and re-inspects the same SandboxKey.
 
 ```text
 SandboxInstance
@@ -655,9 +668,33 @@ SandboxInstance
 For a valid live holder:
 
 - inspect/reconcile the existing SandboxKey;
+- persist factual `observedPresence` independently from lifecycle `phase`;
 - restore/refresh factual SandboxVerification where required;
-- keep corresponding ResourceReservation capacity charged until release is confirmed;
-- never provision an overlapping second Sandbox for the same holder while prior existence is UNKNOWN/non-RELEASED.
+- keep corresponding ResourceReservation capacity charged until absence or a separately safe capacity disposition is established;
+- never provision an overlapping second Sandbox for the same holder while prior existence is UNKNOWN and unfenced.
+
+Normal cleanup uses:
+
+```text
+RELEASING + ABSENT
+→ RELEASED
+```
+
+while ambiguous combinations remain conservative:
+
+```text
+ERROR + UNKNOWN
+→ runtime may still exist
+→ remain fenced; no blind replacement
+
+RELEASING + UNKNOWN
+→ destruction outcome ambiguous
+→ remain fenced; no blind replacement
+```
+
+`RELEASED+PRESENT` is an invariant violation. `RELEASED+UNKNOWN` is valid only when an explicit audited force-resolution produced a matching durable lineage tombstone/fence. The observation stays `UNKNOWN`; Pantheon never fabricates `ABSENT` to make cleanup look successful.
+
+A force-resolution tombstone fences the old SandboxKey's **authority/replacement identity**. It does not automatically prove underlying CPU/RAM/disk/container capacity is physically free. Recovery must separately keep/quarantine capacity or record another domain-specific safe accounting disposition before allocating capacity that could conflict with the uncertain runtime.
 
 If the holder is terminal but Sandbox cleanup is incomplete, the Sandbox remains a cleanup/finalization obligation and capacity is not released merely because the holder stopped executing.
 
@@ -765,7 +802,7 @@ holder missing / inconsistent
 → continue charging capacity
 ```
 
-For Sandbox capacity, an unresolved SandboxInstance is independent evidence that capacity may still be occupied. A Run/EvaluationOperation becoming terminal does not by itself release that capacity; Sandbox absence/release must be established according to its own lifecycle.
+For Sandbox capacity, lifecycle phase alone never proves capacity free. `observedPresence=UNKNOWN` keeps capacity charged/UNCERTAIN unless recovery has a separate domain-specific safe accounting disposition. A force-resolution tombstone can fence the old SandboxKey from authority/replacement identity, but it does not manufacture physical absence or automatically release capacity.
 
 For PlanningOperation control-operation capacity, an unresolved PlanningAttempt independently means the external planner work may still be using/charging the reserved resource. The reservation remains charged/UNCERTAIN until the planning lineage is reconciled or explicitly resolved.
 
@@ -1015,9 +1052,12 @@ current Task acceptance application
 current Goal acceptance application
 → Round subject is Goal's exact current GoalCompletionCandidate and represented GoalRevision is current/Evaluating
 
-SandboxInstance non-RELEASED
+SandboxInstance
 → exactly one valid holder exists: Run xor EvaluationOperation
-→ no overlapping current Sandbox exists for that same holder
+→ phase and observedPresence are independently valid domains
+→ phase=RELEASED + observedPresence=PRESENT is invalid
+→ phase=RELEASED + observedPresence=UNKNOWN requires matching durable force-resolution tombstone/fence
+→ no overlapping replacement-authoritative Sandbox exists for the same holder while an older Sandbox is non-RELEASED or unresolved/unfenced
 
 ResourceReservation non-RELEASED
 → holder reference must exist or reservation is quarantined
@@ -1087,6 +1127,7 @@ Examples:
 - reattach a known Attempt using the same LaunchKey on ordinary uninterrupted history;
 - resume/reconcile a known PlanningAttempt by the same durable attempt identity when external correlation makes that safe;
 - re-inspect a known Sandbox by the same SandboxKey and durable holder;
+- advance Sandbox `RELEASING -> RELEASED` after fresh observation establishes `ABSENT`;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
 - use Git's supported worktree repair operation when ownership and expected path are unambiguous;
@@ -1099,7 +1140,7 @@ Inspect external state before deciding, for example:
 - uncertain executor/evaluator/planner external contact/termination/result;
 - restored negative launch/contact state that cannot establish the post-snapshot interval;
 - pre-restore worker execution whose Agent Control session is old-generation;
-- Sandbox existence/cleanup UNKNOWN for a Run or EvaluationOperation;
+- Sandbox existence/cleanup `UNKNOWN` for a Run or EvaluationOperation, including `ERROR+UNKNOWN` or `RELEASING+UNKNOWN`;
 - pending IntegrationIntent after crash;
 - old-generation broker operation whose effect may have occurred after the restored snapshot;
 - workspace that may contain unsealed user/Agent work;
@@ -1115,7 +1156,9 @@ Examples:
 - EvaluationRound with both/neither concrete subject FK;
 - EvaluationRound whose concrete subject is missing or whose evaluator bindings conflict with the pinned owning acceptance contract;
 - Evidence claiming a subject/EvaluatorVersion different from its Round;
-- non-RELEASED Sandbox with missing/inconsistent holder;
+- Sandbox with missing/inconsistent holder;
+- Sandbox `RELEASED+PRESENT`;
+- Sandbox `RELEASED+UNKNOWN` without a matching force-resolution tombstone/fence;
 - runtime Sandbox discovered with no corresponding durable SandboxInstance ownership record;
 - reservation whose holder disappeared from authoritative state;
 - unexplained shared Git ref mutation;
@@ -1141,7 +1184,7 @@ one PlanningAttempt UNKNOWN
 → unrelated planning/work may continue if resource/budget/authority boundaries remain safe
 
 one verification Sandbox UNKNOWN
-→ fence that EvaluationOperation and retain its capacity
+→ fence that EvaluationOperation and retain its capacity unless separately proven safe to reallocate
 → unrelated evaluation/work may continue if capacity/authority remain safe
 
 one stale Goal EvaluationRound
@@ -1299,7 +1342,7 @@ Restore recovery therefore:
 9. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
 10. rejects semantic Agent Control from any session whose immutable session RestoreGeneration differs from current **before** `agent_requests` lookup/creation; the external Attempt may still be inspected/terminated/reconciled by controllers;
 11. inventories/reconciles every external domain capable of containing Pantheon-owned state, including known PlanningAttempt correlations and Run-/EvaluationOperation-owned Sandboxes, and fences effects newer than or absent from the restored database;
-12. treats snapshot-only PlanningAttempt/Attempt/EvaluationAttempt `NOT_CONTACTED`, `ABSENT`, missing result rows and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
+12. treats snapshot-only PlanningAttempt/Attempt/EvaluationAttempt `NOT_CONTACTED`, Sandbox `ABSENT`, missing result rows and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
 13. validates every active acceptance Round's concrete Task Candidate xor GoalCompletionCandidate subject and pinned evaluator contract before accepting its Evidence/AcceptanceResult as current lifecycle input;
 14. requires operator action for un-inventoriable ambiguous domains/operations or corrupted acceptance-subject relationships;
 15. opens normal mutation/dispatch only after the recovery barrier is satisfied.
@@ -1418,6 +1461,8 @@ PlanningAttempt contact marker before/after external Planner request acknowledge
 Task Candidate EvaluationRound creation before/after Evidence commit
 GoalCompletionCandidate EvaluationRound creation before/after Evidence commit
 verification Sandbox intent before/after SandboxBackend ensure
+Sandbox cleanup request before/after runtime deletion and before/after ABSENT observation
+Sandbox ERROR/RELEASING persistence while external observation is UNKNOWN
 EvaluationAttempt creation/contact marker before/after evaluator launch
 usage ingestion before/after budget debit
 candidate Artifact durable put before/after SQLite metadata
@@ -1459,9 +1504,12 @@ Property/invariant tests should continuously assert:
 - no Evidence/AcceptanceResult subject or EvaluatorVersion can differ from its EvaluationRound;
 - no Task acceptance application from a Round whose Candidate is not the Task's exact current Candidate;
 - no Goal acceptance application from a Round whose GoalCompletionCandidate/GoalRevision is not exact/current;
-- no overlapping current Sandbox for one Run/EvaluationOperation holder;
-- no non-RELEASED Sandbox without exactly one valid durable holder;
-- no released reservation while external use/Sandbox existence is uncertain;
+- Sandbox `phase` and `observedPresence` always remain in their separate domains;
+- no `RELEASED+PRESENT` Sandbox;
+- no `RELEASED+UNKNOWN` Sandbox without a matching force-resolution tombstone/fence;
+- no overlapping replacement-authoritative Sandbox for one Run/EvaluationOperation holder while older presence is unresolved/unfenced;
+- no Sandbox without exactly one valid durable holder;
+- no released reservation while external use/Sandbox existence is uncertain unless a separate safe capacity/accounting disposition exists;
 - no BudgetHold double-debit from replayed usage;
 - no PlanningRecord treated as Graph authority without current revision/precondition validation;
 - no acceptance against corrupt/mismatched Artifact bytes;
@@ -1520,7 +1568,7 @@ Authorization / broker-operation / Agent Control generation reconciliation
         ↓
 Workspace/materialization ownership reconciliation
         ↓
-Sandbox holder + SandboxKey reconciliation
+Sandbox holder + SandboxKey + phase/presence reconciliation
         ↓
 Run Attempt + PlanningAttempt + EvaluationAttempt external-execution/contact reconciliation
         ↓
@@ -1563,7 +1611,7 @@ Include:
 - Run/Attempt, PlanningOperation/PlanningAttempt and EvaluationOperation/EvaluationAttempt recovery;
 - concrete EvaluationRound Task-Candidate/GoalCompletionCandidate subject reconciliation and exact-subject Evidence/AcceptanceResult validation;
 - immutable PlanningRecord recovery with independent GraphRevision/GoalRevision revalidation before materialization;
-- holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey;
+- holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey with lifecycle phase distinct from external presence certainty;
 - restore-specific rule that snapshot-only negative observations are not current post-snapshot proof of absence;
 - authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
 - durable RecoveryFindings;
@@ -1621,4 +1669,4 @@ Defer:
 33. **Clean daemon shutdown and cancellation of external work are separate intents.**
 34. **Crash/fault-injection testing at external-side-effect, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
 35. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-36. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
+36. **Sandbox recovery is holder-driven, not Run-traversal-driven: lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` presence are separate durable facts; ordinary RELEASED requires ABSENT, while force-resolved UNKNOWN stays factually UNKNOWN behind an explicit lineage fence and separate capacity disposition.**

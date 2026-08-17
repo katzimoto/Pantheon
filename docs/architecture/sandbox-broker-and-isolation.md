@@ -180,24 +180,51 @@ For Run execution, the Run is the Sandbox holder. Sequential Attempts under the 
 
 For evaluation, the **EvaluationOperation** is the control-operation holder. The EvaluationAttempt does not own the Sandbox because the verification Sandbox must be prepared and verified before an EvaluationAttempt crosses its external launch boundary. Bounded sequential EvaluationAttempts may reuse the same verification Sandbox only while the SandboxKey, immutable materialization/environment identity, verification result, resource reservation and current hard-policy constraints remain valid.
 
-V1 permits at most one current/non-RELEASED SandboxInstance for a given Run holder and at most one current/non-RELEASED SandboxInstance for a given EvaluationOperation holder. A Sandbox in `UNKNOWN`, `PREPARING`, `READY` or `RELEASING` state cannot be bypassed by provisioning an overlapping replacement for the same holder. Replacement requires the prior Sandbox to be definitively absent/released or explicitly force-resolved under recovery policy.
+V1 permits at most one current/non-RELEASED SandboxInstance for a given Run holder and at most one current/non-RELEASED SandboxInstance for a given EvaluationOperation holder. An existing Sandbox whose lifecycle phase is not `RELEASED`, or whose external presence remains `UNKNOWN` without an explicit recovery fence/tombstone, cannot be bypassed by provisioning an overlapping replacement for the same holder. Replacement requires the prior Sandbox to be definitively absent/released or explicitly force-resolved under recovery policy.
 
 EvaluationOperations use separate verification Sandboxes and never the producer Run Sandbox.
 
 ## Sandbox lifecycle and external identity
 
-Desired lifecycle remains small:
+Sandbox controller lifecycle and external existence certainty are separate durable dimensions.
+
+Lifecycle phase remains small:
 
 ```text
 REQUESTED -> PREPARING -> READY -> RELEASING -> RELEASED
                          \-> ERROR
 ```
 
-External observation is separate: `PRESENT | ABSENT | UNKNOWN`.
+External observation is independently:
+
+```text
+PRESENT | ABSENT | UNKNOWN
+```
+
+`phase` records Pantheon's desired/controller lifecycle. `observedPresence` records the strongest current factual observation about whether the external Sandbox exists. `UNKNOWN` is never a Sandbox lifecycle phase, and `ERROR` never proves external absence.
+
+Valid combinations deliberately include:
+
+```text
+ERROR + UNKNOWN
+→ provisioning/inspection failed and a runtime may still exist
+→ retain holder/resource fences; no replacement
+
+RELEASING + UNKNOWN
+→ destruction outcome is ambiguous
+→ retain holder/resource fences; no replacement
+
+READY + PRESENT
+→ normal verified live Sandbox
+```
 
 Each SandboxInstance has an immutable `SandboxKey` created durably before provisioning side effects and an immutable holder binding (`Run` or v1 `EvaluationOperation` control operation). SandboxBackend provides idempotent `ensureSandbox(SandboxKey, SandboxPlan)` / inspect semantics where possible.
 
-Crash recovery inventories non-RELEASED SandboxInstances directly, resolves each durable holder, and re-inspects the same SandboxKey. `UNKNOWN` never authorizes blind duplicate/replacement provisioning while a previous sandbox may contain a live Attempt/EvaluationAttempt or still hold accounted capacity.
+Ordinary lifecycle transition to `RELEASED` requires external absence/release to be established for the SandboxKey. A cleanup timeout, controller `ERROR`, missing acknowledgement, or `UNKNOWN` observation must not be converted into `RELEASED` merely to free a holder slot or ResourceReservation.
+
+If an irrecoverably `UNKNOWN` Sandbox is administratively force-resolved, Pantheon uses the normal audited recovery tombstone/fence mechanism. That explicit fence—not a fabricated `ABSENT` observation—is what prevents the old SandboxKey from regaining authority and allows Recovery Policy to decide whether replacement is safe.
+
+Crash recovery inventories non-RELEASED SandboxInstances directly, resolves each durable holder, and re-inspects the same SandboxKey. It also retains any `RELEASED` Sandbox whose external presence is still unresolved and not protected by a valid tombstone/fence as a recovery inconsistency; lifecycle status alone cannot erase unresolved external existence. `UNKNOWN` never authorizes blind duplicate/replacement provisioning while a previous Sandbox may contain a live Attempt/EvaluationAttempt or still hold accounted capacity.
 
 Sandbox destruction and Attempt/EvaluationAttempt termination are separate observations/resources; neither is inferred solely from the other.
 
@@ -205,7 +232,7 @@ Sandbox destruction and Attempt/EvaluationAttempt termination are separate obser
 
 Sandbox requirements participate in the existing effective Resource Ledger claim set before Run or control-operation commitment, for example container/VM slots, disk, memory and CPU. Agents cannot create unaccounted nested containers/VMs by receiving the host runtime socket.
 
-Verification Sandbox claims are owned by the same `control-operation` holder as the EvaluationOperation. Sandbox lifecycle must therefore remain consistent with the corresponding ResourceReservation lifecycle; uncertain Sandbox existence keeps the relevant capacity charged.
+Verification Sandbox claims are owned by the same `control-operation` holder as the EvaluationOperation. Sandbox lifecycle must therefore remain consistent with the corresponding ResourceReservation lifecycle. `observedPresence=UNKNOWN` keeps the relevant capacity charged/fenced even if the Sandbox lifecycle enters `ERROR` or cleanup has begun; ordinary release requires established absence.
 
 ## Immutable environment identity
 
@@ -279,7 +306,9 @@ Do not add Kubernetes, distributed sandbox fleets, service meshes, complex SDN, 
 4. Temporary grants authorize brokered operations; they never broaden ambient Sandbox authority.
 5. Untrusted workers cannot access Operator Control, Pantheon state, secrets infrastructure, peer workspaces, authoritative Git refs or host runtime sockets.
 6. SandboxInstance ownership is durably explicit: a v1 Sandbox belongs to exactly one Run or one EvaluationOperation control operation, and a holder has at most one current/non-RELEASED Sandbox.
-7. A new Run normally gets a fresh SandboxInstance; bounded EvaluationAttempts may reuse their EvaluationOperation's verification Sandbox only while its identity/verification/policy remain valid.
-8. Sandbox provisioning is durable/idempotent/reconciled like every other external side effect, and recovery inventories SandboxInstances independently of Run traversal.
-9. Sandbox invariant violations are system/security failures and fail closed.
-10. Pantheon never executes a repository-configurable tool with ambient control-plane authority against Agent-writable repository state; hostile inspection is confined or uses controller-owned sterile control state.
+7. Sandbox lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` observation are separate durable facts; `UNKNOWN` is never a lifecycle phase and `ERROR` never proves absence.
+8. Ordinary `RELEASED` requires confirmed external absence/release; unresolved existence remains fenced/charged unless explicit audited force-resolution establishes a durable replacement fence.
+9. A new Run normally gets a fresh SandboxInstance; bounded EvaluationAttempts may reuse their EvaluationOperation's verification Sandbox only while its identity/verification/policy remain valid.
+10. Sandbox provisioning is durable/idempotent/reconciled like every other external side effect, and recovery inventories SandboxInstances independently of Run traversal.
+11. Sandbox invariant violations are system/security failures and fail closed.
+12. Pantheon never executes a repository-configurable tool with ambient control-plane authority against Agent-writable repository state; hostile inspection is confined or uses controller-owned sterile control state.
