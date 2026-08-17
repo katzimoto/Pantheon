@@ -61,7 +61,7 @@ changelog:none
 
 Do not maintain a second live `Unreleased` inventory in `CHANGELOG.md`. While a Version is in development, its Milestone and assigned Missions are the live release state. Near release, automation generates a preview from that native state; a future release-preparation change may materialize the accepted version entry into `CHANGELOG.md` and reuse it for the GitHub Release body.
 
-`.github/release.yml` configures GitHub's native generated release notes only as a fallback or sanity-check projection. Native generated notes, commit ranges and pull-request labels never redefine Version membership or the authoritative Pantheon changelog candidate.
+`.github/release.yml` configures GitHub's native generated release notes only as a supplemental merged-pull-request view. GitHub categorizes that view from pull-request metadata, while Pantheon's changelog classification lives on Engineering Mission Issues; therefore Pantheon does not copy `changelog:*` labels onto PRs merely to influence native notes. Native generated notes, commit ranges and pull-request labels never redefine Version membership or the authoritative Pantheon changelog candidate.
 
 ## Automation
 
@@ -70,7 +70,7 @@ GitHub Actions reinforce this contract without becoming state owners:
 - `.github/workflows/version-policy.yml` validates Version Milestone shape and Mission-closing PR metadata;
 - `.github/workflows/changelog-preview.yml` renders a read-only Milestone/Mission changelog preview into the Actions job summary;
 - `.github/workflows/version-readiness.yml` manually evaluates a selected Version against Mission closure, changelog classification, mission-closing PRs, repository verification and release-tag preconditions;
-- `.github/workflows/version-labels.yml` is the explicit manual bootstrap/reconciliation path for the `changelog:*` repository labels.
+- `.github/workflows/version-labels.yml` is the explicit manual reconciliation path for the approved repository taxonomy: `changelog:*`, `area:*`, contributor-discovery labels, and removal of explicitly deprecated GitHub defaults.
 
 The automation may report or fail when GitHub-native state violates this contract, but it does not mirror Milestone progress into repository files and it does not publish a release. Release publication, artifact provenance and immutable binary distribution are introduced only when Pantheon has actual release artifacts to publish.
 

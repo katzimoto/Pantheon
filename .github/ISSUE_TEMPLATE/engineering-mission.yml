@@ -17,8 +17,11 @@ body:
 
         Hierarchy and blockers belong in GitHub's own graph: use sub-issues for
         decomposition and blocked-by/blocking for dependencies rather than
-        writing them into the body. `docs/development/missions.md` is the full
-        contract behind this form.
+        writing them into the body. After creation, assign one primary `area:*`
+        label (and at most one genuine secondary area); a Version Mission also
+        gets exactly one `changelog:*` classification. Labels never mirror
+        status, priority, Version, blockers or hierarchy. `docs/development/missions.md`
+        is the full contract behind this form.
 
         This repository is public. Keep secrets, credentials and unpublished
         vulnerability details out of issues.
