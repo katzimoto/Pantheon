@@ -303,7 +303,7 @@ run_status (mutable)
   desired_execution
   revision
   candidate_digest
-  current_attempt_id
+  current_attempt_id       nullable; when set must belong to this run_id
   control_epoch
   lease_token
   lease_holder/incarnation
@@ -348,23 +348,49 @@ attempts
   ordinal
   launch_key UNIQUE
   created_at
+  UNIQUE (id, run_id)       # composite parent key for holder-safe FKs
 ```
 
-Mutable Attempt status records external observation plus durable launch-call boundary:
+Mutable Attempt status records external observation plus durable launch-call boundary. `run_id` is deliberately duplicated as immutable relational identity so the live-Attempt cardinality invariant can be enforced on the status table where terminality lives:
 
 ```text
 attempt_status
-  attempt_id
+  attempt_id PK
+  run_id                    immutable copy of attempts.run_id
   observed_execution
-  terminal
+  terminal                  NOT NULL boolean/integer
   revision
-  launch_contact_state     NOT_CONTACTED|CONTACT_MAY_HAVE_OCCURRED
+  launch_contact_state      NOT_CONTACTED|CONTACT_MAY_HAVE_OCCURRED
   launch_contact_initiated_at
   launch_contact_epoch/incarnation
   started_at
   finished_at
   termination_json
 ```
+
+The duplicated holder key is not independently mutable. It is constrained back to the immutable Attempt identity:
+
+```sql
+FOREIGN KEY (attempt_id, run_id)
+  REFERENCES attempts(id, run_id)
+```
+
+`run_status.current_attempt_id` is likewise holder-safe rather than a bare cross-Run pointer:
+
+```sql
+FOREIGN KEY (current_attempt_id, run_id)
+  REFERENCES attempts(id, run_id)
+```
+
+Because `attempt_status` now contains both the immutable Run holder and terminality, v1 can enforce the one-live-Attempt rule directly:
+
+```sql
+CREATE UNIQUE INDEX one_nonterminal_attempt_per_run
+ON attempt_status(run_id)
+WHERE terminal = 0;
+```
+
+Every Attempt is created with exactly one `attempt_status` row in the same T4/T8 transaction, initially nonterminal. That transaction also updates `run_status.current_attempt_id` when the new Attempt becomes current. A replacement Attempt cannot commit until the previous status row is terminal, so controller serialization and the partial unique index agree on the same safety boundary rather than relying on a cross-table predicate SQLite cannot express.
 
 Attempt creation + LaunchKey + AgentControlSession occurs before backend side effect. A second authoritative transaction marks `CONTACT_MAY_HAVE_OCCURRED` immediately before the first external launch call.
 
@@ -700,6 +726,8 @@ Active Task -> exactly one nonterminal Run
 Ready/Waiting Task -> zero nonterminal Runs
 Finalizing Run -> terminal_target present
 Completed Run -> Candidate exists
+attempt_status holder matches attempts.run_id
+run_status.current_attempt_id belongs to the same Run
 one nonterminal Attempt per Run
 one current AgentControlSession per Attempt
 one nonterminal EvaluationAttempt per EvaluationOperation
@@ -721,7 +749,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; the checker remains valuable for cross-row invariants and corruption/drift detection.
+The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -747,6 +775,8 @@ T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
 T15 EVALUATION LAUNCH CONTACT MARKER
 ```
 
+T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
+
 T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
 
 T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
@@ -761,13 +791,14 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 4. JSON is never a substitute for ownership/revision/accounting columns.
 5. Task-scoped reservations are unique/reused across Runs.
 6. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
-7. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
-8. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-10. Disaster restore rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect; restored Grants/Tickets cannot redeem and restored broker operations cannot be reissued from stale state.
-11. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-12. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-13. Requeue occurs only after previous responsible Run terminal.
-14. Force-resolution tombstones stale lineages without fabricating factual Usage.
-15. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-16. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+7. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
+8. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
+9. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+10. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+11. Disaster restore rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect; restored Grants/Tickets cannot redeem and restored broker operations cannot be reissued from stale state.
+12. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+13. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+14. Requeue occurs only after previous responsible Run terminal.
+15. Force-resolution tombstones stale lineages without fabricating factual Usage.
+16. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+17. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
