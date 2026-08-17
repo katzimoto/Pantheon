@@ -13,19 +13,22 @@ unless the task says to.
 
 ## Validation
 
-Run `scripts/check-docs-links.sh` from the repository root before committing.
-CI runs the same script on every pull request.
+Run `scripts/check-docs-links.sh` from the repository root after your final
+change, before reporting the task complete or handing it off. CI runs the same
+script on every pull request.
 
 It verifies that every documentation reference resolves, that the architecture
-map lists every canonical contract exactly once, and that this contract's
-wiring is intact. It is the only check that exists today. As implementation
+map lists every canonical contract exactly once, and that `CLAUDE.md` still
+imports this contract. It is the only check that exists today. As implementation
 lands, the canonical commands for build, test and lint belong in this section.
 
 ## Start here
 
 1. Establish the task: the requested outcome and its acceptance criteria. When
-   the task comes from a GitHub Issue, the Issue defines the scope — not your
-   reading of the code.
+   the task comes from a GitHub Issue, the Issue defines the requested outcome
+   and the intended scope; repository evidence determines which changes are
+   actually required to satisfy it. Do not silently broaden the mission because
+   adjacent work is visible.
 2. Read `docs/README.md`. It states what is canonical and how to navigate.
 3. Read `docs/architecture/overview.md` if you need the system model and do not
    already have it.
@@ -36,8 +39,10 @@ lands, the canonical commands for build, test and lint belong in this section.
    implementation and tests where they exist.
 6. Decide the smallest correct change before editing anything.
 
-Retrieval is selective and per-task: do not re-read what you have already
-established this session, and do not open a domain the task does not touch.
+Retrieval is selective. Start with the domain the map points to, and widen only
+when a dependency, invariant, schema or implementation path gives you a
+concrete reason to. Avoid rereading what you have already established this
+session, but re-read when you need a detail exactly rather than from memory.
 
 ## Sources of truth
 
