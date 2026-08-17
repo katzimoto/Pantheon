@@ -6,7 +6,30 @@ Canonical Scheduler-to-Run-Controller handoff specification.
 
 ## Central rule
 
-> **Scheduler ends at a durable atomic Run intent. It never launches the executor or builds runtime context. T3 freezes the Run's exact ExecutionBinding and ContextSourceSnapshot; Run Controller owns Workspace/Sandbox/Context preparation, Attempt creation, backend contact and reconciliation.**
+> **Scheduler ends at a durable atomic Run intent. It never launches the executor or builds runtime context. T3 freezes the Run's exact ExecutionBinding and ContextSourceSnapshot, charges durable Goal fairness, and is permitted only when durable dispatch desired state plus current recovery/configuration gates allow new work. Run Controller owns Workspace/Sandbox/Context preparation, Attempt creation, backend contact and reconciliation.**
+
+## Dispatch permission
+
+Operator dispatch intent and system readiness are separate inputs.
+
+Durable desired state is:
+
+```text
+scheduler_state.dispatch_mode = RUNNING | PAUSED
+```
+
+Effective permission to commit a new Run is:
+
+```text
+dispatch_mode == RUNNING
+AND global recovery barrier is open
+AND active ConfigurationRevision is published/usable
+AND normal Task/Goal/Graph/admission preconditions hold
+```
+
+`PAUSED` fences new T3 commits only. It does not cancel existing Runs/Attempts or pretend external work stopped.
+
+The recovery barrier does not rewrite operator desired state. Ordinary daemon restart preserves `PAUSED`; a scheduler that was paused before restart remains paused after recovery completes until an authorized resume command changes the durable desired state.
 
 ## Handoff
 
@@ -22,18 +45,65 @@ immutable ContextSourceSnapshot identity
 new Run / Run Active
 Task Ready -> Active
 SchedulingClaim consumed
-Events/fairness state
+Goal fairness service-sequence charge
+Task scheduler backoff normalization
+Events
 ```
 
 The ContextSourceSnapshot binds the exact Task/Goal/Graph revisions, Agent/source versions, starting WorkspaceRevision/continuation inputs where applicable, `ConfigurationRevision + contextPolicyDigest`, and any stable Memory/index/Skill/input generation identities that can affect deterministic Context Builder selection.
 
 T3 freezes **source eligibility**, not the ContextPlan. It performs no Memory retrieval, arbitrary repository exploration, prompt rendering, model call, backend call, or other context-selection side effect.
 
-Immediately before T3 commit, Pantheon revalidates the Task/Goal/Graph/admission authority and the captured ConfigurationRevision according to the configuration snapshot rule. Immutable source/version refs must still be valid/available according to their domain contract. A source whose required view cannot be named by a stable/reconstructable identity cannot participate in frozen v1 context.
+Immediately before T3 commit, Pantheon revalidates at least:
+
+```text
+scheduler_state.dispatch_mode == RUNNING
+recovery barrier/current dispatch gate open
+active configuration published
+Task Ready + SchedulingEligible + expected Task revision
+current Goal/Graph authority
+SchedulingClaim current
+captured ConfigurationRevision still applicable under the configuration snapshot rule
+route/admission/resource/budget decisions still valid
+ContextSourceSnapshot source identities valid for commit
+expected scheduler/fairness state revisions current
+```
+
+Immutable source/version refs must still be valid/available according to their domain contract. A source whose required view cannot be named by a stable/reconstructable identity cannot participate in frozen v1 context.
 
 Only after commit can execution preparation begin.
 
 No external backend/process/Sandbox/Git/network/model call occurs inside T3.
+
+## Fairness charge at T3
+
+Goal fairness is charged only when T3 successfully commits service.
+
+The same authoritative transaction that creates the Run performs conceptually:
+
+```text
+selected Goal.last_served_sequence
+  = scheduler_state.next_service_sequence
+
+scheduler_state.next_service_sequence += 1
+```
+
+and clears/normalizes temporary scheduler backoff for the Task whose Run was committed.
+
+Therefore:
+
+```text
+routing/admission attempt that fails before T3
+→ no fairness charge
+
+T3 rollback/conflict
+→ no fairness charge
+
+T3 commit
+→ Run + fairness charge durable together
+```
+
+A stale concurrent priority/fairness/dispatch mutation causes T3 CAS/revalidation failure and the scheduling decision is recomputed. Event ordering never substitutes for these state checks.
 
 ## Task ownership
 
@@ -76,6 +146,8 @@ it has been attached through the one-time RunContextPlan relation
 ```
 
 Context Builder may deterministically read/select from the frozen source snapshot during preparation. The Run row itself is not mutated to insert a later ContextPlan reference.
+
+A later operator `pause dispatch` affects **new T3 commits only**; it does not invalidate preparation of a Run whose T3 already committed. Existing Run continuation is controlled by Task/Goal/security/recovery authority, not the scheduler queue switch.
 
 ## Attempt creation
 
@@ -221,20 +293,26 @@ On daemon restart, Scheduler does not recreate active Runs. Run Controller inven
 
 A preparing Run also reloads its exact ContextSourceSnapshot and any existing RunContextPlan attachment. Missing ContextPlan is rebuilt against that same snapshot; a newer active source/config generation never silently replaces it.
 
-The startup recovery barrier prevents new Scheduler dispatch until pre-existing external-effect obligations are either known or fenced according to Global Recovery.
+Scheduler separately reloads durable `scheduler_state`, Goal scheduling state and Task eligibility/backoff state before rebuilding its disposable queue. The startup recovery barrier prevents T3 until pre-existing external-effect obligations are known/fenced, and durable `dispatch_mode=PAUSED` continues to block T3 even after that barrier opens.
+
+Restart never fabricates a fairness service charge from Event history: committed Runs already have the corresponding atomic service-sequence update; pre-T3 attempts do not.
 
 ## Core invariants
 
 1. Scheduler never directly launches executor or constructs runtime context.
-2. T3 atomically binds each Run to exactly one immutable ContextSourceSnapshot before preparation begins.
-3. T3 freezes source/version/generation eligibility but performs no context retrieval/rendering/external call.
-4. Task becomes Active in T3 before external execution exists.
-5. Preparation belongs to Run Controller and may fail with zero Attempts.
-6. Context Builder preparation may retry only against the Run's frozen ContextSourceSnapshot; newer mutable source/config state requires a new Run to affect semantics.
-7. ContextReady requires a one-time immutable ContextPlan attachment derived from the exact Run source snapshot.
-8. Attempt + LaunchKey + AgentControlSession are durable before external backend contact.
-9. `CONTACT_MAY_HAVE_OCCURRED` is committed before the launch call.
-10. Lost acknowledgement after contact means UNKNOWN, not "try a new Attempt".
-11. Backend launch semantics are explicit and unsafe observational routes are filtered before scheduling.
-12. Same-lineage recovery reuses Attempt/LaunchKey; fresh execution uses new Attempt only after old is terminal.
-13. Run finalization/UNKNOWN retains ownership until safe release.
+2. Operator dispatch desired state is durable and separate from the recovery/configuration readiness gates; `PAUSED` survives ordinary restart and forbids new T3 commits.
+3. T3 rechecks effective dispatch permission and atomically charges one Goal fairness service sequence only when the Run intent commits.
+4. A routing/admission failure or rolled-back T3 never advances fairness.
+5. T3 atomically binds each Run to exactly one immutable ContextSourceSnapshot before preparation begins.
+6. T3 freezes source/version/generation eligibility but performs no context retrieval/rendering/external call.
+7. Task becomes Active in T3 before external execution exists.
+8. Preparation belongs to Run Controller and may fail with zero Attempts.
+9. Context Builder preparation may retry only against the Run's frozen ContextSourceSnapshot; newer mutable source/config state requires a new Run to affect semantics.
+10. ContextReady requires a one-time immutable ContextPlan attachment derived from the exact Run source snapshot.
+11. Attempt + LaunchKey + AgentControlSession are durable before external backend contact.
+12. `CONTACT_MAY_HAVE_OCCURRED` is committed before the launch call.
+13. Lost acknowledgement after contact means UNKNOWN, not "try a new Attempt".
+14. Backend launch semantics are explicit and unsafe observational routes are filtered before scheduling.
+15. Same-lineage recovery reuses Attempt/LaunchKey; fresh execution uses new Attempt only after old is terminal.
+16. A later dispatch pause does not retroactively cancel or invalidate an already-committed Run.
+17. Run finalization/UNKNOWN retains ownership until safe release.

@@ -176,7 +176,29 @@ POST /api/v1/dispatch/actions/pause
 POST /api/v1/dispatch/actions/resume
 ```
 
-Dispatch pause fences new Scheduler Run commits; it does not pretend existing external work stopped.
+Dispatch pause/resume mutates durable `scheduler_state.dispatch_mode` through the normal command/idempotency and revision-CAS path.
+
+Conceptually `GET /api/v1/dispatch` exposes the distinction between durable desired state and current effective ability to commit new Runs:
+
+```yaml
+dispatch:
+  desiredMode: RUNNING | PAUSED
+  revision: ...
+  effectiveCanDispatch: true | false
+  blockedBy:
+    - operator-pause
+    - recovery
+    - configuration
+    - maintenance
+```
+
+`blockedBy` is a normalized set of current factual/controller gates, not a second desired-state field. `desiredMode=RUNNING` can therefore coexist with `effectiveCanDispatch=false` during startup recovery, while `desiredMode=PAUSED` remains paused even after recovery/configuration gates become healthy.
+
+Pause fences **new Scheduler T3 Run-intent commits**. It does not cancel or stop already-committed Runs/Attempts, revoke existing execution authority, release resources, or pretend existing external work stopped.
+
+Ordinary daemon restart preserves the durable desired mode. Pantheon never silently resumes operator-paused dispatch merely because process-local scheduler state was rebuilt.
+
+Pause/resume responses report the durably committed desired mode; they do not promise that the recovery/configuration gates are currently open. Effective dispatchability is observed through `GET /api/v1/dispatch`/readiness state.
 
 ### Configuration
 
@@ -248,7 +270,7 @@ Mutable resources expose strong opaque ETags derived from authoritative identity
 
 Stale-sensitive mutations use `If-Match`. Missing mandatory precondition returns `428 Precondition Required`; revision mismatch returns `412 Precondition Failed`.
 
-Require preconditions where a command is based on observed mutable state, for example Goal revision, configuration apply/rollback, budget/config changes and exact RecoveryFinding force-resolution.
+Require preconditions where a command is based on observed mutable state, for example Goal revision, configuration apply/rollback, budget/config changes, dispatch desired-state changes and exact RecoveryFinding force-resolution.
 
 State-independent idempotent commands such as cancel-if-nonterminal need not require a client-supplied prior revision unless controller semantics need it.
 
@@ -299,8 +321,10 @@ GET /health/live
   daemon/runtime process functioning
 
 GET /health/ready
-  recovery barrier passed + active configuration published + scheduler/control-plane safe for new work
+  recovery barrier passed + active configuration published + control-plane safe for new authority-bearing work
 ```
+
+An operator-paused scheduler does not necessarily make the daemon unhealthy/unready: readiness reports whether the control plane **could safely** dispatch if desired, while `GET /api/v1/dispatch` reports whether dispatch is currently desired/effective. Deployments may layer stricter product-specific readiness semantics outside this architecture, but they must not erase the durable pause distinction.
 
 During startup recovery, live may be 200 while ready is 503. Read-only diagnostics may remain available while new dispatch is fenced.
 
@@ -409,6 +433,8 @@ pantheon doctor
 pantheon version
 ```
 
+Dispatch CLI sugar should expose the durable desired state explicitly, for example `pantheon dispatch status|pause|resume`; it is an Operator API client over the endpoints above, not a process-local scheduler switch.
+
 No commands directly create Runs/Attempts, set lifecycle phases, delete Reservations or mutate shared Git refs outside semantic controllers.
 
 ## `--wait`
@@ -438,8 +464,9 @@ Read commands support stable human output plus `-o json`/`-o yaml` where applica
 3. Public API exposes semantic architecture resources/commands, not raw lifecycle/table CRUD.
 4. Every normal mutation is idempotent only within the current `(RestoreGeneration, commandId)` identity; old command epochs fail closed after disaster restore even if historical command rows were rewound away. Sensitive secret commands never persist secret bytes in hashes/logs.
 5. ETags/If-Match map client optimistic concurrency to controller revision CAS.
-6. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, recovery-quarantine/force-resolution and configuration operations required to operate the system.
-7. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.
-8. List + Event watch is gap-free through same-snapshot Journal cursor.
-9. CLI is only an API client; `--wait` watches durable state/events.
-10. Remote/TCP access is deferred until a real authentication/security model exists.
+6. Dispatch pause/resume mutates durable desired state; `GET /dispatch` distinguishes desired mode from effective dispatchability and ordinary restart never silently resumes a pause.
+7. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, recovery-quarantine/force-resolution and configuration operations required to operate the system.
+8. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.
+9. List + Event watch is gap-free through same-snapshot Journal cursor.
+10. CLI is only an API client; `--wait` watches durable state/events.
+11. Remote/TCP access is deferred until a real authentication/security model exists.

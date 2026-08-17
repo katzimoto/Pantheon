@@ -24,6 +24,7 @@ See also:
 - `docs/architecture/recovery-policy.md`
 - `docs/architecture/scheduler-reservations-ownership-and-leases.md`
 - `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
+- `docs/architecture/scheduler-task-ordering-and-fairness.md`
 - `docs/architecture/budget-usage-and-rate-limits.md`
 - `docs/architecture/artifact-model.md`
 - `docs/architecture/workspace-and-git-integration.md`
@@ -53,6 +54,7 @@ The authoritative sources are:
 - immutable Goal/GoalRevision/GoalCompletionCandidate records and pinned Goal acceptance contracts;
 - immutable Task/TaskSpec/Run/Attempt/Binding/Candidate/Artifact records and pinned Task acceptance contracts;
 - durable Task/Goal/Run lifecycle intent including terminal targets when finalization has begun;
+- durable Scheduler desired/ordering state: installation dispatch mode/service sequence, per-Goal priority/fairness state, per-Task eligibility/backoff state and SchedulingClaims;
 - durable PlanningOperation/PlanningAttempt identities plus immutable PlanningRecord results where external planning exists;
 - immutable EvaluationRound typed-subject identity, exact pinned evaluator set, Evidence and AcceptanceResult records;
 - durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
@@ -74,7 +76,7 @@ The following are never authoritative by themselves:
 - backend callbacks received without current fencing authority;
 - a bare Task/Goal ID without the concrete immutable EvaluationRound subject it is supposed to judge.
 
-In-memory scheduler and controller queues are disposable accelerators. They must be reconstructible from SQLite and external observation.
+In-memory scheduler and controller queues are disposable accelerators. They must be reconstructible from SQLite and external observation without resetting scheduler fairness, waiting age, backoff, Goal priority, or operator dispatch intent.
 
 ## 2. Recovery is ordinary reconciliation
 
@@ -253,18 +255,20 @@ B. restore-entry mode check + storage recovery / validation
     ↓
 C. daemon incarnation registration
     ↓
-D. recovery inventory
+D. recovery + durable Scheduler inventory
     ↓
 E. authority rotation / fencing
     ↓
 F. domain reconciliation
     ↓
-G. recovery barrier satisfied
+G. recovery safety barrier satisfied
     ↓
-H. scheduler dispatch enabled
+H. recovery permits dispatch
+    ↓
+Scheduler may commit T3 only if durable dispatch_mode == RUNNING
 ```
 
-These phases are not user-facing Task phases.
+These phases are not user-facing Task phases. The recovery barrier is a safety permission, not operator desired state.
 
 Ordinary restart has no pending restore operation and preserves the existing RestoreGeneration. Supported disaster restore enters startup with the out-of-database restore latch and executes/resumes the matching restore authority fence in §27 before any normal authority-bearing mutation or external effect.
 
@@ -282,12 +286,15 @@ If the latch is present and no matching committed restore RecoveryPass exists, T
 
 ### C. Incarnation registration
 
-Persist the new daemon incarnation and keep the global dispatch gate closed. Incarnation bookkeeping does not grant effect authority and cannot bypass pending T0.
+Persist the new daemon incarnation and keep the global recovery dispatch gate closed. Incarnation bookkeeping does not grant effect authority and cannot bypass pending T0.
 
 ### D. Durable inventory
 
 Load at least:
 
+- durable `scheduler_state`, including `dispatch_mode` and `next_service_sequence`;
+- per-Goal scheduling priority/fairness state and per-Task eligibility/backoff state;
+- active SchedulingClaims that require expiry/reconciliation;
 - nonterminal Goals and Tasks, including every `Finalizing` Task/Goal and its durable terminal target;
 - Active/Evaluating/Finalizing Goals and Tasks;
 - current GoalCompletionCandidates and Task Candidates referenced by active acceptance;
@@ -304,6 +311,8 @@ Load at least:
 - Artifact replicas needed by live work;
 - unresolved explicit `finalization_obligations`, plus the owning-domain rows needed to recompute implicit finalization predicates;
 - prior unresolved RecoveryFindings.
+
+Scheduler queue membership/order is **not** loaded as authority. The queue is rebuilt from the durable scheduler/Task/Goal/claim rows after their invariants are checked. Recovery never resets `last_served_sequence`, `eligible_since`, `next_attempt_at`, base priority or `dispatch_mode` merely because process memory was lost.
 
 A `Finalizing` Task without a durable terminal target is not a partially recovered lifecycle decision. It is an invariant violation: Recovery cannot safely infer the intended outcome from Events, Candidate state, cancellation requests or neighboring rows.
 
@@ -324,6 +333,8 @@ In restore mode, the new RestoreGeneration has already been committed before thi
 ### F. Domain reconciliation
 
 Controllers inspect their external domains and either establish current state or place affected resources into conservative fenced states.
+
+Scheduler reconciliation first validates durable scheduler state and active SchedulingClaims. Expired/stale claims may be released/reconciled under their claim contract, but recovery does not fabricate successful Goal service from a claim or Event. A Goal fairness sequence advances only with the T3 Run that committed it. Task eligibility/backoff state is revalidated against current Task/Goal/Graph conditions without resetting a continuing eligible interval merely due to restart.
 
 Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox. Sandbox lifecycle `phase` and factual `observedPresence` are reconciled independently; lifecycle ERROR/RELEASING never substitutes for proof of external absence.
 
@@ -356,7 +367,17 @@ In restore mode the barrier also requires the matching restore RecoveryPass/T0 g
 
 ### H. Dispatch gate
 
-Only after the barrier is satisfied may the Scheduler commit new Runs.
+Only after the recovery barrier is satisfied does recovery permit the Scheduler to consider new Run commits. This permission does not mutate durable Scheduler desired state.
+
+Actual T3 still requires:
+
+```text
+scheduler_state.dispatch_mode == RUNNING
+AND active configuration published/usable
+AND normal Scheduler/T3 preconditions
+```
+
+Therefore a durable `PAUSED` installation remains paused after ordinary restart even when Recovery reaches BARRIER_SATISFIED. If desired state is RUNNING, scheduler selection resumes only after durable scheduler state/claims have been reconciled and the queue rebuilt.
 
 Planner/Graph reconciliation may also continue only within its own safe fences: creating a new external PlanningAttempt is effect-creating control work and cannot bypass an unresolved prior PlanningAttempt or the global recovery barrier.
 
@@ -376,14 +397,15 @@ Attempt A = UNKNOWN
 
 unrelated backend B = healthy
 unrelated resources = reconciled
-→ new work may use remaining safe capacity on B
+→ recovery may permit new work on remaining safe capacity
+→ actual dispatch still requires durable dispatch_mode == RUNNING
 ```
 
 A single uncertain Run, PlanningOperation or EvaluationOperation must not freeze all Goals indefinitely when its accounting/authority blast radius can be safely fenced.
 
 A stale but internally valid EvaluationRound similarly does not require a global stop: its Evidence remains historical and its owning Task/Goal simply cannot consume it as current acceptance.
 
-Global dispatch remains disabled only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure, unreconciled installation ownership, or an incomplete disaster-restore generation fence.
+The global **recovery safety gate** remains closed only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure, unreconciled installation ownership, or an incomplete disaster-restore generation fence. Operator `PAUSED` is not a recovery failure; it is a separate durable desired state that can intentionally keep T3 closed after the recovery safety gate opens.
 
 ## 8. Durable external-operation rule
 
@@ -1070,6 +1092,25 @@ External reconciliation is not enough. Pantheon also scans durable relational in
 Examples:
 
 ```text
+scheduler_state
+→ singleton exists
+→ dispatchMode is RUNNING|PAUSED
+→ nextServiceSequence is valid
+
+goal_scheduling_state
+→ concrete Goal exists
+→ basePriorityClass valid
+→ lastServedSequence, when present, precedes nextServiceSequence
+
+task_scheduling_state
+→ concrete Task exists
+→ SchedulingEligible true has durable eligibleSince
+→ SchedulingEligible false has no current eligibleSince
+→ temporary backoff never rewrites Task phase or eligible waiting-age origin
+
+committed T3 Run
+→ corresponding Goal service-sequence charge is durable from the same transaction
+
 Task.phase == Active
 → exactly one nonterminal active Run must own responsibility
 
@@ -1195,7 +1236,7 @@ Pantheon distinguishes repair classes.
 
 Examples:
 
-- rebuild disposable in-memory queue;
+- rebuild disposable in-memory scheduler queue **from durable scheduler/Goal/Task/claim state without resetting fairness, eligibility age, backoff, priority or dispatch mode**;
 - refresh a derived condition;
 - reattach a known Attempt using the same LaunchKey on ordinary uninterrupted history;
 - resume/reconcile a known PlanningAttempt by the same durable attempt identity when external correlation makes that safe;
@@ -1225,6 +1266,7 @@ Inspect external state before deciding, for example:
 
 Examples:
 
+- invalid/missing scheduler singleton, impossible fairness sequence relationship, or scheduler ownership row pointing at a missing Goal/Task;
 - active Task with missing immutable Run identity;
 - `Finalizing` Task with missing/invalid terminal target or terminal Task whose retained target contradicts its terminal phase;
 - explicit finalization obligation with missing/inconsistent concrete owner or invalid state/identity;
@@ -1279,7 +1321,7 @@ one IntegrationIntent conflicted
 → block that integration only
 ```
 
-Global mutation/dispatch must stop for conditions such as:
+Global mutation/recovery dispatch permission must stop for conditions such as:
 
 - SQLite integrity cannot be established;
 - installation lock/authority is ambiguous;
@@ -1288,11 +1330,13 @@ Global mutation/dispatch must stop for conditions such as:
 - schema is unsupported/incompletely migrated;
 - global resource/budget accounting is internally contradictory in a way that could cause unsafe double allocation.
 
+A valid durable `scheduler_state.dispatch_mode=PAUSED` is not a degraded condition and does not create a RecoveryFinding. It simply keeps new T3 commits disabled after recovery becomes otherwise safe.
+
 ## 24. API behavior during startup recovery
 
-Once the storage gate is safe, Pantheon may expose inspection/status APIs before dispatch is enabled.
+Once the storage gate is safe, Pantheon may expose inspection/status APIs before recovery permits dispatch.
 
-Desired-state writes that do not create immediate external side effects may be accepted and queued during ordinary startup, but the dispatch gate remains closed until the recovery barrier is satisfied.
+Desired-state writes that do not create immediate external side effects may be accepted during ordinary startup under their normal command/revision rules, but the recovery safety gate remains closed until the barrier is satisfied. In particular, an operator may durably `pause` dispatch while recovery is still running; that PAUSED state remains authoritative after the barrier opens. A `resume` command may set desired mode RUNNING, but cannot itself bypass a closed recovery/configuration gate.
 
 During disaster restore, no authority-broadening or effect-creating Operator mutation may be accepted until the matching T0 has committed the new RestoreGeneration. Requests carrying a pre-restore command epoch fail closed rather than being reinterpreted as new commands.
 
@@ -1367,6 +1411,8 @@ Create consistent snapshots using SQLite-supported online backup mechanisms. Rec
 
 The snapshot necessarily includes the then-current RestoreGeneration, Grants, CapabilityTickets, broker operations, Commands and AgentControlSessions. Those rows are historical authority after an older backup is restored until the post-restore authority fence is established.
 
+The snapshot also contains durable Scheduler desired/ordering state as of the backup point. Restore does not infer a newer post-snapshot pause/priority/backoff decision that was never present in the selected backup; the independent recovery barrier still prevents new T3 commits until the restored control plane and external world are reconciled. Operators may set PAUSED during restore recovery through the permitted safety-reducing command path after T0.
+
 The snapshot also contains immutable Task/Goal acceptance subjects/Rounds/Evidence from its point in history. Those records remain historical truth after restore but are not automatically current if the external/post-snapshot world or later semantic revisions diverged before failure.
 
 The `restore.pending` latch is installation-maintenance state and is deliberately not part of the SQLite backup payload.
@@ -1421,10 +1467,11 @@ Restore recovery therefore:
 11. inventories/reconciles every external domain capable of containing Pantheon-owned state, including known PlanningAttempt correlations and Run-/EvaluationOperation-owned Sandboxes, and fences effects newer than or absent from the restored database;
 12. treats snapshot-only PlanningAttempt/Attempt/EvaluationAttempt `NOT_CONTACTED`, Sandbox `ABSENT`, missing result rows and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
 13. validates every active acceptance Round's concrete Task Candidate xor GoalCompletionCandidate subject and pinned evaluator contract before accepting its Evidence/AcceptanceResult as current lifecycle input;
-14. requires operator action for un-inventoriable ambiguous domains/operations or corrupted acceptance-subject relationships;
-15. opens normal mutation/dispatch only after the recovery barrier is satisfied.
+14. validates/reconciles restored Scheduler state and claims without fabricating fairness service or resetting eligible/backoff history;
+15. requires operator action for un-inventoriable ambiguous domains/operations or corrupted acceptance/scheduler relationships;
+16. opens the **recovery safety gate** only after the recovery barrier is satisfied; actual T3 additionally requires the restored/current durable `dispatch_mode=RUNNING` and normal Scheduler/configuration preconditions.
 
-A restored database snapshot is never permission to blindly replay historical external operations or blindly reapply historical acceptance to a currently different subject.
+A restored database snapshot is never permission to blindly replay historical external operations, blindly reapply historical acceptance to a currently different subject, or bypass durable scheduler desired state.
 
 ### Restore-operation crash semantics
 
@@ -1504,7 +1551,7 @@ A clean daemon shutdown uses the same durability philosophy.
 Recommended sequence:
 
 ```text
-close dispatch gate
+close recovery/effective dispatch gate
         ↓
 stop creating new Attempts/control-operation external work
         ↓
@@ -1516,6 +1563,8 @@ record best-effort incarnation stoppedAt as final durable daemon step
         ↓
 release installation lock
 ```
+
+Closing the effective dispatch gate for shutdown does not rewrite durable operator `dispatch_mode`; an ordinary restart restores that desired state and still waits for the new recovery barrier.
 
 Clean daemon shutdown does not inherently mean cancelling every external Attempt/PlanningAttempt. External lifetime is independent where the backend supports that behavior.
 
@@ -1530,6 +1579,10 @@ Recovery correctness cannot be validated only with happy-path unit tests.
 The v1 test plan must inject process termination/crash boundaries around at least:
 
 ```text
+scheduler pause/resume desired-state commit
+Task SchedulingEligible transition + eligibleSince update
+scheduler temporary backoff update/release claim
+T3 Run-intent commit before/after Goal fairness service-sequence charge (same transaction)
 Run-intent transaction commit
 Attempt creation before ensureExecution
 backend ensure after external start before acknowledgement
@@ -1569,6 +1622,7 @@ old-generation AgentControlSession cannot create/replay agent_requests or submit
 restored PlanningAttempt NOT_CONTACTED/missing PlanningRecord does not authorize resend until fresh domain reconciliation establishes absence
 restored NOT_CONTACTED/ABSENT snapshot facts do not authorize replacement work until fresh domain reconciliation proves current absence
 restored EvaluationRound cannot be applied to a different/current Task Candidate or GoalCompletionCandidate merely because lifecycle phase matches
+restored scheduler desired/fairness/backoff state is revalidated without Event-derived service fabrication
 fresh RestoreGeneration is different from every value recovered from the snapshot
 Run- and EvaluationOperation-owned Sandboxes are inventoried/reconciled by durable SandboxKey+holder
 ```
@@ -1577,6 +1631,9 @@ For each crash point, restart Pantheon and assert that the resulting state is eq
 
 Property/invariant tests should continuously assert:
 
+- `dispatch_mode=PAUSED` survives ordinary restart and no T3 commits until an authorized resume plus open recovery/configuration gates;
+- every committed T3 Run has exactly one atomic Goal fairness service charge and no failed/pre-T3 attempt advances service sequence;
+- scheduler queue rebuild preserves durable base priority, last-served sequence, current eligible interval and backoff state;
 - no `Finalizing` Task without a durable valid terminalTarget;
 - no non-finalizing nonterminal Task with a stale terminalTarget;
 - terminal Task target equals terminal phase;
@@ -1632,7 +1689,7 @@ Restore-mode RecoveryPass records the old restored generation as historical meta
 
 A matching IN_PROGRESS restore pass is also the durable proof that T0 already committed for that `restoreOperationId`; a surviving `restore.pending` latch after such a crash does not cause another generation rotation.
 
-A pass is not required to reach zero findings before scheduler dispatch. It must only reach the recovery barrier: every relevant unresolved item is safely fenced.
+A pass is not required to reach zero findings before the **recovery safety gate** opens. It must only reach the recovery barrier: every relevant unresolved item is safely fenced. Actual scheduler T3 then independently requires durable `dispatch_mode=RUNNING` and current configuration/Scheduler preconditions.
 
 ## 31. Controller order and dependencies
 
@@ -1646,6 +1703,8 @@ Installation lock + restore-entry latch interpretation
 Storage / Installation Authority validation
         ↓
 RestoreGeneration T0 fence / matching RecoveryPass (restore mode only)
+        ↓
+Scheduler durable-state + claim inventory/invariant validation
         ↓
 Run ControlLease adoption + PlanningOperation/EvaluationOperation intent inventory
         ↓
@@ -1667,7 +1726,11 @@ Integration + explicit residual finalization-obligation reconciliation
         ↓
 Task / Goal lifecycle finalization + planning/graph reconciliation
         ↓
-Scheduler dispatch gate
+Recovery safety gate opens
+        ↓
+Rebuild Scheduler disposable queue from durable state
+        ↓
+T3 only if dispatch_mode == RUNNING and normal gates pass
 ```
 
 This is a dependency graph, not a requirement that every controller execute serially. In particular, execution/contact inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result, and a new external PlanningAttempt waits for prior PlanningAttempt certainty/accounting fences.
@@ -1676,7 +1739,7 @@ Acceptance lifecycle application waits for both immutable subject availability a
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
-The global Recovery Coordinator owns only startup gating, restore-entry/generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not absorb domain-specific repair logic or become a generic Finalization Controller.
+The global Recovery Coordinator owns only startup gating, restore-entry/generation fencing/pass bookkeeping, and cross-domain invariant scans. It does not own Scheduler desired state, reset fairness/backoff, absorb domain-specific repair logic or become a generic Finalization Controller.
 
 ## 32. v1 scope
 
@@ -1689,7 +1752,8 @@ Include:
 - fresh RestoreGeneration rotation on disaster restore;
 - generation-bound Grants/CapabilityTickets/broker operations, Operator commands, and Agent Control sessions;
 - Run ControlLease token rotation plus ownership epoch;
-- staged startup and global dispatch gate;
+- staged startup and global recovery safety gate;
+- durable Scheduler dispatch desired state, Goal fairness/priority state and Task eligibility/backoff state reconstructed without Event replay;
 - recovery barrier based on reconciled/fenced/quarantined obligations;
 - periodic safety reconciliation using normal controller code;
 - durable Task/Goal/Run terminal intent and finalization predicates reconstructed from owning-domain state;
@@ -1704,7 +1768,7 @@ Include:
 - invariant scanning and quarantine;
 - SQLite integrity/version checks and supported backup/restore procedure;
 - restore-specific recovery mode;
-- crash/fault-injection tests around every external-side-effect and acceptance-currentness boundary.
+- crash/fault-injection tests around every scheduler atomicity, external-side-effect and acceptance-currentness boundary.
 
 Defer:
 
@@ -1722,38 +1786,41 @@ Defer:
 
 1. **Recovery is ordinary idempotent controller reconciliation over durable desired state, not separate startup mutation logic.**
 2. **SQLite durable state is authority; external state is observed evidence; in-memory queues/caches are disposable.**
-3. **Pantheon v1 uses a stable Installation ID, unique daemon incarnation IDs, and an OS-backed single-daemon installation lock.**
-4. **Run control fencing uses both monotonic ownership epoch and a fresh unpredictable lease token; token rotation occurs on adoption/restart/restore before external commands.**
-5. **Scheduler dispatch remains closed during startup until every prior external-side-effect obligation is reconciled, fenced, or quarantined.**
-6. **The recovery barrier does not require all uncertainty to be resolved; scoped UNKNOWN state may remain while unrelated safe work continues.**
-7. **Every consequential external action has durable intent/preconditions before the side effect and durable observation afterward.**
-8. **UNKNOWN external outcome never authorizes a blind replacement side effect.**
-9. **Finalization is reconstructed from durable terminal intent plus authoritative owning-domain state; an explicit finalization-obligation row exists only for a residual action with independent retry/uncertainty state, never to mirror another domain's source of truth.**
-10. **A Finalizing Task must durably name its selected terminal target, and a terminal Task retains a matching target; Recovery never infers terminal intent from Events or observed cleanup progress.**
-11. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
-12. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
-13. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
-14. **Evaluation recovery preserves EvaluationRound's exact concrete subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`), pinned evaluator contract and EvaluationAttempt identity; historical Evidence never gains authority over a different/current subject.**
-15. **Task and Goal lifecycle controllers, not evaluators/recovery scanners, separately apply AcceptanceResult after rechecking their exact current subject/revision.**
-16. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
-17. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
-18. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
-19. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
-20. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
-21. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
-22. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
-23. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
-24. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
-25. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-26. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
-27. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
-28. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
-29. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
-30. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
-31. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
-32. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
-33. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
-34. **Clean daemon shutdown and cancellation of external work are separate intents.**
-35. **Crash/fault-injection testing at external-side-effect, finalization-intent, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
-36. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-37. **Sandbox recovery is holder-driven, not Run-traversal-driven: lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` presence are separate durable facts; ordinary RELEASED requires ABSENT, while force-resolved UNKNOWN stays factually UNKNOWN behind an explicit lineage fence and separate capacity disposition.**
+3. **Scheduler policy/order state is durable: operator dispatch mode, Goal priority/fairness sequence, Task eligible interval/backoff and SchedulingClaims survive ordinary restart; queue rebuild never resets them.**
+4. **Recovery safety permission and operator dispatch desire are separate: the barrier may be satisfied while `dispatch_mode=PAUSED`, and PAUSED forbids T3 without cancelling existing Runs.**
+5. **Goal fairness is charged only by the successful atomic T3 Run-intent transaction; pre-T3 failures/claims/Event history never fabricate service.**
+6. **Pantheon v1 uses a stable Installation ID, unique daemon incarnation IDs, and an OS-backed single-daemon installation lock.**
+7. **Run control fencing uses both monotonic ownership epoch and a fresh unpredictable lease token; token rotation occurs on adoption/restart/restore before external commands.**
+8. **Recovery dispatch permission remains closed during startup until every prior external-side-effect obligation is reconciled, fenced, or quarantined.**
+9. **The recovery barrier does not require all uncertainty to be resolved; scoped UNKNOWN state may remain while unrelated safe work continues.**
+10. **Every consequential external action has durable intent/preconditions before the side effect and durable observation afterward.**
+11. **UNKNOWN external outcome never authorizes a blind replacement side effect.**
+12. **Finalization is reconstructed from durable terminal intent plus authoritative owning-domain state; an explicit finalization-obligation row exists only for a residual action with independent retry/uncertainty state, never to mirror another domain's source of truth.**
+13. **A Finalizing Task must durably name its selected terminal target, and a terminal Task retains a matching target; Recovery never infers terminal intent from Events or observed cleanup progress.**
+14. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
+15. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
+16. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
+17. **Evaluation recovery preserves EvaluationRound's exact concrete subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`), pinned evaluator contract and EvaluationAttempt identity; historical Evidence never gains authority over a different/current subject.**
+18. **Task and Goal lifecycle controllers, not evaluators/recovery scanners, separately apply AcceptanceResult after rechecking their exact current subject/revision.**
+19. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
+20. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
+21. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
+22. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
+23. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
+24. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
+25. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity closes the recovery safety gate.**
+26. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
+27. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
+28. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
+29. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
+30. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
+31. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
+32. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+33. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+34. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+35. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
+36. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
+37. **Clean daemon shutdown and cancellation of external work are separate intents; shutdown's temporary dispatch gate does not rewrite durable operator dispatch mode.**
+38. **Crash/fault-injection testing at scheduler atomicity, external-side-effect, finalization-intent, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
+39. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+40. **Sandbox recovery is holder-driven, not Run-traversal-driven: lifecycle phase and external `PRESENT|ABSENT|UNKNOWN` presence are separate durable facts; ordinary RELEASED requires ABSENT, while force-resolved UNKNOWN stays factually UNKNOWN behind an explicit lineage fence and separate capacity disposition.**
