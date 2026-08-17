@@ -43,16 +43,19 @@ the system should do.
 |---|---|
 | `docs/reviews/2026-08-architecture-review-resolution.md` | Ledger of how the Critical/High findings from the first adversarial review were dispositioned, with pointers to the canonical documents that now carry each decision. Historical record. |
 | `docs/reviews/2026-08-second-architecture-review-instructions.md` | The brief written for a second adversarial review: scope, decisions to treat as current at the time of writing, and required output format. Process material, not architecture. |
-| `docs/reviews/2026-08-second-architecture-review.md` | Preserved second adversarial review report. It found one Critical and four High follow-up issues after the first correction sweep. Historical snapshot; its findings were subsequently dispositioned. |
-| `docs/reviews/2026-08-final-adversarial-architecture-review.md` | Preserved final adversarial review report. It found two remaining blockers against its recorded baseline. Historical snapshot; both findings were subsequently dispositioned. |
-| `docs/reviews/2026-08-adversarial-review-closure.md` | Historical closure note mapping the second/final review findings to the canonical contracts that subsequently absorbed them. Not architecture. |
+| `docs/reviews/archive/2026-08-second-architecture-review.txt` | Byte-preserved raw snapshot of the second adversarial review from its historical branch. Its one Critical and four High follow-ups were subsequently dispositioned. |
+| `docs/reviews/archive/2026-08-final-adversarial-architecture-review.txt` | Byte-preserved raw snapshot of the final adversarial review from its historical branch. Its two remaining blockers were subsequently dispositioned. |
+| `docs/reviews/2026-08-adversarial-review-closure.md` | Historical closure note mapping the second/final review blockers to the canonical contracts that subsequently absorbed them. Not architecture. |
 | `docs/reviews/2026-08-rust-agent-skill-research.md` | Research/decision result ranking Rust-specific agent-skill candidates (Issue #22): which are Pantheon-specific enough to add, defer, or reject, and why. Not a skill catalog; skills are implemented by later missions inside the mechanism Issue #21 establishes. |
 
-The preserved review reports are historical evidence and are intentionally not
-rewritten to look current. Their paths, line references, verdict wording and
-statements about what was unresolved describe the repository snapshot they
-reviewed. Read `docs/reviews/2026-08-adversarial-review-closure.md` for their
-later disposition, and read `docs/architecture/` for the current contract.
+The two files under `docs/reviews/archive/` are raw historical snapshots rather
+than live Markdown documentation. They intentionally retain the old paths,
+line references, verdict wording and unresolved-state statements from the
+repository snapshots they reviewed. Keeping them as `.txt` prevents historical
+references from masquerading as current documentation references while
+preserving the source reports exactly. Read
+`docs/reviews/2026-08-adversarial-review-closure.md` for their later
+disposition, and `docs/architecture/` for the current contract.
 
 The first review-resolution ledger and second-review instructions predate the
 documentation reorganization; their references to architecture files were
@@ -60,9 +63,11 @@ updated to the current paths, but their content is otherwise historical.
 
 ## Adding to this area
 
-Name new documents `<YYYY-MM>-<subject>.md` and open them with a `## Status`
-section saying what the document is and that it is not canonical. Add a row to
-the table above.
+Name new live review documents `<YYYY-MM>-<subject>.md` and open them with a
+`## Status` section saying what the document is and that it is not canonical.
+Add a row to the table above. Raw immutable snapshots whose references should
+not be treated as current may be stored under `docs/reviews/archive/` as text
+and accompanied by a live disposition/closure note.
 
 Superseded architecture material also belongs here rather than in
 `docs/architecture/`, with a `## Status` line naming what superseded it.
