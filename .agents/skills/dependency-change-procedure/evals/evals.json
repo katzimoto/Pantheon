@@ -1,0 +1,28 @@
+{
+  "skill_name": "dependency-change-procedure",
+  "evals": [
+    {
+      "id": "add-sqlite-driver",
+      "trigger": "positive",
+      "prompt": "Add the `rusqlite` crate to `pantheon-store` so #16 can open a SQLite database. Walk through what the dependency-change procedure requires before I add it.",
+      "expected_output": "Activates the dependency-change procedure: confirms the dependency is justified by the code that needs it now, then performs the manual supply-chain diligence (RustSec advisories against the exact version, maintenance and provenance, license, toolchain/MSRV compatibility, required vs default features, transitive impact), and keeps the change narrow with a minimal lockfile diff.",
+      "files": [],
+      "assertions": [
+        "The response performs supply-chain diligence: advisories, maintenance/provenance, license, MSRV",
+        "The response discusses feature selection and transitive dependencies",
+        "The response does not add the dependency ahead of the code that uses it"
+      ]
+    },
+    {
+      "id": "bump-toolchain-pin",
+      "trigger": "negative",
+      "prompt": "Bump the pinned toolchain in `rust-toolchain.toml` from 1.97.0 to 1.97.1.",
+      "expected_output": "Does not activate the dependency-change procedure; a toolchain-pin change is explicitly out of scope for that skill and follows a different, narrower procedure.",
+      "files": [],
+      "assertions": [
+        "The response does not apply the dependency-change due-diligence checklist",
+        "The response recognizes the toolchain pin as a different procedure"
+      ]
+    }
+  ]
+}

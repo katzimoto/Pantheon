@@ -14,3 +14,4 @@ Pantheon keeps engineering process contracts under `docs/development/`.
 | `docs/development/versions.md` | Defines a GitHub Milestone as the canonical Pantheon Version record and explains its relationship to Engineering Missions. |
 | `docs/development/version-template.md` | Reusable authoring template for an MVP or later Version Milestone description. |
 | `docs/development/agent-skills-and-hooks.md` | Defines the canonical agent skill location and format, the skill catalog, lifecycle hook semantics, and the cross-vendor portability boundary. |
+| `docs/development/skill-evals.md` | Defines the deterministic skill conformance check and the separate behavioral evaluation harness, fixtures, and evidence. |

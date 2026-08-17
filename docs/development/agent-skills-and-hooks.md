@@ -111,11 +111,21 @@ including OpenAI's own Codex review tooling, confirmed the native path makes
 it unnecessary.
 
 `scripts/check-skill-symlinks.sh` (run by `./scripts/verify.sh`) mechanically
-enforces this: every `.claude/skills/*` entry must be a symlink that
-resolves into `.agents/skills/`, and every canonical skill's frontmatter
-`name` must match its directory. A real, independently-editable `SKILL.md`
-under a vendor directory fails verification rather than silently becoming a
-second copy.
+enforces the one-canonical-body half: every `.claude/skills/*` entry must be a
+symlink that resolves into `.agents/skills/`, and every canonical skill's
+frontmatter `name` must match its directory. A real, independently-editable
+`SKILL.md` under a vendor directory fails verification rather than silently
+becoming a second copy.
+
+`scripts/check-skill-conformance.sh` (also run by `./scripts/verify.sh`)
+enforces the rest of the stable Agent Skills specification on every canonical
+`SKILL.md`: frontmatter shape, name/description/compatibility constraints, and
+metadata shape, plus duplicate-skill identity, with a `--self-test` that proves
+the malformed cases are actually rejected. The behavioral half — whether a
+skill triggers correctly and improves workflow value — is deliberately not in
+the gate; `docs/development/skill-evals.md` owns that split, the
+`evals/evals.json` fixture shape, and the separate `scripts/run-skill-evals.py`
+harness.
 
 ## Lifecycle hooks
 
@@ -285,7 +295,10 @@ A new skill needs a repeated, Pantheon-specific procedural gap with clear
 value — not "the format supports it" and not generic language/tooling
 knowledge, per the same evaluation bar Issue #22's research applied. Add it
 under `.agents/skills/<name>/SKILL.md`, symlink it from `.claude/skills/`,
-and it is automatically covered by `scripts/check-skill-symlinks.sh`.
+and it is automatically covered by `scripts/check-skill-symlinks.sh` and
+`scripts/check-skill-conformance.sh`. A skill whose trigger boundary is worth
+regression evidence may also carry `evals/evals.json` per
+`docs/development/skill-evals.md`.
 
 A new hook needs a deterministic, fast, inspectable, fail-safe check that
 narrow validators or `./scripts/verify.sh` do not already cover at the right

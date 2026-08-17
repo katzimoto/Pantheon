@@ -1,0 +1,28 @@
+{
+  "skill_name": "persistence-and-recovery-transaction-review",
+  "evals": [
+    {
+      "id": "store-revision-cas-review",
+      "trigger": "positive",
+      "prompt": "Review this pull request for #17: it adds a revisioned authoritative write to `pantheon-store` that updates a `Run` status row guarded by a revision/CAS predicate inside a transaction. Which invariant families does it touch, and what evidence must it carry?",
+      "expected_output": "Activates the transaction-review skill: identifies the touched invariant families (state-dependent authoritative write and transaction mode, revision/CAS with affected-row checks, typed stale/conflict outcomes, restore-generation fencing), names the relevant sections of the canonical persistence/recovery contracts, and demands evidence at the same altitude (mid-transaction rollback, exactly-one-of-two-commits, a typed stale result) rather than a passing unit suite alone.",
+      "files": [],
+      "assertions": [
+        "The response names the revision/CAS and typed stale/conflict families",
+        "The response points at the relevant sections of the canonical persistence contracts",
+        "The response demands concurrency or replay evidence, not only unit tests"
+      ]
+    },
+    {
+      "id": "read-only-store-query",
+      "trigger": "negative",
+      "prompt": "Add a read-only query to `pantheon-store` that lists completed runs for the operator CLI. No writes, no schema change, and no transaction boundary change.",
+      "expected_output": "Does not activate the transaction-review skill; treats this as an ordinary read-only change with no invariant-family work and no concurrency/recovery evidence to demand.",
+      "files": [],
+      "assertions": [
+        "The response does not apply the invariant-family checklist",
+        "The response does not demand concurrency or recovery evidence for a read-only query"
+      ]
+    }
+  ]
+}

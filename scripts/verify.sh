@@ -28,6 +28,8 @@ cd "$root"
 ./scripts/check-docs-links.sh
 ./scripts/check-crate-deps.sh
 ./scripts/check-skill-symlinks.sh
+./scripts/check-skill-conformance.sh
+./scripts/check-skill-conformance.sh --self-test
 ./scripts/check-hooks.sh
 
 cargo fmt --all -- --check
