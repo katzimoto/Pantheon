@@ -22,10 +22,10 @@ Run `./scripts/verify.sh` after your final change, before reporting the task
 complete or handing it off. It works from anywhere in the repository, and CI runs
 the same command on Linux.
 
-It runs the documentation checks, the internal crate dependency check, formatting,
-Clippy with warnings denied, the tests, and rustdoc with warnings denied — all
-against the committed lockfile. It needs the pinned Rust toolchain and ordinary
-OS build prerequisites, and nothing else.
+It runs the GitHub Actions pin check, the documentation checks, the internal
+crate dependency check, formatting, Clippy with warnings denied, the tests, and
+rustdoc with warnings denied — all against the committed lockfile. It needs the
+pinned Rust toolchain and ordinary OS build prerequisites, and nothing else.
 
 `docs/development/implementation.md` states what each stage proves and what is
 deliberately excluded. A new check belongs in `scripts/verify.sh`, so that local

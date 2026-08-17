@@ -176,9 +176,9 @@ exactly what CI runs on Linux. It needs the pinned toolchain and ordinary OS
 build prerequisites — no task runner, no test runner, no auditing tool, no other
 language runtime.
 
-It runs the documentation checks, the crate dependency check, `cargo fmt
---check`, workspace Clippy with warnings denied, workspace tests, and rustdoc
-with warnings denied, all with `--locked`.
+It runs the GitHub Actions pin check, the documentation checks, the crate
+dependency check, `cargo fmt --check`, workspace Clippy with warnings denied,
+workspace tests, and rustdoc with warnings denied, all with `--locked`.
 
 It does not use `--all-features`. A union of every feature is a configuration
 nobody ships: it hides real conflicts and reports failures in code paths no
