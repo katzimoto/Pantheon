@@ -47,7 +47,14 @@ report() {
 	status=1
 }
 
-files=$(find . -path ./.git -prune -o -name '*.md' -print | sed 's|^\./||' | sort)
+# Repository documentation only. `target/` is pruned along with `.git` because
+# it is generated: rustdoc emits Markdown into target/doc, and a dependency's
+# vendored Markdown lands there too. Scanning it would make this check report
+# broken references in files nobody wrote, and would make the result depend on
+# whether the tree had been built — `scripts/verify.sh` runs this check and then
+# `cargo doc`, so the next run would be inspecting the previous run's output.
+files=$(find . -path ./.git -prune -o -path ./target -prune -o -name '*.md' -print |
+	sed 's|^\./||' | sort)
 
 # 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`,
 #    `scripts/check.sh` or `.github/.../file.yml`. Covering scripts/ means a
