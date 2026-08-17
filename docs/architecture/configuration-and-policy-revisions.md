@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon configuration publication and policy revision specification.
+Canonical Pantheon configuration publication and policy revision specification.
 
 ## Purpose
 

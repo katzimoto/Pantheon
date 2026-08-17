@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon acceptance verification subsystem specification.
+Canonical Pantheon acceptance verification subsystem specification.
 
 ## Purpose
 

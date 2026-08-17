@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — authoritative correction for blocking dynamic Task spawn semantics.
+Canonical Pantheon blocking dynamic Task spawn and Run-yield specification.
 
 ## Purpose
 

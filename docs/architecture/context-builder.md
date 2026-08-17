@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon context construction specification.
+Canonical Pantheon context construction specification.
 
 ## Purpose
 

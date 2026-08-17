@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon secret and credential security subsystem specification.
+Canonical Pantheon secret and credential security subsystem specification.
 
 ## Purpose
 

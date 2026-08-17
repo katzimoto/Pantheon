@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon recovery and crash-safety specification.
+Canonical Pantheon recovery and crash-safety specification.
 
 ## Purpose
 

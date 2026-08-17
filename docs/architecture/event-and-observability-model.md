@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon event, audit, tracing, metrics, and diagnostics specification.
+Canonical Pantheon event, audit, tracing, metrics, and diagnostics specification.
 
 ## Purpose
 

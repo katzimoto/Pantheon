@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon Task subsystem specification.
+Canonical Pantheon Task subsystem specification.
 
 ## Purpose
 

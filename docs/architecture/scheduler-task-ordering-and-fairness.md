@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon scheduler S3 specification.
+Canonical Pantheon scheduler ordering, priority, and fairness specification.
 
 ## Purpose
 

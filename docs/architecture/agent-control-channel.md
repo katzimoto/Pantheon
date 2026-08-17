@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon worker/control trust-boundary specification.
+Canonical Pantheon worker/control trust-boundary specification.
 
 ## Purpose
 

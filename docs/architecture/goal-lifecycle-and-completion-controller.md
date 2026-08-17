@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft design — Pantheon Goal lifecycle and completion specification.
+Canonical Pantheon Goal lifecycle and completion specification.
 
 ## Purpose
 
