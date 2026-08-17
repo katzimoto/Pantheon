@@ -563,7 +563,88 @@ Mismatch becomes `DRIFTED` and credential use fails closed until operator reconc
 
 Pantheon never silently assumes that whichever current secure-store value exists belongs to the restored database history.
 
-## 30. Rotation
+## 30. Global Recovery integration
+
+SecretProvider state is an external-effect domain and participates in the same recovery barrier/fencing model as executors, Sandboxes, Integration and other independently transactional systems.
+
+The generic inventory in `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` is intentionally non-exhaustive. For the Secret subsystem, Global Recovery must additionally discover at least:
+
+```text
+SecretMutationIntent not durably completed
+CredentialLease in ACTIVE | REVOKING | UNKNOWN
+SecretDescriptor whose provider identity/version must be freshly reconciled
+  because an unresolved intent/lease exists
+  or because restore may have rewound SQLite behind the SecretProvider
+```
+
+A SecretRef/provider problem is blast-radius scoped. Recovery may satisfy the global barrier by durably fencing the affected SecretRef/provider scope while unrelated work continues. Any credential-bearing operation that requires a fenced SecretRef fails closed until its provider truth is established or an operator resolves it.
+
+### SecretMutationIntent recovery
+
+A mutation intent is the stable Pantheon reconciliation identity for the pending logical secret mutation. It records only non-secret facts required to interpret provider state, including the target `SecretVersionId`, provider/item identity, mutation kind and expected prior non-secret identity/state where applicable.
+
+Recovery always **inspects the provider before deciding whether another provider mutation is permitted**.
+
+Fresh provider observation is interpreted conservatively:
+
+```text
+provider shows the exact target SecretVersionId / expected target marker
+→ CONFIRMED
+→ update SecretDescriptor to the observed target
+→ complete the existing SecretMutationIntent
+
+provider conclusively shows the expected prior state and proves target mutation did not apply
+→ NOT_APPLIED
+→ record/reconcile that outcome
+→ do not automatically replay lost secret material
+
+provider shows a different item/version/history than either expected prior or target
+→ DRIFTED
+→ preserve the intent as reconciliation evidence
+→ fence credential use for that SecretRef
+
+provider truth cannot be established
+→ UNKNOWN
+→ preserve the unresolved intent
+→ fence credential use for that SecretRef
+```
+
+`set`/`rotate` secret bytes are deliberately absent from SQLite. Therefore a daemon crash cannot turn a pending intent into authority to regenerate or reissue those bytes. If the provider conclusively proves the mutation was not applied and fresh material is still desired, the operator performs a new explicit secret mutation with new command authority/material after current state is observed. Pantheon never fabricates bytes, derives them from the old intent, or treats a repeated transport request as proof that the sensitive payload is identical.
+
+An operation whose external effect is safely repeatable without secret material, such as an exact provider delete/revoke against a stable item/lease identity, may be retried only when the SecretProvider adapter contract explicitly guarantees idempotent repetition for that exact identity and current policy still authorizes it. Otherwise the state remains reconciled/fenced for operator action.
+
+### CredentialLease recovery
+
+A nonterminal CredentialLease is recovered by the same durable Pantheon lease identity plus its stable provider `leaseRef`; a new lease identity is never created merely because acknowledgement/revocation state is ambiguous.
+
+```text
+ACTIVE
+→ inspect the same leaseRef
+→ preserve ACTIVE only when current provider evidence supports it
+
+REVOKING
+→ inspect the same leaseRef first
+→ repeat revoke only if exact-lease revoke is adapter-declared idempotent/safe
+
+REVOKED | EXPIRED
+→ retain factual terminal metadata
+
+UNKNOWN
+→ do not claim REVOKED
+→ keep the lease/relevant SecretRef fenced until current provider evidence or explicit operator resolution is sufficient
+```
+
+Provider expiry/revocation observation is factual state; a timeout or daemon restart is not proof of revocation.
+
+### Disaster-restore rule
+
+Restore can rewind both the descriptor and the presence/absence of mutation-intent rows while the external secure store remains at a newer history. Therefore a restored `SecretDescriptor.currentVersion`, a restored PENDING intent, or absence of a later intent is snapshot evidence only. None proves what happened after the backup.
+
+Before post-restore credential use, Secret Reconciler obtains fresh provider identity/version evidence for the SecretRef. Matching current provider metadata may re-establish `ACTIVE`; mismatching current metadata becomes `DRIFTED`; inability to establish provider truth becomes `UNKNOWN`. A restored pending/absent mutation record is never authority to replay a provider mutation.
+
+RecoveryFindings/audit contain only non-secret item/version/intent/lease identities and observations. Secret material remains excluded from recovery state, Events and diagnostics.
+
+## 31. Rotation
 
 When the material behind the same logical SecretRef rotates:
 
@@ -578,7 +659,7 @@ Audit records which material version each operation used.
 
 Rotation does not require a new Run solely because bytes changed.
 
-## 31. Secrets are not Artifacts
+## 32. Secrets are not Artifacts
 
 Active secret material may never be sealed/stored as a normal Artifact.
 
@@ -586,7 +667,7 @@ Artifact retention/content-addressing/provenance semantics are inappropriate for
 
 Agent `artifact.seal` cannot use SecretRef as a secret-material source.
 
-## 32. Persistence metadata
+## 33. Persistence metadata
 
 Likely metadata tables include:
 
@@ -601,7 +682,7 @@ None contain secret bytes.
 
 Exact DDL remains implementation-level.
 
-## 33. Management authority
+## 34. Management authority
 
 Only Operator Control may:
 
@@ -631,10 +712,12 @@ Agent Control can only cause an already-authorized semantic broker operation to 
 14. Secret bytes never enter ContextPlan, Events, Artifacts, Evidence, Run snapshots, backend attachments, SQLite or ordinary logs.
 15. Secret mutation uses durable intent, external mutation, reconciliation and durable completion.
 16. Secret mutation command idempotency never persists secret bytes.
-17. CredentialLease revocation is a durable recovery obligation.
-18. Secret retrieval happens only after current authorization/grant redemption.
-19. Secret availability only blocks operations that require that credential.
-20. Child Tasks inherit authority ceilings, not credential material.
-21. Disaster restore reconciles external secret identity/version metadata and fails closed on drift.
-22. Secret material is never treated as an Artifact.
-23. Only Operator Control manages secret descriptors/material/bindings.
+17. Global Recovery inventories/reconciles incomplete SecretMutationIntents and nonterminal CredentialLeases and fences only their affected SecretRef/provider scope where possible.
+18. A pending `set`/`rotate` intent never authorizes automatic replay of secret material after crash; provider observation establishes CONFIRMED, NOT_APPLIED, DRIFTED or UNKNOWN first.
+19. CredentialLease revocation is a durable recovery obligation; UNKNOWN/timeout never becomes fabricated REVOKED state.
+20. Disaster restore treats restored secret metadata/intent absence as snapshot evidence and requires fresh provider identity/version reconciliation before credential use.
+21. Secret retrieval happens only after current authorization/grant redemption and a usable reconciled SecretDescriptor.
+22. Secret availability only blocks operations that require that credential.
+23. Child Tasks inherit authority ceilings, not credential material.
+24. Secret material is never treated as an Artifact.
+25. Only Operator Control manages secret descriptors/material/bindings.

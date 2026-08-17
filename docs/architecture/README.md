@@ -146,15 +146,16 @@ Two separate boundaries: what is authorized, and what is physically reachable.
 |---|---|
 | `docs/architecture/security/permissions-and-capabilities.md` | The authorization model: principals, actions, Grants, and `PERMIT`/`DENY` |
 | `docs/architecture/security/sandbox-broker-and-isolation.md` | Physical containment and the ceiling on ambient authority inside a Sandbox |
-| `docs/architecture/security/secret-store-and-credential-brokering.md` | `secret.use` brokering without disclosing material to principals |
+| `docs/architecture/security/secret-store-and-credential-brokering.md` | `secret.use` brokering, SecretProvider mutation/lease lifecycle, and provider-state recovery without disclosing material to principals |
 
 Authorization and containment are independent and must both be satisfied.
 Changing one without reading the other is a common source of error. The
 worker-side trust boundary is defined in
 `docs/architecture/execution/agent-control-channel.md`.
 
-Read when: changing who may do what, what a Sandbox can reach, or how
-credentials are used.
+Read when: changing who may do what, what a Sandbox can reach, how credentials
+are used, or how SecretProvider mutations/leases are reconciled after crash or
+restore.
 
 ## persistence-and-recovery/
 
@@ -168,7 +169,11 @@ Durable truth and how it is restored after things go wrong.
 
 These three are frequently consulted together: persistence defines what is
 durable, global recovery defines what must be reconciled or fenced, and
-recovery policy decides what happens next.
+recovery policy decides what happens next. External-domain contracts may add
+mandatory domain-specific reconciliation semantics; SecretProvider mutations
+and CredentialLeases are defined in
+`docs/architecture/security/secret-store-and-credential-brokering.md` and
+participate in the same global recovery barrier/fencing model.
 
 Read when: changing schema, transaction boundaries, external-effect ordering,
 crash behaviour, or retry/escalation.
@@ -229,9 +234,12 @@ only if dispatch commit conditions change.
 3. `docs/architecture/persistence-and-recovery/recovery-policy.md`
 
 Consult `docs/architecture/operations/event-and-observability-model.md` if the
-Event Journal or transactional outbox is involved, and
+Event Journal or transactional outbox is involved,
 `docs/architecture/execution/run-and-attempt.md` if Attempt contact state or
-fencing is involved.
+fencing is involved, and
+`docs/architecture/security/secret-store-and-credential-brokering.md` if a
+SecretProvider, `SecretMutationIntent`, `SecretDescriptor`, credential use, or
+`CredentialLease` is involved.
 
 **Changing execution routing or backend integration**
 
