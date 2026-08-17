@@ -6,9 +6,11 @@
 
 [workspace]
 # A virtual workspace does not inherit a resolver from any package edition, so
-# the resolver is stated explicitly. Resolver 3 is MSRV-aware: it refuses to
-# select a dependency version whose `rust-version` exceeds the one below,
-# instead of resolving to something the pinned toolchain cannot build.
+# the resolver is stated explicitly. Resolver 3 is Rust-version aware: it
+# prefers dependency versions compatible with the workspace `rust-version`,
+# falling back to an incompatible version only when no compatible version
+# satisfies the dependency requirement. The exact pinned toolchain remains the
+# build-time enforcement boundary.
 resolver = "3"
 members = ["crates/*"]
 
