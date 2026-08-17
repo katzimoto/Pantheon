@@ -1,0 +1,65 @@
+name: Rust
+
+# Mirrors the docs workflow: every push to main and every pull request. The
+# workspace is small, so there is nothing to gain from path filtering, and a
+# path-filtered required check never reports on a PR that touches no Rust.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default, raised per job only if some future job needs more.
+# Nothing here writes to the repository, publishes anything, or reads a secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+# `pull_request`, not `pull_request_target`: code from a fork must be built with
+# a read-only token and no access to secrets. Nothing in these jobs is
+# privileged, so untrusted contributions run the same way trusted ones do.
+#
+# The toolchain is not installed by any step. `rust-toolchain.toml` pins the
+# channel and components, and the rustup preinstalled on the hosted images
+# honours it, so CI and a developer's machine resolve the same compiler with no
+# `curl | sh` bootstrap and no third-party setup action to trust. That leaves
+# `actions/checkout` as the only action in either job, pinned to a full-length
+# commit SHA — the only way to reference an action immutably.
+jobs:
+  verify:
+    name: Verify (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a toolchain that has drifted from rust-toolchain.toml is
+      # visible in the log rather than inferred from a confusing failure.
+      - name: Show pinned toolchain
+        run: rustc --version && cargo --version
+
+      # Exactly the command a developer runs locally. Docs checks, crate
+      # boundary checks, formatting, Clippy with warnings denied, tests and
+      # rustdoc with warnings denied. If this drifts from local verification,
+      # that is the defect.
+      - name: Verify
+        run: ./scripts/verify.sh
+
+  portability:
+    name: Portability (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show pinned toolchain
+        run: rustc --version && cargo --version
+
+      # `macos-latest` is arm64, so this is a different OS and a different
+      # architecture from the Linux job. Building and running the tests is the
+      # portability claim Pantheon makes today. The lint, format and docs gates
+      # are platform-independent and are not repeated here.
+      #
+      # Windows is deliberately absent: Pantheon does not claim to support it.
+      - name: Test
+        run: cargo test --workspace --locked

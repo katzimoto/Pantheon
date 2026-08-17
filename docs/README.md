@@ -12,7 +12,7 @@ into exactly the documents your task needs.
 | Detailed architecture contracts | `docs/architecture/<domain>/` | **Canonical.** One document per subsystem contract. |
 | Reviews and review process | `docs/reviews/` | **Not canonical.** Historical analysis and review ledgers. |
 | Schemas | `schemas/` | **Canonical** for the artifacts they describe. |
-| Development process | `docs/development/` | **Canonical** for how engineering work is specified and how a change to Pantheon is proven, reviewed and landed. Not for what Pantheon is, and not for how an agent operates — that is `AGENTS.md`. `docs/development/missions.md` is the Engineering Mission contract; `docs/development/change-lifecycle.md` covers the pull request, review, handoff and mission closure. |
+| Development process | `docs/development/` | **Canonical** for how engineering work is specified and how a change to Pantheon is proven, reviewed and landed. Not for what Pantheon is, and not for how an agent operates — that is `AGENTS.md`. `docs/development/missions.md` is the Engineering Mission contract; `docs/development/change-lifecycle.md` covers the pull request, review, handoff and mission closure; `docs/development/implementation.md` maps the Rust workspace and the allowed crate dependencies. |
 
 ## Where to start
 
@@ -22,7 +22,11 @@ into exactly the documents your task needs.
 3. Read the two to five documents that domain names for your kind of change.
    Do not read the whole architecture tree; it is large and mostly irrelevant
    to any single task.
-4. Check `schemas/` and, once code exists, the implementation and tests.
+4. Check `schemas/` and, where they exist, the implementation and tests.
+5. For a code change, read `docs/development/implementation.md`. It says which
+   crate owns a concern and what that crate may depend on. Architecture domains
+   are not one-for-one Rust crates, so the domain you read in step 2 does not
+   tell you where the code goes.
 
 ## How architecture documentation is organized
 
@@ -70,6 +74,7 @@ then they are not implementation requirements. See `docs/reviews/README.md`.
 | A review, audit or external analysis | `docs/reviews/` |
 | Superseded material worth keeping | `docs/reviews/`, with a `## Status` line saying what superseded it |
 | A rule about how engineering work is specified, or how a change is proven, reviewed and landed | `docs/development/` |
+| A change to where Rust code belongs, or to the allowed crate dependencies | `docs/development/implementation.md` |
 
 Rules for any new document:
 

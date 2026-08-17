@@ -1,0 +1,14 @@
+# Pinned toolchain for every Pantheon build, local and CI.
+#
+# Stable only. Pantheon does not use nightly features, `#![feature(...)]`,
+# `cargo -Z` or `rustc -Z`, so a pinned stable release is the whole policy.
+# rustup reads this file automatically, which is why no workflow or script
+# installs a toolchain by hand.
+#
+# `profile = "minimal"` plus the two components below is exactly what
+# `scripts/verify.sh` needs: rustc/cargo build, test and document; rustfmt
+# checks formatting; clippy lints.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

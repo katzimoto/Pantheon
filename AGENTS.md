@@ -5,22 +5,31 @@ does not repeat it. See `README.md` for the project summary.
 
 ## Repository state
 
-Pantheon is in the design phase. The repository holds canonical architecture
-documents, JSON Schemas, and the script that validates them. There is no
-implementation code, build system, package manager or test framework yet. Do
-not go looking for a source tree, and do not introduce a language or toolchain
-unless the task says to.
+Pantheon holds canonical architecture documents, JSON Schemas, and a Rust
+workspace under `crates/`. The workspace is scaffolding: every crate compiles and
+states its own boundary, and none implements Pantheon behaviour yet.
+
+Rust is the implementation language, and the toolchain is pinned in
+`rust-toolchain.toml`; no other language or toolchain enters unless the task says
+so. `docs/development/implementation.md` is the map of where code belongs and
+which crate may depend on which. Read it before adding code, a crate or a
+dependency — the dependency boundaries are mechanically enforced, so guessing
+costs a failed verification.
 
 ## Validation
 
-Run `scripts/check-docs-links.sh` from the repository root after your final
-change, before reporting the task complete or handing it off. CI runs the same
-script on every pull request.
+Run `./scripts/verify.sh` after your final change, before reporting the task
+complete or handing it off. It works from anywhere in the repository, and CI runs
+the same command on Linux.
 
-It verifies that every documentation reference resolves, that the architecture
-map lists every canonical contract exactly once, and that `CLAUDE.md` still
-imports this contract. It is the only check that exists today. As implementation
-lands, the canonical commands for build, test and lint belong in this section.
+It runs the documentation checks, the internal crate dependency check, formatting,
+Clippy with warnings denied, the tests, and rustdoc with warnings denied — all
+against the committed lockfile. It needs the pinned Rust toolchain and ordinary
+OS build prerequisites, and nothing else.
+
+`docs/development/implementation.md` states what each stage proves and what is
+deliberately excluded. A new check belongs in `scripts/verify.sh`, so that local
+and CI verification never drift into two different commands.
 
 ## Start here
 
@@ -37,7 +46,9 @@ lands, the canonical commands for build, test and lint belong in this section.
    instead of reading the tree.
 5. Read only the contracts it names, then the relevant schemas, then
    implementation and tests where they exist.
-6. Decide the smallest correct change before editing anything.
+6. For a code change, read `docs/development/implementation.md` to place it:
+   which crate owns the concern, and what that crate is allowed to depend on.
+7. Decide the smallest correct change before editing anything.
 
 Retrieval is selective. Start with the domain the map points to, and widen only
 when a dependency, invariant, schema or implementation path gives you a
@@ -51,6 +62,7 @@ session, but re-read when you need a detail exactly rather than from memory.
 | Task or Issue | The requested outcome and the bounds of the work |
 | `docs/architecture/` | System contracts and invariants |
 | `schemas/` | Machine-readable contracts |
+| `docs/development/implementation.md` | Where code belongs, and the allowed crate dependencies |
 | Implementation | What the system currently does |
 | Tests | Executable evidence of behaviour |
 | `docs/reviews/` | History and analysis. Binding only once written into a contract |
@@ -109,7 +121,7 @@ whatever the code happens to do.
 Before reporting a change complete:
 
 - each acceptance criterion is met, and you can say how;
-- `scripts/check-docs-links.sh` passes;
+- `./scripts/verify.sh` passes;
 - every line of the diff traces to the task;
 - work you found but did not do is reported.
 
