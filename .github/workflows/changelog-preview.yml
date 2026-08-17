@@ -1,0 +1,42 @@
+name: Changelog Preview
+
+on:
+  milestone:
+    types: [created, opened, edited, closed]
+  issues:
+    types: [milestoned, demilestoned, closed, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      milestone:
+        description: GitHub Milestone number to preview
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: changelog-preview-${{ github.event.issue.milestone.number || github.event.milestone.number || inputs.milestone || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Generate Milestone changelog preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Self-test automation logic
+        run: python3 scripts/version-automation.py self-test
+
+      - name: Generate preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MILESTONE_INPUT: ${{ inputs.milestone }}
+        run: |
+          if [ -n "$MILESTONE_INPUT" ]; then
+            python3 scripts/version-automation.py preview --milestone "$MILESTONE_INPUT"
+          else
+            python3 scripts/version-automation.py preview
+          fi
