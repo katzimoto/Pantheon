@@ -21,7 +21,7 @@ one logical backend execution lineage
 
 The core rule is:
 
-> **A Run owns one immutable ExecutionBinding and one immutable initial ContextPlan. An Attempt owns one logical backend-execution lineage identified by one immutable LaunchKey and one Attempt-scoped AgentControlSession.**
+> **A Run owns one immutable ExecutionBinding, one immutable ContextSourceSnapshot frozen at T3, and at most one immutable initial ContextPlan attached during preparation. An Attempt owns one logical backend-execution lineage identified by one immutable LaunchKey and one Attempt-scoped AgentControlSession.**
 
 This produces four distinct recovery levels:
 
@@ -30,10 +30,10 @@ RECONCILE
 same Attempt / same LaunchKey
 
 RETRY EXECUTION
-new Attempt / same Run / same Binding
+new Attempt / same Run / same Binding / same ContextPlan
 
 REROUTE OR SEMANTIC RETRY
-new Run / new Binding / new ContextPlan
+new Run / new Binding / new ContextSourceSnapshot / new ContextPlan
 
 REPLAN
 new/superseding Tasks / graph mutation
@@ -52,7 +52,7 @@ See also:
 
 A Run answers:
 
-> What exact resolved execution strategy has Pantheon committed to for this Task now?
+> What exact resolved execution strategy and eligible semantic source universe has Pantheon committed to for this Task now?
 
 Its immutable specification contains/references at least:
 
@@ -60,9 +60,11 @@ Its immutable specification contains/references at least:
 - selected Logical Agent version;
 - immutable ExecutionBinding;
 - frozen configuration component digests used by the Binding;
+- immutable ContextSourceSnapshot, including `configRevision + contextPolicyDigest` and other source/version/generation identities;
 - SandboxPlan/security ceiling;
-- Task Workspace reference and starting WorkspaceRevision where applicable;
-- immutable initial ContextPlan once preparation completes.
+- Task Workspace reference and starting WorkspaceRevision where applicable.
+
+The ContextPlan does **not** need to exist when the immutable Run row commits. It is produced later during preparation from the already-bound ContextSourceSnapshot and attached exactly once through a separate immutable Run-to-ContextPlan relation. This avoids mutating the Run specification after T3 while still making the initial ContextPlan part of the Run's durable execution history.
 
 Material changes to these semantic/binding-level inputs require a new Run. Examples:
 
@@ -71,10 +73,38 @@ Material changes to these semantic/binding-level inputs require a new Run. Examp
 - changed execution requirements/profile;
 - Acceptance rejection feedback;
 - blocking-child ContinuationContext;
-- changed semantic memory/skill/context selection;
+- changed semantic Memory/Skill/context-source generation;
+- changed ContextPolicy semantics;
 - rerouting/escalation.
 
-Two Runs remain distinct even if they later choose the same Agent/backend.
+Two Runs remain distinct even if they later choose the same Agent/backend or happen to produce byte-identical ContextPlans.
+
+## Context preparation boundary
+
+Context-source freezing and ContextPlan construction are deliberately separate:
+
+```text
+pre-T3
+resolve/canonicalize ContextSourceSnapshot inputs
+        ↓
+T3
+commit immutable Run + exact ContextSourceSnapshot identity
+        ↓
+preparation
+Context Builder reads only that source snapshot
+        ↓
+persist immutable ContextPlan
+        ↓
+one-time RunContextPlan attachment
+        ↓
+ContextReady=True
+```
+
+T3 performs no Memory retrieval, repository exploration, model/backend call, prompt rendering, or other external context-construction work.
+
+If Pantheon crashes after T3 but before ContextPlan attachment, preparation retries against the same ContextSourceSnapshot. It may not query newer mutable source generations or the current active ContextPolicy and silently attach a different semantic plan to the same Run.
+
+If the required frozen source generation is unavailable, preparation fails/reconciles the Run according to policy; substitution of a newer source generation requires a new Run.
 
 ## Attempt identity
 
@@ -202,11 +232,11 @@ Disaster restore does not use T4a to promote an old-generation session. A sessio
 A Run exists before any Attempt. Preparation occurs first:
 
 ```text
-Run committed
+Run committed with ContextSourceSnapshot
   ↓
 WorkspaceReady
 SandboxReady
-ContextReady
+ContextPlan attached exactly once / ContextReady
 PolicyReady
   ↓
 LaunchReady
@@ -259,14 +289,14 @@ A launch contact marker plus backend-specific observation determines whether Pan
 Mechanical boundary:
 
 ```text
-same immutable Binding + same semantic ContextPlan?
+same immutable Binding + same ContextSourceSnapshot + same attached ContextPlan?
   yes + definitively fresh execution needed -> new Attempt
   no -> new Run
 ```
 
 New Attempt is allowed only after the prior Attempt is conclusively terminal/absent and Recovery Policy intentionally retries the same Binding.
 
-New Run is used for rerouting, Agent change, Acceptance feedback, blocking continuation, changed semantic evidence or other material execution-strategy changes.
+New Run is used for rerouting, Agent change, Acceptance feedback, blocking continuation, changed semantic evidence/source generation or other material execution-strategy changes.
 
 ## One nonterminal Attempt
 
@@ -360,7 +390,7 @@ Cancellation/supersession wins if its authoritative fence committed first. A lat
 
 Acceptance rejection never retroactively changes `Run Completed` to Failed. The Candidate/Evidence remain history.
 
-Recovery may choose `REQUEUE_TASK`, but Task cannot become Ready until the producing Run is terminal. The next execution is a new Run/new Binding because rejection evidence changes semantic context.
+Recovery may choose `REQUEUE_TASK`, but Task cannot become Ready until the producing Run is terminal. The next execution is a new Run/new Binding/new ContextSourceSnapshot because rejection evidence changes semantic context.
 
 ## Blocking yield
 
@@ -380,7 +410,7 @@ UNKNOWN parent execution blocks yield completion.
 
 Task Workspace normally survives Runs/Attempts. SandboxInstance is normally Run-scoped; sequential Attempts may reuse it only while its state is known and policy permits.
 
-A new Run normally creates a fresh SandboxInstance/ContextPlan even if it keeps the Task Workspace.
+A new Run normally creates a fresh SandboxInstance, ContextSourceSnapshot and ContextPlan even if it keeps the Task Workspace.
 
 ## Usage
 
@@ -402,17 +432,19 @@ Current Attempt is reconciled toward termination. UNKNOWN remains nonterminal/fe
 ## Core invariants
 
 1. One immutable ExecutionBinding per Run.
-2. One immutable initial ContextPlan per Run once prepared.
-3. At most one Candidate per Run.
-4. `Run Completed => exactly one Candidate`.
-5. `Run Yielded => zero Candidate` and no retry charge.
-6. Every Attempt has one immutable LaunchKey and one Attempt-scoped AgentControlSession identity.
-7. At most one nonterminal Attempt per Run.
-8. Launch-contact intent is durable before the first external launch call.
-9. A current-generation AgentControlSession may rekey only while its Attempt is durably `NOT_CONTACTED` and no independent launch-capable external contact evidence exists.
-10. T4a keeps the same Attempt/session identity, increments only the credential revision, and invalidates/rebuilds all prepared bearer delivery before T4b.
-11. After `CONTACT_MAY_HAVE_OCCURRED`, the Agent Control credential verifier/revision is frozen; lost bearer material never authorizes same-Attempt rekey/relaunch.
-12. UNKNOWN external execution never creates replacement execution.
-13. Fresh execution under the same Binding creates a new Attempt only after the prior Attempt is definitively terminal.
-14. Binding/semantic context change creates a new Run.
-15. Every Finalizing Run has a durable terminalTarget.
+2. Exactly one immutable ContextSourceSnapshot is bound to each Run at T3 before Context Builder selection.
+3. At most one immutable initial ContextPlan may attach to a Run; when present it must derive from that Run's exact ContextSourceSnapshot and can never be replaced.
+4. A preparation retry for the same Run cannot silently switch to a newer ContextPolicy, Memory/index generation, Skill version set or other semantic source generation.
+5. At most one Candidate per Run.
+6. `Run Completed => exactly one Candidate`.
+7. `Run Yielded => zero Candidate` and no retry charge.
+8. Every Attempt has one immutable LaunchKey and one Attempt-scoped AgentControlSession identity.
+9. At most one nonterminal Attempt per Run.
+10. Launch-contact intent is durable before the first external launch call.
+11. A current-generation AgentControlSession may rekey only while its Attempt is durably `NOT_CONTACTED` and no independent launch-capable external contact evidence exists.
+12. T4a keeps the same Attempt/session identity, increments only the credential revision, and invalidates/rebuilds all prepared bearer delivery before T4b.
+13. After `CONTACT_MAY_HAVE_OCCURRED`, the Agent Control credential verifier/revision is frozen; lost bearer material never authorizes same-Attempt rekey/relaunch.
+14. UNKNOWN external execution never creates replacement execution.
+15. Fresh execution under the same Binding creates a new Attempt only after the prior Attempt is definitively terminal and the same ContextSourceSnapshot/ContextPlan remain valid.
+16. Binding/semantic context-source change creates a new Run.
+17. Every Finalizing Run has a durable terminalTarget.

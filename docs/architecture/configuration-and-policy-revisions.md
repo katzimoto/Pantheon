@@ -6,7 +6,7 @@ Canonical Pantheon configuration publication and policy revision specification.
 
 ## Purpose
 
-Pantheon requires one coherent, immutable, auditable configuration snapshot for authorization, routing, evaluator publication, execution profiles, recovery policy, and other operator-controlled registries. Controllers must never observe partially applied configuration or infer security authority directly from mutable source files.
+Pantheon requires one coherent, immutable, auditable configuration snapshot for authorization, routing, evaluator publication, execution profiles, recovery policy, context construction, and other operator-controlled registries. Controllers must never observe partially applied configuration or infer security authority directly from mutable source files.
 
 The central rule is:
 
@@ -31,6 +31,7 @@ configurationRevision:
     executionProfiles: sha256:EXEC
     recoveryPolicies: sha256:RECOVERY
     agents: sha256:AGENTS
+    context: sha256:CONTEXT
 
   sourceSetDigest: sha256:SOURCES
   compiler:
@@ -54,7 +55,10 @@ admissionPolicyDigest
 integrationPolicyDigest
 evaluatorRegistryDigest
 executionProfileDigest
+contextPolicyDigest
 ```
+
+`contextPolicyDigest` is the digest of the immutable `context` ConfigurationRevision component used by Context Builder decisions. It is not an authorization digest.
 
 Decision records bind the exact configuration component that affected them.
 
@@ -70,7 +74,8 @@ Examples:
 - routing resolves named route policies deterministically;
 - evaluator registry resolves logical refs to immutable versions;
 - execution profiles use explicitly defined inheritance/composition;
-- Agent configuration follows the Agent Manifest layering contract.
+- Agent configuration follows the Agent Manifest layering contract;
+- context configuration compiles deterministic mandatory/preload/drop/retrieval limits into one immutable ContextPolicy component.
 
 Goal/Task restrictions and temporary Grants are runtime state, not ConfigurationRevision source configuration.
 
@@ -106,7 +111,30 @@ authorizationComponent:
 
 All Cedar policy/schema combinations must parse and validate before activation. Invalid authorization configuration never becomes active.
 
-## 6. Canonical hashing
+## 6. ContextComponent
+
+Context construction policy is an independently immutable ConfigurationRevision component.
+
+Conceptually:
+
+```yaml
+contextComponent:
+  schemaVersion: 1
+  mandatorySections: ...
+  preloadPriority: ...
+  memoryLimits: ...
+  workspaceOrientationLimits: ...
+  safetyMargin: ...
+  optionalDropOrder: ...
+  compilerVersion: ...
+  digest: sha256:CONTEXT
+```
+
+Its canonical decision digest is named `contextPolicyDigest`.
+
+The ContextComponent controls deterministic semantic selection/trimming only. It is not a frozen security-authority grant: current hard/current authorization policy remains independently enforceable while a Run is preparing/executing.
+
+## 7. Canonical hashing
 
 Pantheon hashes canonical compiled semantics, not only source bytes.
 
@@ -121,7 +149,7 @@ The source digest records what the operator supplied. The compiled digest record
 
 Hash-bearing canonical historical documents are versioned and never rewritten in place by migrations.
 
-## 7. Compile-before-activate
+## 8. Compile-before-activate
 
 A candidate configuration is fully prepared before active state changes.
 
@@ -132,7 +160,7 @@ read source bytes
 → parse
 → schema validate
 → domain-specific composition
-→ compile Cedar/policies
+→ compile Cedar/policies/context policy
 → validate all cross-references
 → resolve evaluator/route/profile/Agent refs
 → canonicalize
@@ -142,7 +170,7 @@ read source bytes
 
 Only a fully valid candidate may activate.
 
-## 8. Atomic activation
+## 9. Atomic activation
 
 Active state contains one small pointer to the current immutable ConfigurationRevision.
 
@@ -165,7 +193,7 @@ append ConfigurationActivated event
 
 No component activates independently.
 
-## 9. Configuration publication barrier
+## 10. Configuration publication barrier
 
 Pantheon must prevent requests from observing a database-active new revision while process-local compiled configuration still points at the old revision.
 
@@ -183,7 +211,7 @@ During the barrier, no new authorization decision, Scheduler Run commitment, or 
 
 If Pantheon crashes after DB commit but before process publication, restart loads the DB-authoritative active revision before serving work.
 
-## 10. Controller snapshot rule
+## 11. Controller snapshot rule
 
 Every consequential controller operation captures one ConfigurationRevision and uses it consistently throughout the operation.
 
@@ -197,12 +225,15 @@ capture cfgrev 43
 → offer validation
 → route policy
 → admission
+→ construct/canonicalize ContextSourceSnapshot inputs under cfgrev 43
 → immediately before T3 commit verify cfgrev 43 is still active
 ```
 
 If active configuration changed, the operation aborts and is recomputed under the new snapshot.
 
-## 11. Immutable decision binding
+T3 binds the exact `ConfigurationRevision + contextPolicyDigest` into the Run's immutable ContextSourceSnapshot. Context Builder later uses that frozen source snapshot even if another ConfigurationRevision activates while preparation is in progress.
+
+## 12. Immutable decision binding
 
 ExecutionBindings and other immutable decisions record the exact configuration revision/components used.
 
@@ -217,6 +248,12 @@ ExecutionBinding:
 ```
 
 ```yaml
+ContextSourceSnapshot:
+  configRevision: cfgrev_43
+  contextPolicyDigest: sha256:CONTEXT
+```
+
+```yaml
 RecoveryDecision:
   configRevision: cfgrev_43
   recoveryPolicyDigest: sha256:RP
@@ -228,7 +265,7 @@ EvaluationRound:
   evaluatorRegistryDigest: sha256:ER
 ```
 
-## 12. Existing Runs and authorization changes
+## 13. Existing Runs and authorization changes
 
 A Run keeps its frozen authorization ceiling, while current active authorization policy can further restrict it.
 
@@ -251,7 +288,7 @@ Consequences:
 
 Pantheon does not need to prove whether an arbitrary policy change is semantically a pure tightening or relaxation.
 
-## 13. Physical enforcement on policy tightening
+## 14. Physical enforcement on policy tightening
 
 A policy update can only be considered enforced if the execution environment can physically enforce the new restriction.
 
@@ -261,16 +298,19 @@ If not, Pantheon must stop/finalize the affected Run and require future work to 
 
 Pantheon must never claim a security policy is active for an execution whose physical sandbox cannot enforce it.
 
-## 14. Routing, evaluator, execution-profile, and Agent changes
+## 15. Routing, evaluator, execution-profile, Agent, and context changes
 
 Normal preference/configuration changes affect future work only.
 
 - route policy change: existing Binding unchanged; future Runs use new route policy;
 - evaluator registry logical ref change: existing Tasks retain their pinned EvaluatorVersion; future Tasks resolve the new version;
 - execution profile change: existing Run keeps frozen profile unless current hard security invalidates it;
-- Agent definition change: existing Run keeps frozen Agent snapshot; future Agent Resolution uses the active version.
+- Agent definition change: existing Run keeps frozen Agent snapshot; future Agent Resolution uses the active version;
+- context policy change: existing Run keeps the `contextPolicyDigest` frozen in its ContextSourceSnapshot; future Runs freeze the newly active ContextComponent.
 
-## 15. Backend registration and draining
+A context policy update never causes Context Builder to rebuild/replace the ContextPlan of an already committed Run. Material semantic context changes require a new Run.
+
+## 16. Backend registration and draining
 
 Removing or disabling a backend from configuration means no new work may route to it. It does not immediately destroy the adapter/recovery capability required by existing Attempts.
 
@@ -285,7 +325,7 @@ active for offers
 
 Backend health remains runtime operational state, not ConfigurationRevision content.
 
-## 16. Invalid candidates and last-known-good configuration
+## 17. Invalid candidates and last-known-good configuration
 
 Invalid configuration candidates are rejected atomically and never partially apply.
 
@@ -293,7 +333,7 @@ The previous valid ConfigurationRevision remains active.
 
 Pantheon records rejected load attempts and diagnostics for operator inspection.
 
-## 17. Explicit apply in v1
+## 18. Explicit apply in v1
 
 Authority-sensitive configuration activation is explicit in v1.
 
@@ -309,7 +349,7 @@ Filesystem watching may detect source drift, but must not automatically activate
 
 This avoids half-written files becoming temporary authority.
 
-## 18. Startup and source drift
+## 19. Startup and source drift
 
 On daemon startup Pantheon loads the durable active ConfigurationRevision from SQLite, verifies the component hashes, and reconciles source drift separately.
 
@@ -317,7 +357,7 @@ If source files differ from the active source set, report drift; do not silently
 
 Fresh installation is the exception: before Pantheon can become ready, one valid initial ConfigurationRevision must be compiled and activated.
 
-## 19. Configuration diagnostics
+## 20. Configuration diagnostics
 
 Useful operational conditions include:
 
@@ -330,7 +370,7 @@ RECONCILING_SECURITY
 
 These are conditions/diagnostics, not lifecycle phases of immutable ConfigurationRevision objects.
 
-## 20. Source provenance
+## 21. Source provenance
 
 Every ConfigurationRevision records the logical source inputs and digests that produced it.
 
@@ -338,7 +378,7 @@ Filesystem path/location is provenance only, not semantic identity.
 
 Configuration may contain SecretRefs but never raw secret values.
 
-## 21. Rollback
+## 22. Rollback
 
 Rollback never moves activation history backward.
 
@@ -352,7 +392,7 @@ revalidate compatibility/current hard policy
 
 Historical revision rows remain immutable.
 
-## 22. Configuration reconciliation
+## 23. Configuration reconciliation
 
 After activation, controllers are awakened but Events are only hints. Each controller re-reads the current active ConfigurationRevision and reconciles its subjects.
 
@@ -360,7 +400,9 @@ A controller may record which ConfigRevision it last evaluated for a subject. St
 
 The Scheduler may not commit a new Run until it has observed the active ConfigRevision.
 
-## 23. Persistence model
+An existing Run whose T3 already committed does not switch ContextPolicy during preparation; Context Builder resolves policy through the Run's ContextSourceSnapshot rather than the current active pointer.
+
+## 24. Persistence model
 
 Likely persistence families:
 
@@ -373,9 +415,11 @@ config_load_attempts
 config_reconciliations
 ```
 
+`configuration_components` includes the immutable ContextComponent addressed by `contextPolicyDigest`; ContextSourceSnapshot/ContextPlan persistence belongs to the Run/context architecture rather than configuration publication state.
+
 Exact DDL is implementation work.
 
-## 24. Operator API/CLI
+## 25. Operator API/CLI
 
 The operator control surface should support operations equivalent to:
 
@@ -391,11 +435,12 @@ pantheon config rollback <revision>
 
 Agent Control has no configuration-management operations.
 
-## 25. Excluded operational state
+## 26. Excluded operational state
 
 ConfigurationRevision is not a snapshot of the whole database. It excludes runtime state such as:
 
 - Goals/Tasks/Runs/Attempts;
+- ContextSourceSnapshots/ContextPlans attached to Runs;
 - ResourceReservations/BudgetHolds/Usage;
 - backend health/rate limits;
 - temporary Grants/Approvals;
@@ -412,8 +457,10 @@ ConfigurationRevision is not a snapshot of the whole database. It excludes runti
 5. Built-in hard policy cannot be weakened by lower configuration scopes.
 6. Controllers bind one ConfigRevision per consequential operation and revalidate staleness before commit.
 7. Immutable decisions bind exact component digests rather than one ambiguous `policyHash`.
-8. Existing Runs cannot gain authority from a later policy relaxation.
-9. Current policy tightening applies to future actions and may force Run termination if physical enforcement cannot be tightened safely.
-10. Configuration history and hash-bearing historical documents are immutable.
-11. Explicit configuration activation is operator authority and unavailable to Agent Control.
-12. A single-daemon/single-database Pantheon uses atomic coherent configuration snapshots rather than eventually consistent component rollout.
+8. Context construction has an explicit immutable `context` component named by `contextPolicyDigest`; it is never hidden behind a generic policy field.
+9. T3 freezes `configRevision + contextPolicyDigest` into the Run's ContextSourceSnapshot; later ContextPolicy activation affects future Runs only.
+10. Existing Runs cannot gain authority from a later policy relaxation.
+11. Current policy tightening applies to future actions and may force Run termination if physical enforcement cannot be tightened safely.
+12. Configuration history and hash-bearing historical documents are immutable.
+13. Explicit configuration activation is operator authority and unavailable to Agent Control.
+14. A single-daemon/single-database Pantheon uses atomic coherent configuration snapshots rather than eventually consistent component rollout.

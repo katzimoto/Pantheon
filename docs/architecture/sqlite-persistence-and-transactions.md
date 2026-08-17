@@ -58,6 +58,8 @@ Examples:
 goal_revisions        immutable
 TaskSpec              immutable
 ExecutionBinding      immutable
+ContextSourceSnapshot immutable source-eligibility manifest
+ContextPlan           immutable selected semantic context
 Run spec/snapshot     immutable
 Attempt identity      immutable
 PlanningOperation intent/provenance
@@ -67,7 +69,6 @@ GoalCompletionCandidate immutable
 Evidence              immutable
 ConfigurationRevision immutable
 EvaluatorVersion      immutable
-ContextPlan           immutable
 
 Goal/Task/Run/Attempt/Planning/Evaluation/Sandbox/etc. status
                       revisioned mutable controller state
@@ -128,6 +129,9 @@ SCHEDULING / EXECUTION
   execution_requests
   route_decisions
   execution_bindings
+  context_source_snapshots
+  context_plans
+  run_context_plans
   runs
   run_status
   attempts
@@ -369,6 +373,84 @@ binding hash/canonical JSON
 
 Do not use one ambiguous `policy_hash` field.
 
+ContextPolicy is not hidden inside a generic ExecutionBinding policy field. Its canonical identity is `contextPolicyDigest` on the Run's ContextSourceSnapshot, because Context Builder semantics are frozen through that explicit source snapshot.
+
+## Context source snapshot and ContextPlan attachment
+
+T3 freezes one immutable `ContextSourceSnapshot` for every Run before Context Builder performs selection/retrieval.
+
+The source snapshot is a canonical/content-addressed manifest over exact source identities or stable reconstructable generations. Conceptually:
+
+```text
+context_source_snapshots
+  digest PK
+  config_revision_id              FK -> configuration_revisions
+  context_policy_digest
+  task_spec_digest/ref
+  goal_revision
+  graph_revision
+  agent_snapshot_id               FK -> agent_snapshots
+  starting_workspace_revision_id  nullable FK -> workspace_revisions
+  continuation_context_id         nullable FK -> continuation_contexts
+  memory_corpus_generation        nullable
+  memory_index_generation         nullable
+  source_manifest_json            canonical immutable detail
+  created_at
+```
+
+The canonical manifest may contain additional exact Skill/Artifact/retriever/source-version identities. Any selection-affecting source must be named by an immutable version/digest or stable reconstructable generation identity. Raw secret material is forbidden.
+
+ContextSourceSnapshot freezes **eligibility**, not selected Context. T3 does not run Memory retrieval, prompt rendering, model calls, arbitrary repository exploration, or other external context-building work.
+
+The immutable Run row stores the exact source snapshot immediately:
+
+```text
+runs
+  id
+  task_id
+  binding_id
+  context_source_snapshot_digest  NOT NULL FK -> context_source_snapshots
+  created_at
+  UNIQUE (id, task_id)
+  UNIQUE (id, context_source_snapshot_digest)
+```
+
+A later ContextPlan is also immutable/content-addressed:
+
+```text
+context_plans
+  digest PK
+  source_snapshot_digest          NOT NULL FK -> context_source_snapshots
+  builder_version
+  selected_manifest_json          canonical immutable selected refs/digests/provenance
+  created_at
+  UNIQUE (digest, source_snapshot_digest)
+```
+
+The Run row is **not** updated to insert the plan after preparation. Instead v1 attaches at most one plan through:
+
+```text
+run_context_plans
+  run_id                          PK
+  context_source_snapshot_digest NOT NULL
+  context_plan_digest             NOT NULL
+  attached_at
+
+FOREIGN KEY (run_id, context_source_snapshot_digest)
+  REFERENCES runs(id, context_source_snapshot_digest)
+
+FOREIGN KEY (context_plan_digest, context_source_snapshot_digest)
+  REFERENCES context_plans(digest, source_snapshot_digest)
+```
+
+Those composite FKs prove that the attached ContextPlan was built from the exact ContextSourceSnapshot bound to that Run. `run_id` as the primary key enforces at most one attachment. The same content-addressed plan may be referenced by another Run only when the complete source snapshot and selected semantic bytes/provenance are identical; reverse uniqueness is not required.
+
+ContextPlan construction may be retried after crash, but every retry reads the same immutable source snapshot. If a referenced source generation is unavailable, preparation fails/reconciles; Pantheon never substitutes a newer generation into the existing Run.
+
+A ContextPlan may be durably inserted before its one-time attachment transaction; an unattached immutable plan is harmless historical/orphan content. Attachment itself is authoritative Run preparation state and must be idempotent: same Run + same source + same plan succeeds/reconciles; an attempt to attach a different plan to a Run that already has one fails closed.
+
+An Attempt may be created only after the Run has exactly one valid `run_context_plans` attachment.
+
 ## Run status
 
 Conceptually:
@@ -378,9 +460,10 @@ runs (immutable)
   id
   task_id
   binding_id
-  snapshot/context refs
+  context_source_snapshot_digest
   created_at
   UNIQUE (id, task_id)      # composite parent key for holder-safe FKs
+  UNIQUE (id, context_source_snapshot_digest)
 
 run_status (mutable lifecycle + immutable holder copy)
   run_id PK
@@ -1170,6 +1253,11 @@ run_status holder matches runs.task_id
 one nonterminal Run per Task
 Active Task -> exactly one nonterminal Run
 Ready/Waiting Task -> zero nonterminal Runs
+Run.context_source_snapshot_digest resolves to immutable ContextSourceSnapshot
+ContextSourceSnapshot config_revision/context_policy binding is complete and component digest matches that ConfigurationRevision
+at most one run_context_plans row per Run
+RunContextPlan source snapshot matches both its Run and ContextPlan through composite FKs
+Attempt exists/current -> parent Run has one valid ContextPlan attachment
 GoalRevision acceptance criteria -> exact pinned EvaluatorVersions + evaluator-resolution provenance
 GoalCompletionCandidate acceptance identity -> owning GoalRevision pinned contract
 Finalizing Run -> terminal_target present
@@ -1214,6 +1302,8 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
+ContextSourceSnapshot identity is immutable on `runs`; ContextPlan attachment is a separate one-time row. The composite Run/source and Plan/source FKs relationally enforce exact-source attachment, while source availability/reconstructability remains a controller/recovery predicate. An Attempt cannot become current without a valid attachment.
+
 The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task terminal intent and local pointer facts are schema `CHECK` constraints; finalization completion remains cross-row controller/invariant-checker logic over the authoritative owning-domain rows plus any explicit residual obligation records. Explicit finalization-obligation ownership is concrete-FK/XOR constrained rather than opaque. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
@@ -1224,7 +1314,8 @@ Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 T0  DISASTER-RESTORE AUTHORITY FENCE
 T1  GOAL REVISION + ACCEPTANCE PINNING
 T2  GRAPH PATCH
-T3  SCHEDULER RUN-INTENT COMMIT
+T3  SCHEDULER RUN-INTENT + CONTEXT-SOURCE FREEZE
+T3a CONTEXT PLAN ATTACHMENT
 T4  ATTEMPT + AGENT-CONTROL IDENTITY
 T4a PRE-CONTACT AGENT-CONTROL REKEY
 T4b LAUNCH CONTACT MARKER
@@ -1244,9 +1335,13 @@ T16 PLANNING EXTERNAL-CONTACT MARKER
 
 T1 resolves any Goal acceptance logical evaluator refs against the expected active trusted evaluator registry/ConfigurationRevision before commit, then atomically inserts the immutable GoalRevision with exact EvaluatorVersion/evaluator-resolution provenance, advances the current Goal revision through expected-revision CAS, creates reconciliation work and appends Events. No evaluator external call occurs inside T1.
 
-T3 revalidates Task Ready/current Goal/Graph/config/admission authority, creates the immutable Run with `task_id`, inserts the matching `run_status` row with the same immutable `task_id` and `phase=Active`, and atomically moves the Task to `Active` with `active_run_id` pointing at that Run. The composite FKs prove both holder relationships and the `one_nonterminal_run_per_task` partial unique index rejects a second `Active|Finalizing` Run for the Task. No external executor/backend call occurs inside T3.
+Before T3, the Scheduler/control path resolves and canonicalizes the exact immutable/versioned source identities required for the ContextSourceSnapshot under the captured ConfigurationRevision. T3 revalidates Task Ready/current Goal/Graph/config/admission authority, verifies that captured ConfigurationRevision is still active, inserts/reuses the immutable ContextSourceSnapshot, creates the immutable Run with `task_id + context_source_snapshot_digest`, inserts the matching `run_status` row with the same immutable `task_id` and `phase=Active`, and atomically moves the Task to `Active` with `active_run_id` pointing at that Run. The composite FKs prove holder relationships and the `one_nonterminal_run_per_task` partial unique index rejects a second `Active|Finalizing` Run for the Task.
 
-T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
+T3 performs no Memory retrieval, model/prompt rendering, arbitrary repository traversal, backend call, Sandbox call, or other external context construction. Stable source-generation identities may be prepared as immutable data before T3, but the exact snapshot bound to the Run becomes authoritative only with T3.
+
+T3a is the one-time ContextPlan attachment transaction after deterministic Context Builder preparation. It re-reads the Run/source identity, verifies no existing `run_context_plans` row, verifies the immutable ContextPlan's `source_snapshot_digest` equals the Run's frozen snapshot, inserts the attachment and appends its Event/condition update. The composite FKs enforce the same source relationship. Same Run + same attachment is idempotent; a different plan for an already-attached Run fails closed. No external source/backend call occurs inside T3a.
+
+T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T4/T8 additionally require one valid `run_context_plans` row for the parent Run. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
 
 T4a is a short authoritative recovery transaction used only when the current-generation Attempt is still durably `NOT_CONTACTED` and the raw bearer needed for first launch was lost. It rechecks session/Attempt/Run/ControlLease state plus the expected current credential revision, increments `credential_revision`, replaces `credential_hash`, records non-secret rekey provenance/Event, and commits before rebuilding the launch credential projection. It never changes Attempt ID, LaunchKey, AgentControlSession ID, or RestoreGeneration.
 
@@ -1264,7 +1359,7 @@ PlanningOperation intent, immutable input/Goal/Graph/config/backend/metering pro
 
 T16 is a short authoritative transaction that verifies the PlanningOperation/PlanningAttempt is current, the expected Goal/Graph planning fence is still applicable for issuing the call, required Holds/Reservations remain valid, and the attempt is still `NOT_CONTACTED`; it then atomically changes `contact_state = CONTACT_MAY_HAVE_OCCURRED`, records daemon/time provenance and appends its Event. Only after T16 commits may Pantheon invoke the external Planner/backend. A later stale Goal/Graph revision can invalidate Graph materialization without erasing factual PlanningAttempt/Usage history.
 
-Never perform network/Git/process/backend/secret-store/container-runtime calls inside a SQLite transaction.
+Never perform network/Git/process/backend/secret-store/container-runtime/model/external-context-source calls inside a SQLite transaction.
 
 ## Core invariants
 
@@ -1273,25 +1368,28 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 3. Safety-critical relationships are relationally constrained where SQLite can express them.
 4. JSON is never a substitute for ownership/revision/accounting columns.
 5. Task-scoped reservations are unique/reused across Runs.
-6. GoalRevision and TaskSpec acceptance contracts freeze exact permitted EvaluatorVersions before EvaluationRound creation; registry movement never silently rewrites those semantics.
-7. EvaluationRound owns exactly one concrete relational subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`); no opaque generic subject reference or Task-only ownership is used.
-8. Evidence/AcceptanceResult must match the exact EvaluationRound subject and pinned evaluator contract; Task and Goal lifecycle controllers separately recheck current authority before applying results.
-9. Task terminal intent is durable row state: non-finalizing nonterminal Tasks have no target, `Finalizing` Tasks have exactly one selected target, and terminal Tasks retain a target matching their terminal phase. Finalization completion is reconstructed from authoritative domain rows plus only those explicit residual obligations that need independent retry/uncertainty state.
-10. RunStatus carries immutable Task holder identity constrained back to `runs`; Task `active_run_id` is constrained to a Run of the same Task; and a real partial unique index over `run_status.task_id` enforces at most one `Active|Finalizing` Run per Task. Task phase-specific exact-zero/exact-one semantics remain controller/invariant-checker rules.
-11. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
-12. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
-13. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
-14. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
-15. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-16. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-17. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
-18. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
-19. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
-20. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-21. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
-22. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-23. Requeue occurs only after previous responsible Run terminal.
-24. Force-resolution tombstones stale lineages without fabricating factual Usage or external absence.
-25. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-26. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
-27. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.
+6. Every Run binds exactly one immutable ContextSourceSnapshot at T3; that snapshot contains the exact `ConfigurationRevision + contextPolicyDigest` and every selection-affecting source/version/generation identity required for deterministic context construction.
+7. ContextPlan attachment is separate from the immutable Run row: `run_context_plans` permits at most one plan per Run and composite FKs prove that plan derives from the Run's exact frozen source snapshot. Attempt creation requires the attachment.
+8. Context Builder/recovery may retry preparation only against that same source snapshot; it never substitutes current "latest" ContextPolicy/Memory/index/Skill/source state into an existing Run.
+9. GoalRevision and TaskSpec acceptance contracts freeze exact permitted EvaluatorVersions before EvaluationRound creation; registry movement never silently rewrites those semantics.
+10. EvaluationRound owns exactly one concrete relational subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`); no opaque generic subject reference or Task-only ownership is used.
+11. Evidence/AcceptanceResult must match the exact EvaluationRound subject and pinned evaluator contract; Task and Goal lifecycle controllers separately recheck current authority before applying results.
+12. Task terminal intent is durable row state: non-finalizing nonterminal Tasks have no target, `Finalizing` Tasks have exactly one selected target, and terminal Tasks retain a target matching their terminal phase. Finalization completion is reconstructed from authoritative domain rows plus only those explicit residual obligations that need independent retry/uncertainty state.
+13. RunStatus carries immutable Task holder identity constrained back to `runs`; Task `active_run_id` is constrained to a Run of the same Task; and a real partial unique index over `run_status.task_id` enforces at most one `Active|Finalizing` Run per Task. Task phase-specific exact-zero/exact-one semantics remain controller/invariant-checker rules.
+14. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
+15. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
+16. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
+17. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
+18. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+19. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+20. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+21. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+22. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
+23. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+24. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+25. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+26. Requeue occurs only after previous responsible Run terminal.
+27. Force-resolution tombstones stale lineages without fabricating factual Usage or external absence.
+28. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+29. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
+30. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.
