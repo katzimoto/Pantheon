@@ -1,0 +1,39 @@
+name: Version Readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      milestone:
+        description: GitHub Milestone number to evaluate for release readiness
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: version-readiness-${{ inputs.milestone }}
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    name: Verify release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Self-test automation logic
+        run: python3 scripts/version-automation.py self-test
+
+      - name: Run canonical repository verification
+        run: ./scripts/verify.sh
+
+      - name: Evaluate Version Milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/version-automation.py readiness
+          --milestone "${{ inputs.milestone }}"
+          --default-branch "${{ github.event.repository.default_branch }}"
