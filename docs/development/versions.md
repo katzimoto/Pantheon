@@ -41,6 +41,39 @@ A version may be refined while its Milestone is open by splitting, adding, reord
 
 A mission should represent one independently reviewable outcome. A version is allowed to contain many missions and a mission belongs to the version by being assigned to that Milestone.
 
+## Changelog projection
+
+The changelog and GitHub Release notes are user-facing projections of a Version; they are not another version authority. Pantheon generates the canonical release-note candidate from **completed Engineering Missions assigned to the Version Milestone**, not from every commit or pull request between tags.
+
+Every Mission assigned to a Version carries exactly one repository changelog-classification label:
+
+```text
+changelog:added
+changelog:changed
+changelog:deprecated
+changelog:removed
+changelog:fixed
+changelog:security
+changelog:none
+```
+
+`changelog:none` is explicit: it means the Mission is intentionally absent from user-facing release notes. No classification is different; it means release metadata is incomplete. Supporting pull requests never create extra changelog entries because the Mission is the outcome being released.
+
+Do not maintain a second live `Unreleased` inventory in `CHANGELOG.md`. While a Version is in development, its Milestone and assigned Missions are the live release state. Near release, automation generates a preview from that native state; a future release-preparation change may materialize the accepted version entry into `CHANGELOG.md` and reuse it for the GitHub Release body.
+
+`.github/release.yml` configures GitHub's native generated release notes only as a fallback or sanity-check projection. Native generated notes, commit ranges and pull-request labels never redefine Version membership or the authoritative Pantheon changelog candidate.
+
+## Automation
+
+GitHub Actions reinforce this contract without becoming state owners:
+
+- `.github/workflows/version-policy.yml` validates Version Milestone shape and Mission-closing PR metadata;
+- `.github/workflows/changelog-preview.yml` renders a read-only Milestone/Mission changelog preview into the Actions job summary;
+- `.github/workflows/version-readiness.yml` manually evaluates a selected Version against Mission closure, changelog classification, mission-closing PRs, repository verification and release-tag preconditions;
+- `.github/workflows/version-labels.yml` is the explicit manual bootstrap/reconciliation path for the `changelog:*` repository labels.
+
+The automation may report or fail when GitHub-native state violates this contract, but it does not mirror Milestone progress into repository files and it does not publish a release. Release publication, artifact provenance and immutable binary distribution are introduced only when Pantheon has actual release artifacts to publish.
+
 ## Template
 
 Use `docs/development/version-template.md` as the authoring template for a GitHub Milestone description.
