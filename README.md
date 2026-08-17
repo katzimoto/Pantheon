@@ -25,6 +25,13 @@ contracts.
 Material under [docs/reviews/](docs/reviews/README.md) is historical review
 analysis and is not canonical architecture.
 
+## Working in this repository
+
+Contributors and coding agents should read [AGENTS.md](AGENTS.md), the
+repository operating contract: how to navigate to authoritative material, what
+may be changed, and how to validate a change. It is deliberately short and
+routes into the documentation above rather than restating it.
+
 ## Status
 
 Early design phase. The architecture is being specified subsystem-by-subsystem before implementation.

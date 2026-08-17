@@ -1,16 +1,24 @@
 #!/bin/sh
-# Validate documentation structure. Two independent checks:
+# Validate documentation structure and agent-contract wiring. Four independent
+# checks, numbered as they appear below:
 #
-#   1. Every reference resolves. Pantheon docs reference each other with
+#   1. Inline-code references resolve. Pantheon docs reference each other with
 #      repository-root-relative paths written as inline code, e.g.
-#      `docs/architecture/tasks/task-lifecycle.md`, plus ordinary Markdown
-#      links. Each must point at something that exists.
+#      `docs/architecture/tasks/task-lifecycle.md`. Each must point at something
+#      that exists.
 #
-#   2. The architecture map is a complete inventory. Every canonical contract
+#   2. Ordinary Markdown links to local files resolve.
+#
+#   3. The architecture map is a complete inventory. Every canonical contract
 #      under a docs/architecture domain directory must be listed in
 #      docs/architecture/README.md exactly once, and every contract the map
 #      lists must exist. A contract missing from the map is invisible to agents
-#      navigating by it, which check 1 cannot detect.
+#      navigating by it, which checks 1 and 2 cannot detect.
+#
+#   4. The canonical import is present. AGENTS.md is the agent operating
+#      contract, and CLAUDE.md must import it so Claude Code loads that contract
+#      rather than a separate copy. This verifies only that the import line is
+#      still there; it does not inspect the rest of CLAUDE.md.
 #
 # Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
@@ -29,9 +37,11 @@ report() {
 
 files=$(find . -path ./.git -prune -o -name '*.md' -print | sed 's|^\./||' | sort)
 
-# 1. Inline-code references of the form `docs/.../file.md` or `schemas/file.json`.
+# 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`
+#    or `scripts/check.sh`. Covering scripts/ means a validation command cited in
+#    documentation or in AGENTS.md fails the check once it stops existing.
 for f in $files; do
-	grep -noE '`(docs|schemas)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
+	grep -noE '`(docs|schemas|scripts)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
 		target=$(printf '%s' "$match" | tr -d '`')
 		case "$target" in
 		*/) [ -d "$target" ] || echo "MISS $f $line $target" ;;
@@ -115,6 +125,21 @@ if [ -f "$map" ]; then
 	fi
 else
 	echo "missing architecture map: $map" >&2
+	status=1
+fi
+
+# 4. The canonical import is present. Claude Code reads CLAUDE.md and not
+# AGENTS.md, so CLAUDE.md carries an @AGENTS.md import. Claude Code ignores
+# imports written inside backticks or code fences, so require a bare import
+# line.
+if [ ! -f AGENTS.md ]; then
+	echo "missing canonical agent contract: AGENTS.md" >&2
+	status=1
+elif [ ! -f CLAUDE.md ]; then
+	echo "missing CLAUDE.md: it must import AGENTS.md" >&2
+	status=1
+elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md; then
+	echo "CLAUDE.md: no bare '@AGENTS.md' import line; the canonical import must remain present" >&2
 	status=1
 fi
 
