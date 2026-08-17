@@ -63,6 +63,7 @@ Attempt identity      immutable
 PlanningOperation intent/provenance
 PlanningRecord        immutable normalized planning result
 Candidate             immutable
+GoalCompletionCandidate immutable
 Evidence              immutable
 ConfigurationRevision immutable
 EvaluatorVersion      immutable
@@ -208,9 +209,11 @@ Secret material is never stored in SQLite.
 
 ## Goal and Task
 
-`goals` stores current revision pointer, phase, terminal target/status revision and current completion-candidate ref. `goal_revisions` is immutable `(goal_id, revision)` content.
+`goals` stores current revision pointer, phase, terminal target/status revision and current completion-candidate ref. `goal_revisions` is immutable `(goal_id, revision)` content and contains/refs the immutable Goal acceptance contract, including exact pinned EvaluatorVersions plus the ConfigurationRevision/evaluator-registry digest used to resolve them when that revision became authoritative.
 
-`tasks` stores current phase/status revision/current responsible Run pointer. `task_specs` is immutable.
+`goal_completion_candidates` is immutable/content-addressed and binds the exact Goal/Graph revision, required deliverable bindings, producer Candidate digests and the already-pinned Goal acceptance-contract identity/provenance. It never causes evaluator refs to be re-resolved.
+
+`tasks` stores current phase/status revision/current responsible Run pointer. `task_specs` is immutable and likewise carries the Task acceptance contract with exact EvaluatorVersion pinning performed at Task materialization.
 
 Key invariant:
 
@@ -785,7 +788,59 @@ Restore-mode negative evidence uses the same restore-specific rule as other exte
 
 ## Evaluation
 
-EvaluationRound pins Candidate/acceptance/evaluator versions. External deterministic checks use `EvaluationOperation` with control-operation ResourceReservations/BudgetHolds where required; EvaluationAttempts are small execution/reconciliation identities, not Runs.
+EvaluationRound is an immutable judgment context over exactly one concrete immutable subject. V1 subject types are:
+
+```text
+TASK_CANDIDATE
+GOAL_COMPLETION_CANDIDATE
+```
+
+The relational shape is equivalent to:
+
+```text
+evaluation_rounds
+  id
+  subject_kind                         TASK_CANDIDATE|GOAL_COMPLETION_CANDIDATE
+  task_candidate_digest                nullable FK -> candidates
+  goal_completion_candidate_digest     nullable FK -> goal_completion_candidates
+  acceptance_hash
+  config_revision_id
+  evaluator_registry_digest
+  state
+  created_at
+```
+
+The subject relationship is not an opaque polymorphic string. A row-local CHECK plus concrete FKs enforce exactly one subject:
+
+```sql
+CHECK (
+  (subject_kind = 'TASK_CANDIDATE'
+   AND task_candidate_digest IS NOT NULL
+   AND goal_completion_candidate_digest IS NULL)
+  OR
+  (subject_kind = 'GOAL_COMPLETION_CANDIDATE'
+   AND task_candidate_digest IS NULL
+   AND goal_completion_candidate_digest IS NOT NULL)
+)
+```
+
+Task/Goal lifecycle ownership is derived through that concrete immutable subject. `evaluation_rounds` does not need a generic `task_id` that is meaningless for Goal acceptance.
+
+The Round freezes the acceptance hash, exact criterion/EvaluatorVersion rows, and evaluator-resolution provenance copied from the owning immutable semantic contract:
+
+```text
+TASK_CANDIDATE
+  -> TaskSpec acceptance contract pinned at Task materialization
+
+GOAL_COMPLETION_CANDIDATE
+  -> GoalRevision acceptance contract pinned at GoalRevision commit
+```
+
+Round creation never resolves logical evaluator refs against current registry state. `config_revision_id`/`evaluator_registry_digest` are reproducibility provenance only; current hard/current authorization policy is still checked when EvaluationOperations execute.
+
+`evaluation_round_evaluators` binds each criterion to the exact pinned `EvaluatorVersion`.
+
+External deterministic checks use `EvaluationOperation` with control-operation ResourceReservations/BudgetHolds where required; EvaluationAttempts are small execution/reconciliation identities, not Runs. EvaluationOperation binds the Round/criterion/evaluator version; it derives the exact immutable subject from the Round rather than carrying an independently mutable/redundant Candidate field.
 
 A billable EvaluationOperation that accepts backend-authored factual usage carries immutable operation-intent fields equivalent to `usage_reporter_backend_id`, `usage_reporter_backend_revision`, and `metering_contract_digest`, frozen before external contact. These fields are nullable only as an all-or-none group for operations with no backend-authored metering and are never mutable lifecycle status.
 
@@ -808,7 +863,21 @@ Creation initializes `launch_contact_state = NOT_CONTACTED`. Immediately before 
 
 At most one nonterminal EvaluationAttempt may exist per EvaluationOperation. Because attempt lifecycle state is relational on `evaluation_attempts`, v1 enforces this with a partial unique index/constraint over `operation_id` for the nonterminal state domain. A new EvaluationAttempt is permitted only after the prior one is definitively terminal/absent under bounded evaluation retry policy.
 
-For usage reconciliation on an uninterrupted history, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen H1 metering-source provenance; it does not prove that usage occurred. After disaster restore, restored negative contact state is historical snapshot evidence only until the external evaluation domain is freshly reconciled.
+`human_evaluation_requests` binds `round_id + criterion_id` and obtains the exact subject from the Round; it does not duplicate an ambiguous Task/Goal subject reference.
+
+`evidence` binds the exact `evaluation_round`, criterion, EvaluatorVersion, provenance and verdict. Any self-contained copied subject identity must exactly match the Round's concrete FK. Evidence from a Task Candidate can never satisfy a GoalCompletionCandidate Round or vice versa merely because IDs/criterion text resemble one another.
+
+`acceptance_results` aggregate required criterion Evidence for one exact Round. Applying that result to lifecycle is owned by the concrete subject's controller:
+
+```text
+TASK_CANDIDATE
+  -> Task/Acceptance Controller rechecks Task still Evaluating with this exact current Candidate
+
+GOAL_COMPLETION_CANDIDATE
+  -> Goal Completion Controller rechecks Goal still Evaluating with this exact current completion candidate and GoalRevision
+```
+
+For usage reconciliation on an uninterrupted history, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen metering-source provenance; it does not prove that usage occurred. After disaster restore, restored negative contact state is historical snapshot evidence only until the external evaluation domain is freshly reconciled.
 
 The EvaluationOperation, not an EvaluationAttempt, owns the verification Sandbox through `sandbox_instances.evaluation_operation_id`. This holder remains stable across bounded sequential EvaluationAttempts while that Sandbox remains valid.
 
@@ -934,6 +1003,8 @@ A deterministic PersistenceInvariantChecker verifies at least:
 Task phase/active_run_id row-local consistency
 Active Task -> exactly one nonterminal Run
 Ready/Waiting Task -> zero nonterminal Runs
+GoalRevision acceptance criteria -> exact pinned EvaluatorVersions + evaluator-resolution provenance
+GoalCompletionCandidate acceptance identity -> owning GoalRevision pinned contract
 Finalizing Run -> terminal_target present
 Completed Run -> Candidate exists
 attempt_status holder matches attempts.run_id
@@ -948,6 +1019,10 @@ one nonterminal PlanningAttempt per PlanningOperation
 PlanningAttempt contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 PlanningRecord binds existing PlanningOperation and matching external PlanningAttempt when applicable
 external PlanningOperation metering backend/contract frozen before PlanningAttempt contact
+EvaluationRound subject_kind/FK XOR valid (Task Candidate xor GoalCompletionCandidate)
+EvaluationRound acceptance/evaluator versions match owning immutable TaskSpec/GoalRevision contract
+EvaluationRound currentness resolves through its concrete Task/Goal subject
+Evidence subject/criterion/EvaluatorVersion matches its EvaluationRound
 one nonterminal EvaluationAttempt per EvaluationOperation
 EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 one live Task-scoped reservation per singular (Task, ResourceKey)
@@ -968,7 +1043,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -976,7 +1051,7 @@ Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
 ```text
 T0  DISASTER-RESTORE AUTHORITY FENCE
-T1  GOAL REVISION
+T1  GOAL REVISION + ACCEPTANCE PINNING
 T2  GRAPH PATCH
 T3  SCHEDULER RUN-INTENT COMMIT
 T4  ATTEMPT + AGENT-CONTROL IDENTITY
@@ -984,7 +1059,7 @@ T4a PRE-CONTACT AGENT-CONTROL REKEY
 T4b LAUNCH CONTACT MARKER
 T5  USAGE INGESTION
 T6  CANDIDATE SUBMISSION
-T7  ACCEPTANCE/EVIDENCE COMMIT
+T7  TYPED ACCEPTANCE/EVIDENCE COMMIT
 T8  RETRY ATTEMPT
 T9  REQUEUE AFTER PRIOR RUN TERMINAL
 T10 AUTHORIZATION/GRANT REDEMPTION
@@ -996,11 +1071,15 @@ T15 EVALUATION LAUNCH CONTACT MARKER
 T16 PLANNING EXTERNAL-CONTACT MARKER
 ```
 
+T1 resolves any Goal acceptance logical evaluator refs against the expected active trusted evaluator registry/ConfigurationRevision before commit, then atomically inserts the immutable GoalRevision with exact EvaluatorVersion/evaluator-resolution provenance, advances the current Goal revision through expected-revision CAS, creates reconciliation work and appends Events. No evaluator external call occurs inside T1.
+
 T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
 
 T4a is a short authoritative recovery transaction used only when the current-generation Attempt is still durably `NOT_CONTACTED` and the raw bearer needed for first launch was lost. It rechecks session/Attempt/Run/ControlLease state plus the expected current credential revision, increments `credential_revision`, replaces `credential_hash`, records non-secret rekey provenance/Event, and commits before rebuilding the launch credential projection. It never changes Attempt ID, LaunchKey, AgentControlSession ID, or RestoreGeneration.
 
 T4b verifies the same current Attempt/Run/control authority **and the exact current AgentControlSession credential revision** before atomically setting `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, recording initiation provenance, and appending its Event. After T4b commits, T4a is permanently forbidden for that Attempt. Only after T4b may Pantheon cross the external ensureExecution/create boundary using the launch package built for that verified credential revision.
+
+T7 loads the EvaluationRound's concrete typed subject and exact pinned criterion/EvaluatorVersion, rechecks the owning lifecycle object's currentness, creates immutable Evidence, updates criterion/Aggregate AcceptanceResult state and settles applicable control-operation accounting in one authoritative transaction. For `TASK_CANDIDATE`, Task must still be Evaluating with that exact current Candidate. For `GOAL_COMPLETION_CANDIDATE`, Goal must still be Evaluating with that exact current completion candidate and represented GoalRevision current for completion. T7 never lets the evaluator itself transition Task or Goal lifecycle; owning controllers apply current aggregate results through their lifecycle transitions.
 
 T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
 
@@ -1019,20 +1098,23 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 3. Safety-critical relationships are relationally constrained where SQLite can express them.
 4. JSON is never a substitute for ownership/revision/accounting columns.
 5. Task-scoped reservations are unique/reused across Runs.
-6. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
-7. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
-8. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
-9. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
-10. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
-11. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-12. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-13. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
-14. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
-15. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
-16. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-17. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
-18. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-19. Requeue occurs only after previous responsible Run terminal.
-20. Force-resolution tombstones stale lineages without fabricating factual Usage.
-21. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-22. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+6. GoalRevision and TaskSpec acceptance contracts freeze exact permitted EvaluatorVersions before EvaluationRound creation; registry movement never silently rewrites those semantics.
+7. EvaluationRound owns exactly one concrete relational subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`); no opaque generic subject reference or Task-only ownership is used.
+8. Evidence/AcceptanceResult must match the exact EvaluationRound subject and pinned evaluator contract; Task and Goal lifecycle controllers separately recheck current authority before applying results.
+9. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
+10. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
+11. External contact boundaries are durable before normal Attempt, EvaluationAttempt and PlanningAttempt calls; ambiguous contact never authorizes an overlapping replacement lineage.
+12. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
+13. Every authoritative planning invocation has a PlanningOperation; external planning has at most one nonterminal PlanningAttempt at a time, while PlanningRecord remains immutable result/provenance rather than Graph authority.
+14. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or concrete control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+15. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+16. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+17. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+18. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
+19. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+20. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+21. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+22. Requeue occurs only after previous responsible Run terminal.
+23. Force-resolution tombstones stale lineages without fabricating factual Usage.
+24. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+25. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.

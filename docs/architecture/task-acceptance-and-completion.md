@@ -23,7 +23,7 @@ See also:
 4. Deterministic verification is preferred where practical.
 5. V1 acceptance requires every required criterion to PASS.
 6. Evaluator ERROR never counts as PASS.
-7. Candidate/evaluator-version change makes prior evidence stale for the new subject/contract.
+7. Subject/evaluator-version change makes prior evidence stale for the new subject/contract.
 8. Acceptance decides satisfaction; Recovery decides retry/requeue/replan.
 9. Producing Agent self-checks are development signals, not authoritative Acceptance evidence.
 
@@ -63,7 +63,9 @@ acceptance:
       severity: required
 ```
 
-Task materialization resolves logical Evaluator refs through the operator-governed Evaluator Registry and pins exact immutable EvaluatorVersions. A Task may not embed arbitrary executable commands.
+Task materialization resolves logical Evaluator refs through the operator-governed Evaluator Registry and pins exact immutable EvaluatorVersions plus evaluator-resolution provenance into the immutable Task acceptance contract. A Task may not embed arbitrary executable commands.
+
+This is symmetric with Goal acceptance: TaskSpec pins at Task materialization; GoalRevision pins at GoalRevision commit. Evaluation later consumes pinned semantic versions rather than resolving current registry state at evaluation time.
 
 ## V1 evaluator kinds
 
@@ -75,7 +77,7 @@ schema
 human
 ```
 
-`check` is a deterministic registered executable validation in an independent verification Sandbox. `schema` is trusted structural validation. `human` is explicit human judgment bound to the Candidate.
+`check` is a deterministic registered executable validation in an independent verification Sandbox. `schema` is trusted structural validation. `human` is explicit human judgment bound to the immutable EvaluationRound subject.
 
 Model-based `rubric`/`review` evaluators are architecture-reserved but implementation-deferred from v1. They are not silently executed through an unaccounted model path.
 
@@ -83,17 +85,19 @@ Assertions/policy-style deterministic criteria compile to `check`/`schema` or cu
 
 ## EvaluationRound
 
-When Candidate becomes current, Acceptance Controller creates/reuses an EvaluationRound freezing:
+When the Candidate becomes current, Acceptance Controller creates/reuses an EvaluationRound with concrete typed subject ownership:
 
 ```text
-Task/Candidate digest
+subjectKind = TASK_CANDIDATE
+taskCandidate = exact Candidate digest/ref
+goalCompletionCandidate = NULL
 acceptance contract digest
 criterion set
-exact EvaluatorVersions
-relevant ConfigurationRevision
+exact pinned EvaluatorVersions
+ConfigurationRevision/evaluatorRegistryDigest provenance
 ```
 
-Each external deterministic criterion creates an accounted `EvaluationOperation` using control-operation ResourceReservations/BudgetHolds where required. Human criteria create HumanEvaluationRequests.
+The Round does not resolve logical evaluator refs again. Each external deterministic criterion creates an accounted `EvaluationOperation` using control-operation ResourceReservations/BudgetHolds where required. Human criteria create HumanEvaluationRequests.
 
 ## Independent verification
 
@@ -106,9 +110,11 @@ Agent edits Task Workspace
   ↓
 Pantheon seals immutable Candidate/code.changeset
   ↓
+EvaluationRound(subject=TASK_CANDIDATE)
+  ↓
 independent verification Sandbox
   ↓
-registered EvaluatorVersion
+registered pinned EvaluatorVersion
   ↓
 Evidence
 ```
@@ -120,14 +126,17 @@ Verification receives immutable Candidate input + disposable writable scratch. I
 Evidence is immutable and binds at least:
 
 ```text
-Candidate/Artifact subject digest
-Task criterion
+EvaluationRound
+exact typed immutable subject
+criterion
 Evaluator ref + immutable version digest
 EvaluationOperation/HumanEvaluation provenance
 verdict
 bounded structured details
 output Artifact refs where needed
 ```
+
+For Task acceptance the subject must match the Round's concrete Task Candidate FK. Evidence never substitutes a different Candidate merely because Task ID or criterion text matches.
 
 Large logs/reports become Artifacts referenced by Evidence.
 
@@ -166,17 +175,21 @@ HumanEvaluationRequest -> PASS/FAIL Evidence
 ApprovalRequest -> scoped capability Grant -> authorization re-evaluation
 ```
 
+HumanEvaluationRequest binds the EvaluationRound/criterion/EvaluatorVersion; the concrete Task Candidate subject is obtained from and must match that Round.
+
 Neither substitutes for the other.
 
 ## Staleness
 
-Evidence applies only to the exact immutable Candidate/criterion/EvaluatorVersion it judged.
+Evidence applies only to the exact immutable typed subject/criterion/EvaluatorVersion it judged.
 
 Changing Candidate or semantic Goal/Task acceptance revision creates a new subject/contract; old Evidence remains historical but cannot be reused as current PASS unless an explicit compatibility rule says it evaluates the same immutable subject/criterion/version.
 
 ## Acceptance aggregation
 
 Acceptance Controller, not Evaluator, owns aggregation. Evaluators only return evidence/verdict.
+
+For a `TASK_CANDIDATE` Round, aggregation rechecks the Task still owns that exact current Candidate and is still Evaluating/current before applying PASS.
 
 When every required criterion PASSes:
 
@@ -211,22 +224,36 @@ UNKNOWN evaluator process/sandbox state follows the same durable external-effect
 
 ## Cancellation/current authority
 
-Cancellation/supersession can stop pending EvaluationOperations. Completed Evidence remains immutable history, but Acceptance cannot transition a cancelled/superseded Task to Succeeded because the aggregation commit re-reads current Task authority/revision.
+Cancellation/supersession can stop pending EvaluationOperations. Completed Evidence remains immutable history, but Acceptance cannot transition a cancelled/superseded Task to Succeeded because the aggregation commit re-reads the typed Round subject plus current Task authority/revision.
 
 ## Goal acceptance reuse
 
-GoalCompletionCandidate uses the same EvaluationRound/Evidence machinery with a different immutable subject type. There is no separate Goal evaluator execution architecture.
+GoalCompletionCandidate uses the same EvaluationRound/Evidence/EvaluationOperation machinery through a second concrete subject type:
+
+```text
+TASK_CANDIDATE
+  -> task_candidate_digest/ref set
+  -> goal_completion_candidate ref NULL
+
+GOAL_COMPLETION_CANDIDATE
+  -> goal_completion_candidate digest/ref set
+  -> task_candidate ref NULL
+```
+
+There is no separate Goal evaluator execution architecture and no opaque polymorphic `subject_ref`. Task Controller applies Task results; Goal Completion Controller applies Goal results.
 
 ## Core invariants
 
 1. Worker submits Candidate; Pantheon declares acceptance/success.
 2. Candidate/Artifact refs are content-addressed canonical identifiers.
-3. Task pins registered immutable EvaluatorVersions; arbitrary Task commands are forbidden.
-4. V1 authoritative evaluator kinds are check/schema/human; model review is deferred.
-5. Evaluation consumes accounted Resources/Budget where applicable.
-6. Authoritative checks run independently against immutable Candidate materialization.
-7. Evidence is immutable and exact-subject/evaluator-version bound.
-8. ERROR never means PASS; all required criteria must PASS.
-9. Producing Agent self-checks are never authoritative acceptance evidence.
-10. Acceptance rejection does not fail the producing Run and cannot requeue until that Run is terminal.
-11. Evaluators produce Evidence only; Task Controller owns lifecycle.
+3. Task pins registered immutable EvaluatorVersions at Task materialization; arbitrary Task commands are forbidden.
+4. EvaluationRound uses concrete typed immutable subject ownership; Task acceptance uses only `TASK_CANDIDATE` rounds.
+5. V1 authoritative evaluator kinds are check/schema/human; model review is deferred.
+6. Evaluation consumes accounted Resources/Budget where applicable.
+7. Authoritative checks run independently against immutable subject materialization.
+8. Evidence is immutable and exact-subject/evaluator-version bound.
+9. ERROR never means PASS; all required criteria must PASS.
+10. Producing Agent self-checks are never authoritative acceptance evidence.
+11. Acceptance rejection does not fail the producing Run and cannot requeue until that Run is terminal.
+12. Evaluators produce Evidence only; owning Task/Goal lifecycle controller applies aggregate acceptance.
+13. GoalCompletionCandidate reuses the same execution/Evidence machinery through a concrete relational subject type, not by overloading Task identity.

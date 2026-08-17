@@ -16,7 +16,7 @@ The central rule is:
 
 The Goal Completion Controller owns Goal phase, completion readiness, GoalCompletionCandidate creation/currentness, Goal-level evaluation coordination, terminalTarget, and Goal finalization.
 
-It does not schedule Tasks, create Runs, perform planning, or execute evaluators directly.
+It does not schedule Tasks, create Runs, perform planning, or execute evaluators directly. Evaluation Controller may produce Evidence/AcceptanceResult for the exact GoalCompletionCandidate subject, but it never owns Goal lifecycle transitions.
 
 ## Goal phases
 
@@ -110,8 +110,12 @@ TaskGraph revision
 required deliverable bindings
 producer Candidate digests
 Goal acceptance-contract digest
-relevant ConfigurationRevision
+exact pinned EvaluatorVersions from that GoalRevision
+ConfigurationRevision used for evaluator resolution
+evaluatorRegistryDigest
 ```
+
+The GoalCompletionCandidate carries forward the GoalRevision's already-pinned acceptance semantics; candidate creation never resolves logical evaluator refs against the then-current registry.
 
 Creating the current candidate is atomic with `Goal Active -> Evaluating`.
 
@@ -119,15 +123,46 @@ If the Goal revision advances while Evaluating, the old completion candidate rem
 
 ## Goal acceptance
 
-Goal acceptance reuses the same EvaluationRound/Evidence architecture as Task acceptance. The subject is the immutable GoalCompletionCandidate.
+Goal acceptance reuses the same EvaluationRound/Evidence architecture as Task acceptance, with a different concrete immutable subject type.
+
+For a Goal with explicit criteria, Goal Completion Controller creates/reuses an EvaluationRound whose concrete subject is exactly the current `GoalCompletionCandidate`. That Round contains no Task-Candidate ownership and uses the exact EvaluatorVersions already pinned by the GoalRevision acceptance contract.
+
+Conceptually:
+
+```text
+GoalCompletionCandidate
+        ↓
+EvaluationRound(subject=GOAL_COMPLETION_CANDIDATE)
+        ↓
+EvaluationOperation / HumanEvaluationRequest
+        ↓
+Evidence
+        ↓
+AcceptanceResult
+        ↓
+Goal Completion Controller rechecks current Goal/candidate authority
+```
 
 V1 evaluator kinds remain `check`, `schema`, and `human`.
 
-If the Goal has no explicit acceptance criteria, structurally valid required deliverable bindings are sufficient for Goal acceptance.
+If the Goal has no explicit acceptance criteria, structurally valid required deliverable bindings are sufficient for Goal acceptance. Pantheon does not create fake EvaluationOperations/EvaluationAttempts merely to represent an empty criterion set.
 
 ## Accepted Goal candidate -> Finalizing
 
 Acceptance PASS moves the Goal to Finalizing with `terminalTarget=Succeeded`; it never moves directly to Succeeded.
+
+The acceptance-to-finalization transaction rechecks:
+
+```text
+Goal.phase == Evaluating
+Goal.current_completion_candidate == EvaluationRound Goal subject
+GoalRevision still current
+EvaluationRound/AcceptanceResult applies to that exact candidate
+all required criterion Evidence belongs to that Round and pinned EvaluatorVersions
+no cancellation/new revision/finalization fence won
+```
+
+Then it atomically sets `Goal -> Finalizing / terminalTarget=Succeeded` and appends its Events. Evaluation Controller/evaluator never performs this lifecycle transition directly.
 
 Entering Finalizing fences all new Goal work:
 
@@ -149,7 +184,7 @@ At minimum, finalization must ensure:
 ```text
 no nonterminal Run under the Goal
 no nonterminal Attempt under the Goal
-no active EvaluationOperation under the Goal
+no active EvaluationOperation under the Goal's current/stale evaluation rounds requiring closure
 no unresolved reservations requiring active ownership
 no unresolved BudgetHold requiring settlement
 residual non-required Tasks finalized/cancelled
@@ -171,6 +206,8 @@ Planning/Active/Evaluating
 
 It immediately fences creation of new Goal work, stops pending Goal evaluation where safe, and requests cancellation/finalization of all nonterminal Goal Tasks.
 
+Completed Evidence/AcceptanceResult may remain immutable history but cannot cause Goal success after cancellation because Goal Completion Controller rechecks current Goal authority before applying it.
+
 Goal becomes Cancelled only when those obligations are safely finalized.
 
 ## Failure
@@ -189,7 +226,7 @@ Failure also passes through Finalizing.
 
 ## Revisions and lifecycle
 
-Normal Goal revisions may be created while Planning, Active, or Evaluating. A revision during Evaluating invalidates the current completion candidate for terminalization.
+Normal Goal revisions may be created while Planning, Active, or Evaluating. A revision during Evaluating invalidates the current completion candidate for terminalization and therefore invalidates its EvaluationRound/AcceptanceResult as current Goal authority, while retaining all immutable history.
 
 Once Goal Finalizing begins, normal semantic revision is rejected. Cancellation remains available. After terminalization, changed requirements become a new Goal, optionally related by provenance.
 
@@ -221,7 +258,7 @@ Accepted required Goal deliverables become retention roots owned by the Goal. Go
 
 ## Budgets
 
-Goal terminalization creates no artificial refund. Historical UsageRecords/ChargeRecords remain factual. Finalization waits for outstanding Goal descendant BudgetHolds to settle/reconcile. No new Goal spend authority is created after Finalizing begins.
+Goal terminalization creates no artificial refund. Historical UsageRecords/ChargeRecords remain factual. Finalization waits for outstanding Goal descendant/control-operation BudgetHolds to settle/reconcile. No new Goal spend authority is created after Finalizing begins.
 
 ## Integration boundary
 
@@ -240,16 +277,23 @@ goals
   status_revision
   current_completion_candidate
 
-goal_revisions               immutable
+goal_revisions
+  immutable semantic content
+  pinned Goal acceptance contract + EvaluatorVersions/evaluator-resolution provenance
+
 goal_deliverable_bindings    immutable/history-preserving
 goal_completion_candidates   immutable/content-addressed
 ```
+
+Goal-level EvaluationRound ownership is represented by the Evaluation persistence model through a concrete FK to `goal_completion_candidates`, not by overloading `task_id` or an opaque generic subject string.
 
 ## Atomic completion transitions
 
 Creation of the completion candidate rechecks current Goal/Graph revision and required deliverable bindings in one write transaction and atomically changes Active -> Evaluating.
 
-Acceptance-to-finalization rechecks that the candidate/revision/Evidence are current and atomically changes Evaluating -> Finalizing with terminalTarget Succeeded.
+For explicit criteria, EvaluationRound creation binds the concrete current GoalCompletionCandidate and its pinned acceptance contract. For zero criteria, structural acceptance can proceed without fake external evaluation state.
+
+Acceptance-to-finalization rechecks that the GoalCompletionCandidate/revision/EvaluationRound/AcceptanceResult/Evidence are current and atomically changes Evaluating -> Finalizing with terminalTarget Succeeded.
 
 Final terminalization rechecks all finalization obligations and atomically changes Finalizing -> terminal.
 
@@ -263,14 +307,15 @@ External cleanup/reconciliation never occurs inside the SQLite transaction.
 4. Required deliverables are structural completion roots.
 5. Only accepted immutable Task outputs may bind Goal deliverables.
 6. Completion readiness requires current Goal-revision/TaskGraph reconciliation.
-7. GoalCompletionCandidate is immutable/content-addressed.
-8. Goal acceptance reuses EvaluationRound/Evidence.
-9. Goal acceptance PASS goes to Finalizing, not directly Succeeded.
-10. Finalizing fences all new Goal work.
-11. Terminal Goal state requires subordinate execution/control obligations to be safely quiescent.
-12. UNKNOWN external obligations block terminalization.
-13. Task failure does not automatically imply Goal failure.
-14. Goal has a durable terminalTarget.
-15. Accepted Goal deliverables are Artifact-retention roots.
-16. Goal success never implicitly performs Git integration/deployment.
-17. Terminal Goals never reopen.
+7. GoalCompletionCandidate is immutable/content-addressed and carries the GoalRevision's already-pinned acceptance semantics.
+8. Goal acceptance reuses EvaluationRound/Evidence through the concrete `GOAL_COMPLETION_CANDIDATE` subject type; it never overloads Task-Candidate ownership.
+9. Goal acceptance PASS is applied only by Goal Completion Controller after current Goal/candidate authority is rechecked and goes to Finalizing, not directly Succeeded.
+10. Zero-criterion Goal acceptance does not manufacture evaluator execution.
+11. Finalizing fences all new Goal work.
+12. Terminal Goal state requires subordinate execution/control obligations to be safely quiescent.
+13. UNKNOWN external obligations block terminalization.
+14. Task failure does not automatically imply Goal failure.
+15. Goal has a durable terminalTarget.
+16. Accepted Goal deliverables are Artifact-retention roots.
+17. Goal success never implicitly performs Git integration/deployment.
+18. Terminal Goals never reopen.

@@ -19,6 +19,8 @@ See also:
 - `docs/architecture/task-lifecycle.md`
 - `docs/architecture/run-and-attempt.md`
 - `docs/architecture/planner-and-task-decomposition.md`
+- `docs/architecture/evaluation-and-evaluator-registry.md`
+- `docs/architecture/goal-lifecycle-and-completion-controller.md`
 - `docs/architecture/recovery-policy.md`
 - `docs/architecture/scheduler-reservations-ownership-and-leases.md`
 - `docs/architecture/scheduler-dispatch-and-run-intent-reconciliation.md`
@@ -48,8 +50,10 @@ SQLite status / findings / events
 
 The authoritative sources are:
 
-- immutable Goal/Task/Run/Attempt/Binding/Candidate/Artifact records;
+- immutable Goal/GoalRevision/GoalCompletionCandidate records and pinned Goal acceptance contracts;
+- immutable Task/TaskSpec/Run/Attempt/Binding/Candidate/Artifact records and pinned Task acceptance contracts;
 - durable PlanningOperation/PlanningAttempt identities plus immutable PlanningRecord results where external planning exists;
+- immutable EvaluationRound typed-subject identity, exact pinned evaluator set, Evidence and AcceptanceResult records;
 - durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
 - durable SandboxInstance holder/SandboxKey identity and SandboxVerification facts;
 - durable desired-state fields;
@@ -65,7 +69,8 @@ The following are never authoritative by themselves:
 - stale event streams;
 - PID files;
 - filesystem/runtime objects without corresponding durable ownership state;
-- backend callbacks received without current fencing authority.
+- backend callbacks received without current fencing authority;
+- a bare Task/Goal ID without the concrete immutable EvaluationRound subject it is supposed to judge.
 
 In-memory scheduler and controller queues are disposable accelerators. They must be reconstructible from SQLite and external observation.
 
@@ -282,20 +287,23 @@ Persist the new daemon incarnation and keep the global dispatch gate closed. Inc
 Load at least:
 
 - nonterminal Goals and Tasks;
-- Active/Evaluating/Finalizing Tasks;
+- Active/Evaluating/Finalizing Goals and Tasks;
+- current GoalCompletionCandidates and Task Candidates referenced by active acceptance;
 - nonterminal Runs and Attempts;
 - nonterminal PlanningOperations and PlanningAttempts plus unresolved planning control-operation accounting;
-- nonterminal EvaluationOperations and EvaluationAttempts;
+- active/current EvaluationRounds, their concrete typed subjects, Evidence/AcceptanceResults and nonterminal EvaluationOperations/EvaluationAttempts;
 - ExecutionBindings;
 - every SandboxInstance not RELEASED plus its durable holder and latest SandboxVerification;
 - ResourceReservations not RELEASED;
 - BudgetHolds not settled/released;
 - WorkspaceRecords not RELEASED;
 - pending IntegrationIntents;
-- candidate/evidence finalization work;
+- candidate/evidence/finalization work;
 - Artifact replicas needed by live work;
 - unresolved cleanup/finalization obligations;
 - prior unresolved RecoveryFindings.
+
+An EvaluationRound is inventoried by its own durable identity and concrete subject edge. Recovery never reconstructs Goal-level EvaluationRound ownership by pretending it has a Task ID.
 
 Sandbox inventory is **not derived only by walking Runs**. Verification Sandboxes belong to EvaluationOperations and must remain discoverable/reconcilable even when no Run owns them. PlanningOperations do not own Sandboxes in v1 unless a future architecture adds an explicit concrete holder edge.
 
@@ -316,6 +324,8 @@ Controllers inspect their external domains and either establish current state or
 Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox.
 
 Planning Controller independently reconciles nonterminal PlanningAttempts by their durable PlanningAttempt identity/correlation. An unresolved `CONTACT_MAY_HAVE_OCCURRED` Planner call is not permission to issue an overlapping replacement call.
+
+Evaluation Controller first validates the EvaluationRound subject relationship before it treats any evaluator process/Evidence as actionable acceptance state. A Round with a broken/mismatched typed subject is quarantined rather than guessed into Task or Goal ownership.
 
 Restore mode has an additional certainty rule: negative observations recovered only from the snapshot are historical facts about the snapshot point. They do not prove that an external effect did not occur after that point. Fresh external inspection/inventory or an equivalent current fence must establish absence before a replacement/conflicting effect is authorized.
 
@@ -344,6 +354,8 @@ Only after the barrier is satisfied may the Scheduler commit new Runs.
 
 Planner/Graph reconciliation may also continue only within its own safe fences: creating a new external PlanningAttempt is effect-creating control work and cannot bypass an unresolved prior PlanningAttempt or the global recovery barrier.
 
+Evaluation/acceptance recovery may preserve historical Evidence while the global barrier is closed, but applying that Evidence to Task/Goal lifecycle always requires the concrete Round subject and owning controller currentness checks.
+
 ## 7. Recovery barrier versus global freeze
 
 Pantheon should minimize blast radius.
@@ -361,7 +373,9 @@ unrelated resources = reconciled
 → new work may use remaining safe capacity on B
 ```
 
-A single uncertain Run or PlanningOperation must not freeze all Goals indefinitely when its accounting/authority blast radius can be safely fenced.
+A single uncertain Run, PlanningOperation or EvaluationOperation must not freeze all Goals indefinitely when its accounting/authority blast radius can be safely fenced.
+
+A stale but internally valid EvaluationRound similarly does not require a global stop: its Evidence remains historical and its owning Task/Goal simply cannot consume it as current acceptance.
 
 Global dispatch remains disabled only when Pantheon cannot establish safe accounting/authority boundaries system-wide, such as database integrity failure, unreconciled installation ownership, or an incomplete disaster-restore generation fence.
 
@@ -405,6 +419,8 @@ Resource release    → Reservation ID
 Budget settlement   → Hold/Usage source IDs
 ```
 
+Evaluation subject identity itself is not an external-operation idempotency key. It is the immutable semantic target that every EvaluationOperation/Evidence record must resolve through.
+
 Pantheon does not need one provider-specific universal transaction protocol. It requires each external domain to expose enough identity/inspection semantics to determine whether an operation happened or to safely repeat it.
 
 A disaster restore never creates permission to replace an existing operation identity with a fresh one solely because the restored row looks incomplete. That would turn uncertainty into duplicate effect authority.
@@ -447,6 +463,8 @@ no later Event/Evidence/PlanningRecord row present
 These facts remain useful historical evidence about the snapshot point, but they cannot establish `NOT_APPLIED` for the post-snapshot interval. The external domain must be freshly inventoried/inspected, or an explicit isolation/fencing property must make a conflicting effect impossible, before Pantheon may authorize replacement work or conclude that an external side effect did not occur.
 
 This rule is restore-specific. On an uninterrupted authoritative database history, the normal durable launch/contact markers retain their ordinary negative-proof semantics.
+
+EvaluationRound subject validity is a separate relational fact: a restored Round still points to the exact immutable Task Candidate or GoalCompletionCandidate from the snapshot, but that alone does not make the subject current for lifecycle application after post-snapshot revisions.
 
 ## 10. Cleanup and finalization obligations
 
@@ -502,9 +520,11 @@ Pantheon must not physically delete:
 
 - nonterminal Run/Attempt identity;
 - nonterminal PlanningOperation/PlanningAttempt identity and contact facts;
+- active/current EvaluationRound identity, typed subject edge, pinned evaluator bindings, AcceptanceResult/Evidence required by current acceptance;
 - nonterminal EvaluationOperation/EvaluationAttempt identity;
 - LaunchKeys and evaluation/planning launch-contact facts;
 - ExecutionBindings;
+- current GoalCompletionCandidate/Task Candidate identities referenced by active acceptance;
 - non-RELEASED SandboxInstance holder/SandboxKey identity and required verification history;
 - unresolved Reservations/Holds;
 - Workspace ownership records;
@@ -513,6 +533,8 @@ Pantheon must not physically delete:
 - Artifact/Candidate identities referenced by active acceptance;
 
 merely because an in-memory controller believes the work is over.
+
+Historical stale EvaluationRounds/Evidence may later age out only under configured retention after no current lifecycle/recovery obligation references them.
 
 Garbage collection is a later operation over terminal, unreferenced, fully finalized state.
 
@@ -643,16 +665,52 @@ If the durable holder is missing, the holder-kind/FK relationship is inconsisten
 
 PlanningOperation is deliberately absent from this Sandbox holder list in v1. If future planning gains a Sandbox, recovery gains the matching concrete holder edge/inventory rule rather than treating all control operations as implicit Sandbox owners.
 
+### EvaluationRound subject recovery
+
+Before EvaluationOperation/Evidence reconciliation, Recovery validates the immutable Round subject relationship:
+
+```text
+EvaluationRound
+  subjectKind = TASK_CANDIDATE
+  -> exactly one existing Candidate FK
+  -> Candidate resolves to its immutable Task/TaskSpec acceptance contract
+
+OR
+
+EvaluationRound
+  subjectKind = GOAL_COMPLETION_CANDIDATE
+  -> exactly one existing GoalCompletionCandidate FK
+  -> candidate resolves to its immutable GoalRevision acceptance contract
+```
+
+The Round's acceptance hash, criterion set and exact EvaluatorVersions must match the pinned immutable acceptance contract for that subject. A Round with both/neither subject FKs, a dangling concrete subject, or evaluator bindings inconsistent with the owning semantic contract is a relational/logical corruption finding and is quarantined. Recovery never guesses the intended owner from Events, Task IDs, criterion names or nearby history.
+
+Currentness is distinct from validity:
+
+```text
+valid historical Task Candidate Round
++ Task now cancelled/requeued/new Candidate
+→ Evidence remains history
+→ cannot mutate current Task
+
+valid historical GoalCompletionCandidate Round
++ GoalRevision/candidate advanced
+→ Evidence remains history
+→ cannot mutate current Goal
+```
+
 ### EvaluationOperation and EvaluationAttempt recovery
 
 For every externally executing nonterminal EvaluationOperation:
 
 ```text
+validate parent EvaluationRound typed subject
+        ↓
 resolve/reconcile EvaluationOperation-owned verification Sandbox
         ↓
 load current nonterminal EvaluationAttempt, if any
         ↓
-interpret H3 launch_contact_state
+interpret launch_contact_state
         ↓
 inspect/reconcile same EvaluationAttempt identity where external contact may have occurred
 ```
@@ -662,6 +720,8 @@ On uninterrupted history, `NOT_CONTACTED` with no independent evidence means the
 In restore mode, a restored EvaluationAttempt `NOT_CONTACTED` value is historical snapshot evidence only. Fresh evaluation-domain inspection/inventory or a current isolation fence must establish that no post-snapshot evaluator execution exists before the negative value can authorize launch/replacement.
 
 A verification Sandbox can survive from EvaluationAttempt 1 to a later bounded EvaluationAttempt 2 only after attempt 1 is definitively terminal and only while the Sandbox's immutable identity/materialization, verification, resource ownership and current policy remain valid.
+
+A recovered evaluator result may be committed as immutable Evidence only when its EvaluationOperation/Round/criterion/EvaluatorVersion provenance is valid. Lifecycle application then rechecks current typed subject ownership through the Task Controller or Goal Completion Controller; the evaluator/recovery scanner never directly changes Task/Goal phase.
 
 ## 13. Backend recovery contract
 
@@ -866,19 +926,43 @@ Mark replica `CORRUPT`, never mutate Artifact identity, and never allow Acceptan
 
 ## 19. Candidate and acceptance recovery
 
-Candidates are immutable and content-addressed.
+Task Candidates and GoalCompletionCandidates are immutable/content-addressed acceptance subjects.
 
-On restart:
+On restart, first validate every active/current EvaluationRound's typed subject relationship and pinned acceptance contract before applying acceptance state.
 
-- a Task in Evaluating must still reference an exact Candidate digest;
-- existing Evidence remains valid only if bound to the same subject/evaluator/policy revisions;
-- evaluator work that was in progress is reconciled through its EvaluationOperation, verification Sandbox and EvaluationAttempt identities;
-- ERROR/UNKNOWN evaluator state never becomes PASS;
-- Task success/finalization is derived only after all required evidence is durably present.
+For Task acceptance:
 
-If a worker had mutable output but no Candidate was durably committed before the crash, Pantheon must not infer a candidate from logs or narration. It may later seal the preserved frozen workspace only through the normal candidate-sealing path if Run/Recovery policy still authorizes that operation and the exact intended output can be established.
+```text
+EvaluationRound.subject = TASK_CANDIDATE
+→ exact Candidate exists
+→ Candidate belongs to Task/TaskSpec
+→ Round acceptance hash/EvaluatorVersions match immutable TaskSpec acceptance contract
+→ Task currentness decides whether Evidence may still affect lifecycle
+```
 
-After disaster restore, a still-running worker from the pre-restore history cannot use an old-generation AgentControlSession to submit that missing Candidate. Its external process may be reconciled/finalized, but worker semantic authority remains fenced unless a separately defined recovery protocol creates new current authority.
+For Goal acceptance:
+
+```text
+EvaluationRound.subject = GOAL_COMPLETION_CANDIDATE
+→ exact GoalCompletionCandidate exists
+→ candidate belongs to exact GoalRevision/Graph/deliverable snapshot
+→ Round acceptance hash/EvaluatorVersions match immutable GoalRevision acceptance contract
+→ Goal/current completion-candidate currentness decides whether Evidence may still affect lifecycle
+```
+
+A Goal completion Round never requires or fabricates `task_id`. A Task Candidate Round never points to a GoalCompletionCandidate.
+
+Existing Evidence remains valid historical evidence only for the same Round subject/criterion/EvaluatorVersion. A subject becoming stale for current lifecycle does not rewrite or delete its Evidence.
+
+Evaluator work that was in progress is reconciled through its EvaluationOperation, verification Sandbox and EvaluationAttempt identities. ERROR/UNKNOWN evaluator state never becomes PASS.
+
+Task success/finalization is derived only after all required Evidence for its current Task-Candidate Round is durably present and Task currentness is rechecked. Goal acceptance/finalization is derived only after all required Evidence for its current GoalCompletionCandidate Round is present and Goal currentness is rechecked by Goal Completion Controller.
+
+If a worker had mutable output but no Task Candidate was durably committed before the crash, Pantheon must not infer a candidate from logs or narration. It may later seal the preserved frozen workspace only through the normal candidate-sealing path if Run/Recovery policy still authorizes that operation and the exact intended output can be established.
+
+If a Goal was structurally ready but its GoalCompletionCandidate was not durably committed before the crash, Recovery recomputes readiness from durable accepted deliverable bindings/current Goal/Graph state through the normal Goal Completion Controller; it does not invent a completion candidate from Event narration.
+
+After disaster restore, a still-running worker from the pre-restore history cannot use an old-generation AgentControlSession to submit a missing Task Candidate. Its external process may be reconciled/finalized, but worker semantic authority remains fenced unless a separately defined recovery protocol creates new current authority.
 
 PlanningRecord recovery is separate from Candidate/Acceptance: a recovered Planner result is immutable planning provenance and may be retained even when its proposed GraphPatch is stale. It never becomes a Candidate or bypasses Graph Controller validation.
 
@@ -909,8 +993,27 @@ PlanningRecord
 → parent PlanningOperation exists
 → external attempt reference, when present, belongs to that operation
 
+EvaluationRound
+→ subjectKind is TASK_CANDIDATE xor GOAL_COMPLETION_CANDIDATE
+→ exactly one concrete subject FK exists and resolves
+→ acceptance hash/criterion EvaluatorVersions match owning immutable TaskSpec or GoalRevision contract
+
+EvaluationOperation
+→ parent EvaluationRound exists
+→ criterion/EvaluatorVersion belongs to that Round
+
 EvaluationAttempt nonterminal
 → parent EvaluationOperation must exist and no sibling EvaluationAttempt is nonterminal
+
+Evidence / AcceptanceResult
+→ exact EvaluationRound exists
+→ subject/criterion/EvaluatorVersion provenance matches that Round
+
+current Task acceptance application
+→ Round subject is Task's exact current Candidate and Task is current/Evaluating
+
+current Goal acceptance application
+→ Round subject is Goal's exact current GoalCompletionCandidate and represented GoalRevision is current/Evaluating
 
 SandboxInstance non-RELEASED
 → exactly one valid holder exists: Run xor EvaluationOperation
@@ -922,11 +1025,8 @@ ResourceReservation non-RELEASED
 BudgetHold unsettled
 → holder/source accounting must remain traceable
 
-Candidate
-→ all referenced Artifact identities must exist in metadata
-
-Evidence PASS
-→ subject/evaluator bindings must be complete
+Candidate / GoalCompletionCandidate
+→ all referenced Artifact/producer identities required by the immutable subject must exist
 ```
 
 In restore mode the scanner additionally checks that any newly redeemable Grant/Ticket, executable broker operation, accepted Operator command, or semantic Agent Control session belongs to the current RestoreGeneration. Old-generation broker operations and AgentControlSessions may remain only as historical/reconciliation state and may not become executable authority.
@@ -989,7 +1089,8 @@ Examples:
 - re-inspect a known Sandbox by the same SandboxKey and durable holder;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
-- use Git's supported worktree repair operation when ownership and expected path are unambiguous.
+- use Git's supported worktree repair operation when ownership and expected path are unambiguous;
+- classify a valid but stale EvaluationRound/Evidence set as historical without rewriting it.
 
 ### Reconciliation required
 
@@ -1001,7 +1102,8 @@ Inspect external state before deciding, for example:
 - Sandbox existence/cleanup UNKNOWN for a Run or EvaluationOperation;
 - pending IntegrationIntent after crash;
 - old-generation broker operation whose effect may have occurred after the restored snapshot;
-- workspace that may contain unsealed user/Agent work.
+- workspace that may contain unsealed user/Agent work;
+- current Task/Goal acceptance whose external EvaluationAttempt is unresolved but whose typed Round subject remains valid.
 
 ### Quarantine / operator required
 
@@ -1010,6 +1112,9 @@ Examples:
 - active Task with missing immutable Run identity;
 - nonterminal Run missing immutable ExecutionBinding;
 - nonterminal PlanningAttempt whose parent PlanningOperation/meters cannot be established;
+- EvaluationRound with both/neither concrete subject FK;
+- EvaluationRound whose concrete subject is missing or whose evaluator bindings conflict with the pinned owning acceptance contract;
+- Evidence claiming a subject/EvaluatorVersion different from its Round;
 - non-RELEASED Sandbox with missing/inconsistent holder;
 - runtime Sandbox discovered with no corresponding durable SandboxInstance ownership record;
 - reservation whose holder disappeared from authoritative state;
@@ -1038,6 +1143,11 @@ one PlanningAttempt UNKNOWN
 one verification Sandbox UNKNOWN
 → fence that EvaluationOperation and retain its capacity
 → unrelated evaluation/work may continue if capacity/authority remain safe
+
+one stale Goal EvaluationRound
+→ retain its immutable Evidence as history
+→ reject it for current Goal completion
+→ unrelated Goals/evaluation continue
 
 one repository workspace corrupt
 → fence Tasks using that repository/workspace
@@ -1137,6 +1247,8 @@ Create consistent snapshots using SQLite-supported online backup mechanisms. Rec
 
 The snapshot necessarily includes the then-current RestoreGeneration, Grants, CapabilityTickets, broker operations, Commands and AgentControlSessions. Those rows are historical authority after an older backup is restored until the post-restore authority fence is established.
 
+The snapshot also contains immutable Task/Goal acceptance subjects/Rounds/Evidence from its point in history. Those records remain historical truth after restore but are not automatically current if the external/post-snapshot world or later semantic revisions diverged before failure.
+
 The `restore.pending` latch is installation-maintenance state and is deliberately not part of the SQLite backup payload.
 
 ### Supported restore entry
@@ -1169,6 +1281,7 @@ DO NOT accept an old command epoch as a new command
 DO NOT accept semantic Agent Control from restored old-generation sessions
 DO NOT blindly resend restored PlanningAttempts whose post-snapshot outcome is unknown
 DO NOT treat restored negative observations as proof that later external effects never happened
+DO NOT apply restored acceptance merely from Task/Goal phase without revalidating the exact typed EvaluationRound subject
 ```
 
 External executors, Planner/evaluator calls, Sandboxes, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
@@ -1187,10 +1300,11 @@ Restore recovery therefore:
 10. rejects semantic Agent Control from any session whose immutable session RestoreGeneration differs from current **before** `agent_requests` lookup/creation; the external Attempt may still be inspected/terminated/reconciled by controllers;
 11. inventories/reconciles every external domain capable of containing Pantheon-owned state, including known PlanningAttempt correlations and Run-/EvaluationOperation-owned Sandboxes, and fences effects newer than or absent from the restored database;
 12. treats snapshot-only PlanningAttempt/Attempt/EvaluationAttempt `NOT_CONTACTED`, `ABSENT`, missing result rows and similar negative evidence as historical until fresh domain inspection/current fencing establishes the post-snapshot interval;
-13. requires operator action for un-inventoriable ambiguous domains/operations;
-14. opens normal mutation/dispatch only after the recovery barrier is satisfied.
+13. validates every active acceptance Round's concrete Task Candidate xor GoalCompletionCandidate subject and pinned evaluator contract before accepting its Evidence/AcceptanceResult as current lifecycle input;
+14. requires operator action for un-inventoriable ambiguous domains/operations or corrupted acceptance-subject relationships;
+15. opens normal mutation/dispatch only after the recovery barrier is satisfied.
 
-A restored database snapshot is never permission to blindly replay historical external operations.
+A restored database snapshot is never permission to blindly replay historical external operations or blindly reapply historical acceptance to a currently different subject.
 
 ### Restore-operation crash semantics
 
@@ -1301,11 +1415,14 @@ Attempt creation before ensureExecution
 backend ensure after external start before acknowledgement
 PlanningOperation/PlanningAttempt creation before external Planner contact
 PlanningAttempt contact marker before/after external Planner request acknowledgement/result
+Task Candidate EvaluationRound creation before/after Evidence commit
+GoalCompletionCandidate EvaluationRound creation before/after Evidence commit
 verification Sandbox intent before/after SandboxBackend ensure
 EvaluationAttempt creation/contact marker before/after evaluator launch
 usage ingestion before/after budget debit
 candidate Artifact durable put before/after SQLite metadata
 Task candidate commit before lifecycle transition
+GoalCompletionCandidate commit before Goal Active->Evaluating transition
 executor/planner/evaluator termination or result certainty before reservation release
 Sandbox release before reservation release
 workspace remove before reservation release
@@ -1326,6 +1443,7 @@ old commandEpoch + commandId cannot become a new command when its row is absent
 old-generation AgentControlSession cannot create/replay agent_requests or submit/spawn/invoke
 restored PlanningAttempt NOT_CONTACTED/missing PlanningRecord does not authorize resend until fresh domain reconciliation establishes absence
 restored NOT_CONTACTED/ABSENT snapshot facts do not authorize replacement work until fresh domain reconciliation proves current absence
+restored EvaluationRound cannot be applied to a different/current Task Candidate or GoalCompletionCandidate merely because lifecycle phase matches
 fresh RestoreGeneration is different from every value recovered from the snapshot
 Run- and EvaluationOperation-owned Sandboxes are inventoried/reconciled by durable SandboxKey+holder
 ```
@@ -1337,6 +1455,10 @@ Property/invariant tests should continuously assert:
 - no duplicate active Attempt created under UNKNOWN execution;
 - no overlapping PlanningAttempt under ambiguous external planning contact;
 - no overlapping EvaluationAttempt under ambiguous evaluation contact;
+- every EvaluationRound has exactly one concrete Task Candidate xor GoalCompletionCandidate FK;
+- no Evidence/AcceptanceResult subject or EvaluatorVersion can differ from its EvaluationRound;
+- no Task acceptance application from a Round whose Candidate is not the Task's exact current Candidate;
+- no Goal acceptance application from a Round whose GoalCompletionCandidate/GoalRevision is not exact/current;
 - no overlapping current Sandbox for one Run/EvaluationOperation holder;
 - no non-RELEASED Sandbox without exactly one valid durable holder;
 - no released reservation while external use/Sandbox existence is uncertain;
@@ -1404,7 +1526,9 @@ Run Attempt + PlanningAttempt + EvaluationAttempt external-execution/contact rec
         ↓
 Resource + Budget accounting reconciliation
         ↓
-Artifact / Candidate / Evidence / PlanningRecord availability
+Artifact / Task Candidate / GoalCompletionCandidate availability
+        ↓
+EvaluationRound typed-subject + Evidence/AcceptanceResult reconciliation
         ↓
 Integration reconciliation
         ↓
@@ -1414,6 +1538,8 @@ Scheduler dispatch gate
 ```
 
 This is a dependency graph, not a requirement that every controller execute serially. In particular, execution/contact inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result, and a new external PlanningAttempt waits for prior PlanningAttempt certainty/accounting fences.
+
+Acceptance lifecycle application waits for both immutable subject availability and EvaluationRound typed-subject validation; it never relies on Event ordering alone.
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
@@ -1435,6 +1561,7 @@ Include:
 - periodic safety reconciliation using normal controller code;
 - finalization obligations for cleanup safety;
 - Run/Attempt, PlanningOperation/PlanningAttempt and EvaluationOperation/EvaluationAttempt recovery;
+- concrete EvaluationRound Task-Candidate/GoalCompletionCandidate subject reconciliation and exact-subject Evidence/AcceptanceResult validation;
 - immutable PlanningRecord recovery with independent GraphRevision/GoalRevision revalidation before materialization;
 - holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey;
 - restore-specific rule that snapshot-only negative observations are not current post-snapshot proof of absence;
@@ -1443,7 +1570,7 @@ Include:
 - invariant scanning and quarantine;
 - SQLite integrity/version checks and supported backup/restore procedure;
 - restore-specific recovery mode;
-- crash/fault-injection tests around every external-side-effect boundary.
+- crash/fault-injection tests around every external-side-effect and acceptance-currentness boundary.
 
 Defer:
 
@@ -1471,25 +1598,27 @@ Defer:
 10. **Missing ownership or inconsistent durable state fails closed and is quarantined rather than guessed/released.**
 11. **Executor recovery preserves Attempt/LaunchKey identity; replacement Attempts are created only by Recovery Policy after definitive termination.**
 12. **Planning recovery preserves PlanningOperation/PlanningAttempt identity; ambiguous external planning contact never authorizes an overlapping Planner call, and recovered PlanningRecord output remains subject to current Graph/Goal validation.**
-13. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
-14. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
-15. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
-16. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
-17. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
-18. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
-19. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
-20. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
-21. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
-22. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
-23. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
-24. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
-25. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
-26. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
-27. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
-28. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
-29. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
-30. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
-31. **Clean daemon shutdown and cancellation of external work are separate intents.**
-32. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
-33. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
-34. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
+13. **Evaluation recovery preserves EvaluationRound's exact concrete subject (`TASK_CANDIDATE` xor `GOAL_COMPLETION_CANDIDATE`), pinned evaluator contract and EvaluationAttempt identity; historical Evidence never gains authority over a different/current subject.**
+14. **Task and Goal lifecycle controllers, not evaluators/recovery scanners, separately apply AcceptanceResult after rechecking their exact current subject/revision.**
+15. **ResourceReservations remain accounting authority during recovery; observed utilization cannot free them.**
+16. **Budget/Usage replay is idempotent and truthful; uncertain work retains unspent hold headroom conservatively.**
+17. **Workspace recovery never silently recreates potentially lost unsealed mutable work and never interprets Agent-writable Git metadata with ambient controller authority.**
+18. **Integration recovery is determined by expected/current/result Git OIDs and compare-and-swap semantics, never force-updating shared refs.**
+19. **CAS recovery verifies digest and size; extra immutable objects are safe orphans, while missing/corrupt referenced replicas block consumers but do not mutate Artifact identity.**
+20. **Logical invariant violations are durable RecoveryFindings and have explicit auto-repair, reconcile, fence, quarantine, or operator-required dispositions.**
+21. **Recovery failures are scoped to the smallest safe blast radius; only authority/storage/global-accounting ambiguity stops all dispatch.**
+22. **Pantheon uses SQLite on reliable local storage with WAL, `synchronous=FULL`, and SQLite 3.51.3+ or an official WAL-reset-fix backport.**
+23. **Routine startup runs `quick_check` plus `foreign_key_check`; full `integrity_check` is used for suspected corruption/deep diagnosis.**
+24. **Live backups use SQLite-supported snapshot APIs; raw database-file copies are not the normal backup mechanism.**
+25. **Safe disaster restore is an explicit maintenance ceremony begun before database replacement with a durable out-of-database `restore.pending` latch; a rewound database is never trusted to detect its own rewind.**
+26. **One restoreOperationId links the latch to T0/RecoveryPass so crash-before-T0 cannot fall through to normal startup and crash-after-T0 cannot rotate a second generation merely because the latch remains.**
+27. **Restoring an old SQLite snapshot rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect, because external and human/worker-authority histories may be newer than the snapshot.**
+28. **Restored old-generation Grants/Tickets are non-redeemable; re-affirmation creates new current-generation authority rather than reviving rewound use counts.**
+29. **Restored old-generation broker operations are reconciliation-only and never authorize blind re-execution from restored PENDING/incomplete state.**
+30. **Operator command idempotency is scoped by `(RestoreGeneration, commandId)`; stale command epochs fail closed even when historical command rows are absent.**
+31. **AgentControlSession authority is RestoreGeneration-bound; old-generation worker credentials fail before Agent request lookup/creation and are not rewritten to current after restore.**
+32. **Snapshot-only negative observations such as restored `NOT_CONTACTED`, `ABSENT` or row absence do not prove the post-snapshot external world; fresh inspection/inventory/fencing is required before replacement/conflicting work.**
+33. **Clean daemon shutdown and cancellation of external work are separate intents.**
+34. **Crash/fault-injection testing at external-side-effect, acceptance-currentness and restore-replay boundaries is a required v1 quality gate.**
+35. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+36. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**

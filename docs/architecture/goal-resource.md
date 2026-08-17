@@ -95,7 +95,24 @@ Optimization hints that may be traded off when constraints/capabilities require 
 
 ### Acceptance
 
-Goal acceptance uses the same Evaluation/Evidence architecture as Task acceptance, applied to an immutable GoalCompletionCandidate.
+Goal acceptance uses the same Evaluation/Evidence architecture as Task acceptance, applied to an immutable `GoalCompletionCandidate`.
+
+A Goal acceptance contract may contain trusted logical evaluator refs. When a GoalRevision becomes authoritative, Pantheon resolves those refs against the active trusted Evaluator Registry and pins the exact immutable `EvaluatorVersion` digests plus evaluator-resolution provenance into that immutable GoalRevision acceptance contract. Evaluation later consumes those pinned versions; it does not resolve whatever registry version happens to be current at Goal completion time.
+
+Conceptually the immutable acceptance portion of a GoalRevision carries:
+
+```text
+acceptance contract digest
+criterion IDs/statements/severity
+logical evaluator refs
+exact EvaluatorVersion digests
+ConfigurationRevision used for resolution
+evaluatorRegistryDigest
+```
+
+A later registry publication never silently changes an existing GoalRevision. If a pinned evaluator version becomes unavailable or forbidden under current hard/security policy, Pantheon does not substitute a newer version; Goal evaluation becomes blocked/reconciliation-required and a deliberate semantic GoalRevision may pin a replacement.
+
+Pinning acceptance semantics never freezes obsolete security authority. Every EvaluationOperation still rechecks current hard policy/current authorization before execution.
 
 A Goal may have zero explicit evaluator criteria; in that case accepted required deliverable bindings provide structural acceptance according to the Goal lifecycle contract.
 
@@ -167,8 +184,13 @@ goalCompletionCandidate:
       producerCandidate: candidate://sha256/...
   acceptanceContract:
     digest: sha256:...
+    evaluatorVersions:
+      release-check: sha256:E1
   configRevision: cfgrev_...
+  evaluatorRegistryDigest: sha256:ER
 ```
+
+The candidate carries forward the GoalRevision's already-frozen acceptance contract/evaluator-resolution provenance. It does not re-resolve logical evaluator refs.
 
 Candidate is immutable. New Goal revision makes the old completion candidate/evidence stale for current completion.
 
@@ -228,7 +250,9 @@ Goal success does not imply Git merge/push/deployment unless the Goal contract e
 4. Goal phases are Planning/Active/Evaluating/Finalizing/terminal and owned by Goal Completion Controller.
 5. Task success does not imply Goal success; all-Tasks-terminal is not the completion predicate.
 6. Only accepted immutable Task outputs bind deliverables.
-7. GoalCompletionCandidate freezes exact Goal/Graph revision and deliverables before Goal evaluation.
-8. Goal revision invalidates stale completion evidence rather than rewriting history.
-9. Terminal Goal requires accepted outcome plus quiescent/fenced subordinate obligations.
-10. No nested Goals/workers creating Goals in v1.
+7. GoalRevision pins exact trusted EvaluatorVersions for Goal acceptance when that semantic contract becomes authoritative; later registry movement does not silently alter it.
+8. GoalCompletionCandidate freezes exact Goal/Graph revision, deliverables and the already-pinned Goal acceptance contract before Goal evaluation.
+9. Goal revision invalidates stale completion evidence rather than rewriting history.
+10. Terminal Goal requires accepted outcome plus quiescent/fenced subordinate obligations.
+11. Current hard/security policy is rechecked at evaluation time and is not frozen merely because evaluator semantics were pinned.
+12. No nested Goals/workers creating Goals in v1.

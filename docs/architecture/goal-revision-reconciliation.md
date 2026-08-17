@@ -16,12 +16,52 @@ See also:
 - `goal-lifecycle-and-completion-controller.md`
 - `task-lifecycle.md`
 - `planner-and-task-decomposition.md`
+- `evaluation-and-evaluator-registry.md`
 
 ## Immutable revisions
 
 Goal ID is stable; each semantic change creates a new immutable GoalRevision. Revision creation records provenance and advances `goals.current_revision` through optimistic CAS.
 
 Terminal Goals do not reopen. Normal semantic revisions are allowed only while Goal lifecycle permits them; once Goal Finalizing/terminal, changed requirements become a new Goal.
+
+## Goal acceptance pinning at revision commit
+
+Goal acceptance semantics are part of the immutable GoalRevision, not something first decided when completion happens later.
+
+If the proposed GoalRevision contains acceptance criteria with logical evaluator refs, Goal revision creation resolves those refs against the active trusted Evaluator Registry before the revision becomes authoritative. The committed GoalRevision pins:
+
+```text
+acceptance contract digest
+criterion set
+logical evaluator refs
+exact immutable EvaluatorVersion digests
+ConfigurationRevision used for evaluator resolution
+evaluatorRegistryDigest
+```
+
+Conceptually the authoritative revision transaction performs:
+
+```text
+prepare/canonicalize proposed GoalRevision
+resolve permitted logical evaluator refs
+validate exact EvaluatorVersions
+        ↓
+BEGIN IMMEDIATE
+re-read expected current Goal revision
+re-read active ConfigurationRevision / trusted evaluator registry identity
+verify proposed acceptance resolution still matches that revision
+insert immutable GoalRevision with pinned acceptance contract
+advance goals.current_revision by expected-revision CAS
+create GoalReconciliation obligation
+append Events
+COMMIT
+```
+
+No evaluator process/backend execution occurs inside this transaction.
+
+A registry change after commit never silently substitutes a new evaluator into the old GoalRevision. If a pinned version later becomes unavailable or forbidden by current hard/security policy, Goal evaluation blocks/reconciles; a deliberate newer GoalRevision may pin a different permitted version.
+
+This semantic pinning does not freeze old authorization or hard-policy authority. Current policy is still checked when EvaluationOperations are admitted/executed.
 
 ## Revision fence
 
@@ -94,6 +134,8 @@ Security authority is special: a new active configuration/hard-policy tightening
 
 Goal reconciliation does not weaken current security merely because an older Goal revision allowed broader behavior.
 
+Pinned evaluator identity is likewise semantic history, not execution permission. A previously pinned evaluator can be blocked by current hard/security policy without being silently rewritten to another evaluator version.
+
 ## Preferences versus constraints/acceptance
 
 Preference-only Goal revision usually does not disrupt existing valid work. It affects future planning/routing decisions.
@@ -105,11 +147,13 @@ Constraint or acceptance changes may require:
 - invalidation of a current GoalCompletionCandidate;
 - new Goal-level evaluation work.
 
+Changing Goal acceptance criteria or intentionally moving one of their EvaluatorVersions is itself a semantic GoalRevision. The reconciler does not mutate the old revision's pinned evaluator set.
+
 The reconciler does not infer that every textual Goal change invalidates all Tasks.
 
 ## GoalCompletionCandidate invalidation
 
-A GoalCompletionCandidate freezes exact Goal/Graph revision and deliverable bindings. If a newer Goal revision commits while Goal is Evaluating:
+A GoalCompletionCandidate freezes exact Goal/Graph revision, deliverable bindings and the GoalRevision's pinned acceptance contract. If a newer Goal revision commits while Goal is Evaluating:
 
 - old completion candidate remains immutable history;
 - its pending evaluation may be stopped when safe;
@@ -130,6 +174,7 @@ Planner may not:
 
 - mutate old Task specs/status directly;
 - assign concrete backend/model;
+- define/replace trusted evaluator implementations dynamically;
 - bypass supersession finalization;
 - create a scheduled Run directly.
 
@@ -161,9 +206,12 @@ If Goal cancellation/finalization wins while revision reconciliation is in progr
 
 1. Goal changes create immutable revisions; history is never rewritten.
 2. Goal revision is desired state, not direct running-state mutation.
-3. Planner/Graph/Scheduler/Completion actions are fenced by observed Goal revision.
-4. Active/Evaluating Tasks classified SUPERSEDE pass through `Finalizing/terminalTarget=Superseded`; no direct terminalization around live Runs.
-5. Terminal Tasks remain terminal.
-6. Preference changes are generally non-disruptive; constraints/acceptance may cause revalidation/supersession/new work.
-7. GoalCompletionCandidate/Evidence are revision-bound and stale after a semantic Goal revision.
-8. Security tightening follows current Configuration/authorization authority and is not delayed by semantic Goal reconciliation.
+3. GoalRevision commit resolves permitted logical Goal evaluator refs and pins exact immutable EvaluatorVersions plus evaluator-resolution provenance.
+4. Registry evolution never silently changes an existing GoalRevision acceptance contract; changing pinned evaluator semantics requires a newer GoalRevision.
+5. Current hard/security policy still gates evaluator execution and is not frozen by semantic evaluator pinning.
+6. Planner/Graph/Scheduler/Completion actions are fenced by observed Goal revision.
+7. Active/Evaluating Tasks classified SUPERSEDE pass through `Finalizing/terminalTarget=Superseded`; no direct terminalization around live Runs.
+8. Terminal Tasks remain terminal.
+9. Preference changes are generally non-disruptive; constraints/acceptance may cause revalidation/supersession/new work.
+10. GoalCompletionCandidate/Evidence are revision-bound and stale after a semantic Goal revision.
+11. Security tightening follows current Configuration/authorization authority and is not delayed by semantic Goal reconciliation.
