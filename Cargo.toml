@@ -12,7 +12,19 @@
 # satisfies the dependency requirement. The exact pinned toolchain remains the
 # build-time enforcement boundary.
 resolver = "3"
-members = ["crates/*"]
+# Membership is explicit, not a `crates/*` glob: an incidental or agent-generated
+# directory under `crates/` must not silently join the workspace. A real new
+# crate adds its name here together with its boundary statement and its
+# allowlist line in `scripts/check-crate-deps.sh`.
+members = [
+    "crates/pantheon-cli",
+    "crates/pantheon-core",
+    "crates/pantheon-engine",
+    "crates/pantheon-operator-api",
+    "crates/pantheon-operator-protocol",
+    "crates/pantheon-store",
+    "crates/pantheond",
+]
 
 [workspace.package]
 version = "0.1.0"
