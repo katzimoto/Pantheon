@@ -360,9 +360,45 @@ plus request hash/operation/state/result/problem refs. Same ID+same hash is idem
 
 ## Sandbox
 
-SandboxInstance is normally Run-scoped and has immutable SandboxKey/Plan identity plus mutable desired/observed status. Provisioning intent is committed before external runtime calls.
+SandboxInstance has immutable SandboxKey/Plan identity, immutable relational holder ownership, and separate mutable desired/observed status. V1 Sandbox holders are exactly:
 
-SandboxVerification records factual verification of expected environment identity, mounts, network, privilege controls, Agent Control exposure and limits before `SandboxReady=True`/Attempt creation.
+```text
+RUN
+CONTROL_OPERATION   # currently EvaluationOperation
+```
+
+The immutable ownership shape is equivalent to:
+
+```text
+sandbox_instances
+  id
+  sandbox_key UNIQUE
+  holder_kind               RUN|CONTROL_OPERATION
+  run_id                    nullable FK -> runs
+  evaluation_operation_id   nullable FK -> evaluation_operations
+  sandbox_plan_digest
+  ...
+```
+
+with a CHECK/XOR constraint requiring exactly one concrete holder FK and requiring it to match `holder_kind`:
+
+```text
+holder_kind = RUN
+  => run_id IS NOT NULL
+     AND evaluation_operation_id IS NULL
+
+holder_kind = CONTROL_OPERATION
+  => run_id IS NULL
+     AND evaluation_operation_id IS NOT NULL
+```
+
+Pantheon does not use one opaque polymorphic `holder_ref` as the safety boundary because SQLite could not enforce a real FK to multiple unrelated tables. In v1 the only control-operation Sandbox owner is EvaluationOperation; another control-operation type gains an explicit relational edge when/if it actually needs Sandbox ownership rather than forcing a premature generic supertable.
+
+Provisioning intent and SandboxKey are committed before external runtime calls. The holder cannot be rewritten to another Run/EvaluationOperation after creation.
+
+V1 requires at most one current/non-RELEASED SandboxInstance per Run holder and per EvaluationOperation holder. Because mutable Sandbox lifecycle is kept in `sandbox_status`, the architecture does not prescribe a fictitious cross-table partial index here: the Sandbox desired-state transaction serializes and rechecks this rule, and PersistenceInvariantChecker verifies it. Exact DDL may denormalize an active-holder key or use another relational technique if implementation needs declarative uniqueness without collapsing immutable identity and mutable status.
+
+SandboxVerification records factual verification of expected SandboxKey, immutable holder identity, environment identity, mounts/materialization, network, privilege controls, Agent Control exposure where applicable, and limits before `SandboxReady=True`. A normal Attempt requires its Run Sandbox verification; an externally executing EvaluationAttempt requires its owning EvaluationOperation verification Sandbox to be READY first.
 
 ## Budget
 
@@ -561,6 +597,8 @@ At most one nonterminal EvaluationAttempt may exist per EvaluationOperation. Bec
 
 For usage reconciliation, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen H1 metering-source provenance; it does not prove that usage occurred.
 
+The EvaluationOperation, not an EvaluationAttempt, owns the verification Sandbox through `sandbox_instances.evaluation_operation_id`. This holder remains stable across bounded sequential EvaluationAttempts while that Sandbox remains valid.
+
 ## Secret metadata
 
 SQLite stores only SecretDescriptor/provider locator/non-secret random version IDs/status/intents/lease metadata/use records. It never stores long-lived secret bytes or hashes of secret bytes.
@@ -635,6 +673,9 @@ one nonterminal EvaluationAttempt per EvaluationOperation
 EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 one live Task-scoped reservation per singular (Task, ResourceKey)
 Reservation holder validity
+Sandbox holder XOR/FK validity (Run xor EvaluationOperation)
+at most one current/non-RELEASED Sandbox per Run/EvaluationOperation holder
+SandboxVerification holder/SandboxKey identity matches SandboxInstance
 Budget aggregate == immutable ledger reconstruction
 Usage provenance/backend ownership for Attempt and control-operation subjects
 Grant/CapabilityTicket redemption generation == current RestoreGeneration
@@ -671,6 +712,8 @@ T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
 T15 EVALUATION LAUNCH CONTACT MARKER
 ```
 
+T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
+
 T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
 
 Never perform network/Git/process/backend/secret-store/container-runtime calls inside a SQLite transaction.
@@ -692,3 +735,4 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 13. Requeue occurs only after previous responsible Run terminal.
 14. Force-resolution tombstones stale lineages without fabricating factual Usage.
 15. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+16. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.

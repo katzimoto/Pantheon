@@ -162,16 +162,25 @@ The concrete transport (dedicated socket proxy, vsock, private endpoint, native 
 
 ## Ownership and lifetime
 
-Workspace is normally Task-scoped. SandboxInstance is normally Run-scoped:
+Workspace is normally Task-scoped. SandboxInstance has an explicit durable holder and is normally either Run-scoped or control-operation-scoped:
 
 ```text
 Task
   └─ Workspace
        ├─ Run A -> SandboxInstance A -> Attempt(s)
        └─ Run B -> SandboxInstance B -> Attempt(s)
+
+EvaluationOperation
+  └─ verification SandboxInstance
+       ├─ EvaluationAttempt 1
+       └─ EvaluationAttempt 2  # only after attempt 1 is terminal
 ```
 
-Sequential Attempts under the same Run may reuse a SandboxInstance only while its identity/state is known and policy still permits reuse. A new Run normally gets a fresh SandboxInstance because Binding, configuration, ContextPlan or security envelope may have changed.
+For Run execution, the Run is the Sandbox holder. Sequential Attempts under the same Run may reuse that SandboxInstance only while its SandboxKey/identity/state are known and policy still permits reuse. A new Run normally gets a fresh SandboxInstance because Binding, configuration, ContextPlan or security envelope may have changed.
+
+For evaluation, the **EvaluationOperation** is the control-operation holder. The EvaluationAttempt does not own the Sandbox because the verification Sandbox must be prepared and verified before an EvaluationAttempt crosses its external launch boundary. Bounded sequential EvaluationAttempts may reuse the same verification Sandbox only while the SandboxKey, immutable materialization/environment identity, verification result, resource reservation and current hard-policy constraints remain valid.
+
+V1 permits at most one current/non-RELEASED SandboxInstance for a given Run holder and at most one current/non-RELEASED SandboxInstance for a given EvaluationOperation holder. A Sandbox in `UNKNOWN`, `PREPARING`, `READY` or `RELEASING` state cannot be bypassed by provisioning an overlapping replacement for the same holder. Replacement requires the prior Sandbox to be definitively absent/released or explicitly force-resolved under recovery policy.
 
 EvaluationOperations use separate verification Sandboxes and never the producer Run Sandbox.
 
@@ -186,15 +195,17 @@ REQUESTED -> PREPARING -> READY -> RELEASING -> RELEASED
 
 External observation is separate: `PRESENT | ABSENT | UNKNOWN`.
 
-Each SandboxInstance has an immutable `SandboxKey` created durably before provisioning side effects. SandboxBackend provides idempotent `ensureSandbox(SandboxKey, SandboxPlan)` / inspect semantics where possible.
+Each SandboxInstance has an immutable `SandboxKey` created durably before provisioning side effects and an immutable holder binding (`Run` or v1 `EvaluationOperation` control operation). SandboxBackend provides idempotent `ensureSandbox(SandboxKey, SandboxPlan)` / inspect semantics where possible.
 
-Crash recovery re-inspects the same SandboxKey. `UNKNOWN` never authorizes blind duplicate/replacement provisioning while a previous sandbox may contain a live Attempt.
+Crash recovery inventories non-RELEASED SandboxInstances directly, resolves each durable holder, and re-inspects the same SandboxKey. `UNKNOWN` never authorizes blind duplicate/replacement provisioning while a previous sandbox may contain a live Attempt/EvaluationAttempt or still hold accounted capacity.
 
-Sandbox destruction and Attempt termination are separate observations/resources; neither is inferred solely from the other.
+Sandbox destruction and Attempt/EvaluationAttempt termination are separate observations/resources; neither is inferred solely from the other.
 
 ## Resource accounting
 
-Sandbox requirements participate in the existing effective Resource Ledger claim set before Run commitment, for example container/VM slots, disk, memory and CPU. Agents cannot create unaccounted nested containers/VMs by receiving the host runtime socket.
+Sandbox requirements participate in the existing effective Resource Ledger claim set before Run or control-operation commitment, for example container/VM slots, disk, memory and CPU. Agents cannot create unaccounted nested containers/VMs by receiving the host runtime socket.
+
+Verification Sandbox claims are owned by the same `control-operation` holder as the EvaluationOperation. Sandbox lifecycle must therefore remain consistent with the corresponding ResourceReservation lifecycle; uncertain Sandbox existence keeps the relevant capacity charged.
 
 ## Immutable environment identity
 
@@ -205,15 +216,16 @@ Container/rootfs configuration is resolved to immutable content identity before 
 `SandboxReady=True` means Pantheon verified the SandboxInstance against the SandboxPlan, including at least:
 
 - SandboxKey identity;
+- immutable holder identity (Run or EvaluationOperation);
 - immutable environment identity;
 - expected mount set and absence of forbidden mounts;
 - expected network mode;
 - privilege/capability/no-escalation configuration;
-- Agent Control route scope;
-- Workspace binding;
+- Agent Control route scope where applicable;
+- Workspace/Candidate materialization binding as applicable;
 - resource limits.
 
-Only after that verification may the Run become LaunchReady and create an Attempt.
+Only after that verification may a Run become LaunchReady and create a normal Attempt. Likewise, a verification Sandbox must be READY and verified for its EvaluationOperation before that operation creates/launches an externally executing EvaluationAttempt.
 
 V1 uses factual local `SandboxVerification`; cryptographic remote attestation is deferred.
 
@@ -223,7 +235,7 @@ Detected violations such as unexpected privileged configuration, forbidden host 
 
 If Pantheon cannot establish the hostile-repository execution boundary before a controller operation would interpret Agent-writable repository state, the operation fails closed as `workspace.hostile-repository-state` in the same system/security severity class. The affected Workspace/Run is fenced or quarantined rather than falling back to privileged host Git execution.
 
-Affected Runs are stopped/fenced and the SandboxBackend may be quarantined from new work. These are not normal Agent failures.
+Affected Runs/control operations are stopped/fenced and the SandboxBackend may be quarantined from new work. These are not normal Agent/evaluator failures.
 
 ## Enforcement mapping
 
@@ -266,7 +278,8 @@ Do not add Kubernetes, distributed sandbox fleets, service meshes, complex SDN, 
 3. Ambient capabilities are frozen and must be no broader than effective authority.
 4. Temporary grants authorize brokered operations; they never broaden ambient Sandbox authority.
 5. Untrusted workers cannot access Operator Control, Pantheon state, secrets infrastructure, peer workspaces, authoritative Git refs or host runtime sockets.
-6. A new Run normally gets a fresh SandboxInstance; Task Workspace continuity is separate.
-7. Sandbox provisioning is durable/idempotent/reconciled like every other external side effect.
-8. Sandbox invariant violations are system/security failures and fail closed.
-9. Pantheon never executes a repository-configurable tool with ambient control-plane authority against Agent-writable repository state; hostile inspection is confined or uses controller-owned sterile control state.
+6. SandboxInstance ownership is durably explicit: a v1 Sandbox belongs to exactly one Run or one EvaluationOperation control operation, and a holder has at most one current/non-RELEASED Sandbox.
+7. A new Run normally gets a fresh SandboxInstance; bounded EvaluationAttempts may reuse their EvaluationOperation's verification Sandbox only while its identity/verification/policy remain valid.
+8. Sandbox provisioning is durable/idempotent/reconciled like every other external side effect, and recovery inventories SandboxInstances independently of Run traversal.
+9. Sandbox invariant violations are system/security failures and fail closed.
+10. Pantheon never executes a repository-configurable tool with ambient control-plane authority against Agent-writable repository state; hostile inspection is confined or uses controller-owned sterile control state.

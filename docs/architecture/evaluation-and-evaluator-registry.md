@@ -374,7 +374,11 @@ bounded CPU/memory/time
 
 Network or credentials require an explicit evaluator definition plus current policy authorization; they are never inherited from the producing Run.
 
-The future Sandbox Broker specification defines the concrete platform mechanisms used to enforce these properties.
+A verification SandboxInstance is durably owned by the **EvaluationOperation** through the `control-operation` holder scope. It is not owned by an EvaluationAttempt: the Sandbox must be provisioned and verified before an externally executing EvaluationAttempt is created/launched, and bounded sequential EvaluationAttempts may reuse the same verification Sandbox while its SandboxKey, immutable environment/materialization, verification result, resource ownership and current hard-policy constraints remain valid.
+
+V1 permits at most one current/non-RELEASED verification SandboxInstance per EvaluationOperation. An `UNKNOWN` or otherwise non-released Sandbox cannot be bypassed by provisioning an overlapping replacement; the original SandboxKey is reconciled first or the lineage is explicitly force-resolved under recovery policy.
+
+The Sandbox Broker specification defines the concrete platform mechanisms used to enforce these properties and the relational Run/control-operation holder contract.
 
 ## 19. Result protocol
 
@@ -620,6 +624,8 @@ human_evaluation_requests
 
 The metering-source columns are immutable operation intent and are either absent together for a non-backend-metered operation or complete together before external contact. They are not an ExecutionBinding.
 
+Verification Sandbox ownership is persisted in `sandbox_instances`, not duplicated on EvaluationAttempt. A control-operation Sandbox points relationally to its owning `evaluation_operations` row; its holder remains stable across bounded sequential EvaluationAttempts.
+
 Exact DDL belongs to the implementation schema pass.
 
 ## 30. Atomic evaluation result commitment
@@ -676,7 +682,7 @@ Include:
 - EvaluationOperation and bounded low-level EvaluationAttempts;
 - generic `control-operation` resource holder scope;
 - generic Resource Ledger admission;
-- independent verification materialization/sandbox;
+- independent verification materialization/Sandbox with explicit EvaluationOperation ownership;
 - immutable Evidence;
 - human acceptance request semantics;
 - crash reconciliation;
@@ -708,3 +714,4 @@ Defer:
 13. **Backend-authored EvaluationOperation usage is accepted only from the backend frozen in immutable operation-level metering provenance; that binding does not redefine EvaluationOperation lifecycle/execution ownership.**
 14. **Every externally executing EvaluationAttempt has a durable monotonic launch-contact marker committed before its external evaluator/process call.**
 15. **At most one EvaluationAttempt per EvaluationOperation is nonterminal; ambiguous contact remains on the same attempt identity and never authorizes an overlapping retry.**
+16. **A verification Sandbox is durably owned by its EvaluationOperation, not by an EvaluationAttempt; at most one current/non-RELEASED verification Sandbox exists for that operation and ambiguous Sandbox existence blocks replacement.**

@@ -48,6 +48,8 @@ SQLite status / findings / events
 The authoritative sources are:
 
 - immutable Goal/Task/Run/Attempt/Binding/Candidate/Artifact records;
+- durable EvaluationOperation/EvaluationAttempt identities where external verification exists;
+- durable SandboxInstance holder/SandboxKey identity and SandboxVerification facts;
 - durable desired-state fields;
 - ResourceReservations and BudgetHolds;
 - current control ownership/fencing records;
@@ -60,7 +62,7 @@ The following are never authoritative by themselves:
 - cached backend status;
 - stale event streams;
 - PID files;
-- filesystem paths without corresponding durable ownership state;
+- filesystem/runtime objects without corresponding durable ownership state;
 - backend callbacks received without current fencing authority.
 
 In-memory scheduler and controller queues are disposable accelerators. They must be reconstructible from SQLite and external observation.
@@ -240,7 +242,9 @@ Load at least:
 - nonterminal Goals and Tasks;
 - Active/Evaluating/Finalizing Tasks;
 - nonterminal Runs and Attempts;
+- nonterminal EvaluationOperations and EvaluationAttempts;
 - ExecutionBindings;
+- every SandboxInstance not RELEASED plus its durable holder and latest SandboxVerification;
 - ResourceReservations not RELEASED;
 - BudgetHolds not settled/released;
 - WorkspaceRecords not RELEASED;
@@ -249,6 +253,8 @@ Load at least:
 - Artifact replicas needed by live work;
 - unresolved cleanup/finalization obligations;
 - prior unresolved RecoveryFindings.
+
+Sandbox inventory is **not derived only by walking Runs**. Verification Sandboxes belong to EvaluationOperations and must remain discoverable/reconcilable even when no Run owns them.
 
 In restore mode the inventory also includes Grants, CapabilityTickets, broker operations and Commands because their restored rows may represent authority/idempotency history older than external reality.
 
@@ -263,6 +269,8 @@ In restore mode, the new RestoreGeneration has already been committed before thi
 ### F. Domain reconciliation
 
 Controllers inspect their external domains and either establish current state or place affected resources into conservative fenced states.
+
+Sandbox holder/SandboxKey reconciliation is a prerequisite for issuing a new launch in any execution lineage that requires that Sandbox. Run and Evaluation controllers may inspect their execution domains concurrently, but neither a normal Attempt nor an EvaluationAttempt may launch/relaunch through an unresolved required Sandbox.
 
 ### G. Recovery barrier
 
@@ -332,7 +340,9 @@ Each domain provides an idempotency/reconciliation identity appropriate to the o
 
 ```text
 Attempt launch      → LaunchKey
+Evaluation launch   → EvaluationAttempt ID + launch-contact marker
 Run control         → ControlLease leaseToken + epoch
+Sandbox             → SandboxKey + immutable Run/EvaluationOperation holder
 Workspace           → Workspace ID + deterministic desired path/base
 Artifact seal       → content digest
 Integration         → IntegrationIntent + expected target OID
@@ -401,13 +411,13 @@ A resource may enter a logical terminating/finalizing state before its obligatio
 
 Typical obligations include:
 
-- executor termination confirmed;
-- Run-scoped reservations safe to release;
+- executor/evaluator termination confirmed;
+- Run/control-operation reservations safe to release;
 - BudgetHold settled;
 - candidate/evidence state durably sealed;
 - workspace outputs preserved before deletion;
 - managed Git ref/integration state reconciled;
-- sandbox/container cleanup confirmed where required.
+- Run or verification Sandbox cleanup confirmed where required.
 
 This is Pantheon's equivalent of a finalizer pattern: durable deletion intent plus controller-owned cleanup, not immediate record disappearance.
 
@@ -418,8 +428,10 @@ Recovery-critical records are retained at least through finalization and configu
 Pantheon must not physically delete:
 
 - nonterminal Run/Attempt identity;
-- LaunchKeys;
+- nonterminal EvaluationOperation/EvaluationAttempt identity;
+- LaunchKeys and evaluation launch-contact facts;
 - ExecutionBindings;
+- non-RELEASED SandboxInstance holder/SandboxKey identity and required verification history;
 - unresolved Reservations/Holds;
 - Workspace ownership records;
 - IntegrationIntents;
@@ -430,17 +442,23 @@ merely because an in-memory controller believes the work is over.
 
 Garbage collection is a later operation over terminal, unreferenced, fully finalized state.
 
-## 12. Run and Attempt recovery
+## 12. Execution and Sandbox recovery
+
+### Run and Attempt recovery
 
 For every nonterminal Run:
 
 ```text
 rotate/acquire ControlLease
         ↓
+resolve/reconcile required Run Sandbox holder + SandboxKey
+        ↓
 load current nonterminal Attempt, if any
         ↓
 inspect backend by Attempt attachment / LaunchKey
 ```
+
+A normal Attempt may not be newly launched/relaunched until its required Run-owned Sandbox is reconciled and verified. Existing external execution may be inspected concurrently, but unresolved Sandbox state is never interpreted as permission to provision a replacement Sandbox.
 
 Possible observations:
 
@@ -470,6 +488,49 @@ If a backend supports inventory of Pantheon-owned executions, recovery should al
 
 Unknown/dangling native executions are quarantined and reported before destructive cleanup.
 
+### Sandbox holder reconciliation
+
+Recovery independently walks **every non-RELEASED SandboxInstance**, resolves its immutable holder, and re-inspects the same SandboxKey.
+
+```text
+SandboxInstance
+  holder = Run
+  → reconcile as that Run's execution Sandbox
+
+SandboxInstance
+  holder = control-operation / EvaluationOperation
+  → reconcile as that EvaluationOperation's verification Sandbox
+```
+
+For a valid live holder:
+
+- inspect/reconcile the existing SandboxKey;
+- restore/refresh factual SandboxVerification where required;
+- keep corresponding ResourceReservation capacity charged until release is confirmed;
+- never provision an overlapping second Sandbox for the same holder while prior existence is UNKNOWN/non-RELEASED.
+
+If the holder is terminal but Sandbox cleanup is incomplete, the Sandbox remains a cleanup/finalization obligation and capacity is not released merely because the holder stopped executing.
+
+If the durable holder is missing, the holder-kind/FK relationship is inconsistent, or an inventoried external Sandbox has no corresponding durable SandboxInstance, quarantine it. Do not reinterpret it as free capacity or automatically destroy it.
+
+### EvaluationOperation and EvaluationAttempt recovery
+
+For every externally executing nonterminal EvaluationOperation:
+
+```text
+resolve/reconcile EvaluationOperation-owned verification Sandbox
+        ↓
+load current nonterminal EvaluationAttempt, if any
+        ↓
+interpret H3 launch_contact_state
+        ↓
+inspect/reconcile same EvaluationAttempt identity where external contact may have occurred
+```
+
+`NOT_CONTACTED` with no independent evidence means the evaluator launch path did not cross its call boundary. `CONTACT_MAY_HAVE_OCCURRED` remains UNKNOWN until the same EvaluationAttempt identity is reconciled/terminated. No overlapping EvaluationAttempt or replacement verification Sandbox is created from ambiguity.
+
+A verification Sandbox can survive from EvaluationAttempt 1 to a later bounded EvaluationAttempt 2 only after attempt 1 is definitively terminal and only while the Sandbox's immutable identity/materialization, verification, resource ownership and current policy remain valid.
+
 ## 13. Backend recovery contract
 
 ExecutorBackend should support the strongest feasible version of:
@@ -487,6 +548,8 @@ inventory Pantheon-owned executions for installation ID
 Inventory is optional for ordinary restart correctness when all durable Attempt records are intact, but it becomes highly valuable for disaster recovery and orphan detection.
 
 If a restored control-plane snapshot is older than external execution state and a backend cannot inventory Pantheon-owned work, Pantheon must conservatively block new execution on that backend until an operator resolves the ambiguity or isolation guarantees prove duplicate execution impossible.
+
+SandboxBackend similarly reconciles by the durable SandboxKey and may inventory Pantheon-owned runtime objects by installation identity. Inventory does not become ownership authority: a matching durable SandboxInstance and valid holder relationship remain required.
 
 ## 14. Resource ledger reconciliation
 
@@ -507,6 +570,8 @@ holder missing / inconsistent
 → QUARANTINE reservation
 → continue charging capacity
 ```
+
+For Sandbox capacity, an unresolved SandboxInstance is independent evidence that capacity may still be occupied. A Run/EvaluationOperation becoming terminal does not by itself release that capacity; Sandbox absence/release must be established according to its own lifecycle.
 
 Missing ownership evidence is never interpreted as free capacity.
 
@@ -667,7 +732,7 @@ On restart:
 
 - a Task in Evaluating must still reference an exact Candidate digest;
 - existing Evidence remains valid only if bound to the same subject/evaluator/policy revisions;
-- evaluator work that was in progress is reconciled independently;
+- evaluator work that was in progress is reconciled through its EvaluationOperation, verification Sandbox and EvaluationAttempt identities;
 - ERROR/UNKNOWN evaluator state never becomes PASS;
 - Task success/finalization is derived only after all required evidence is durably present.
 
@@ -688,6 +753,13 @@ Run nonterminal
 
 Attempt nonterminal
 → parent Run must be nonterminal and current ownership known
+
+EvaluationAttempt nonterminal
+→ parent EvaluationOperation must exist and no sibling EvaluationAttempt is nonterminal
+
+SandboxInstance non-RELEASED
+→ exactly one valid holder exists: Run xor EvaluationOperation
+→ no overlapping current Sandbox exists for that same holder
 
 ResourceReservation non-RELEASED
 → holder reference must exist or reservation is quarantined
@@ -756,6 +828,7 @@ Examples:
 - rebuild disposable in-memory queue;
 - refresh a derived condition;
 - reattach a known Attempt using the same LaunchKey;
+- re-inspect a known Sandbox by the same SandboxKey and durable holder;
 - mark an already-applied IntegrationIntent APPLIED;
 - fetch a missing Artifact replica from another verified replica;
 - use Git's supported worktree repair operation when ownership and expected path are unambiguous.
@@ -764,7 +837,8 @@ Examples:
 
 Inspect external state before deciding, for example:
 
-- uncertain executor launch/termination;
+- uncertain executor/evaluator launch/termination;
+- Sandbox existence/cleanup UNKNOWN for a Run or EvaluationOperation;
 - pending IntegrationIntent after crash;
 - old-generation broker operation whose effect may have occurred after the restored snapshot;
 - workspace that may contain unsealed user/Agent work.
@@ -775,6 +849,8 @@ Examples:
 
 - active Task with missing immutable Run identity;
 - nonterminal Run missing immutable ExecutionBinding;
+- non-RELEASED Sandbox with missing/inconsistent holder;
+- runtime Sandbox discovered with no corresponding durable SandboxInstance ownership record;
 - reservation whose holder disappeared from authoritative state;
 - unexplained shared Git ref mutation;
 - old-generation broker operation whose external outcome cannot be inventoried/established;
@@ -792,6 +868,10 @@ Examples:
 ```text
 one backend unavailable
 → block/reroute new work requiring that backend only
+
+one verification Sandbox UNKNOWN
+→ fence that EvaluationOperation and retain its capacity
+→ unrelated evaluation/work may continue if capacity/authority remain safe
 
 one repository workspace corrupt
 → fence Tasks using that repository/workspace
@@ -899,7 +979,7 @@ DO NOT execute restored pending broker operations
 DO NOT accept an old command epoch as a new command
 ```
 
-External executors, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
+External executors, Sandboxes, Git refs, worktrees, object stores, credential-backed operations and other services may contain effects created after the snapshot. Those effects are not rewound when SQLite is restored.
 
 Restore recovery therefore:
 
@@ -911,7 +991,7 @@ Restore recovery therefore:
 6. treats every restored Grant/CapabilityTicket from the old generation as non-redeemable historical authority; re-affirmation creates a new current-generation Grant rather than reactivating the old row;
 7. treats every restored old-generation broker operation as reconciliation-only: inspect by the original stable identity where possible, never reissue merely because restored SQLite says `PENDING`/incomplete;
 8. rejects Operator mutations carrying an old `(commandEpoch, commandId)` before command-row lookup/creation; callers must treat the prior outcome as UNKNOWN and inspect current state before intentionally issuing a new command;
-9. inventories every external domain capable of containing Pantheon-owned state and reconciles/fences effects newer than or absent from the restored database;
+9. inventories every external domain capable of containing Pantheon-owned state, including Run- and EvaluationOperation-owned Sandboxes, and reconciles/fences effects newer than or absent from the restored database;
 10. requires operator action for un-inventoriable ambiguous domains/operations;
 11. opens normal mutation/dispatch only after the recovery barrier is satisfied.
 
@@ -991,10 +1071,13 @@ The v1 test plan must inject process termination/crash boundaries around at leas
 Run-intent transaction commit
 Attempt creation before ensureExecution
 backend ensure after external start before acknowledgement
+verification Sandbox intent before/after SandboxBackend ensure
+EvaluationAttempt creation/contact marker before/after evaluator launch
 usage ingestion before/after budget debit
 candidate Artifact durable put before/after SQLite metadata
 Task candidate commit before lifecycle transition
-executor termination before reservation release
+executor/evaluator termination before reservation release
+Sandbox release before reservation release
 workspace remove before reservation release
 integration commit-object creation before CAS ref update
 CAS ref update before IntegrationIntent acknowledgement
@@ -1009,6 +1092,7 @@ old-generation CapabilityTicket cannot redeem
 restored PENDING broker operation cannot execute again without reconciliation proof
 old commandEpoch + commandId cannot become a new command when its row is absent
 fresh RestoreGeneration is different from every value recovered from the snapshot
+Run- and EvaluationOperation-owned Sandboxes are inventoried/reconciled by durable SandboxKey+holder
 ```
 
 For each crash point, restart Pantheon and assert that the resulting state is equivalent to either the operation not having happened or having happened exactly once, never a duplicate unsafe effect.
@@ -1016,7 +1100,10 @@ For each crash point, restart Pantheon and assert that the resulting state is eq
 Property/invariant tests should continuously assert:
 
 - no duplicate active Attempt created under UNKNOWN execution;
-- no released reservation while external use is uncertain;
+- no overlapping EvaluationAttempt under ambiguous evaluation contact;
+- no overlapping current Sandbox for one Run/EvaluationOperation holder;
+- no non-RELEASED Sandbox without exactly one valid durable holder;
+- no released reservation while external use/Sandbox existence is uncertain;
 - no BudgetHold double-debit from replayed usage;
 - no acceptance against corrupt/mismatched Artifact bytes;
 - no shared Git ref overwrite after stale CAS expectation;
@@ -1058,11 +1145,15 @@ Storage / Installation Authority
         ↓
 RestoreGeneration fence (restore mode only)
         ↓
-Run + Attempt ownership/reconciliation
+Run ControlLease adoption + EvaluationOperation intent inventory
         ↓
 Authorization / broker-operation reconciliation
         ↓
-Workspace / Sandbox reconciliation
+Workspace/materialization ownership reconciliation
+        ↓
+Sandbox holder + SandboxKey reconciliation
+        ↓
+Run Attempt + EvaluationAttempt external-execution reconciliation
         ↓
 Resource + Budget accounting reconciliation
         ↓
@@ -1074,6 +1165,8 @@ Task / Goal lifecycle reconciliation
         ↓
 Scheduler dispatch gate
 ```
+
+This is a dependency graph, not a requirement that every controller execute serially. In particular, execution inspection may proceed in parallel where safe, but a new Attempt/EvaluationAttempt launch that requires a Sandbox waits for that holder's Sandbox reconciliation/verification result.
 
 Controllers may operate concurrently where dependencies permit, but each publishes enough condition/fencing state for downstream controllers to decide safely.
 
@@ -1092,7 +1185,9 @@ Include:
 - recovery barrier based on reconciled/fenced/quarantined obligations;
 - periodic safety reconciliation using normal controller code;
 - finalization obligations for cleanup safety;
-- Run/Attempt, authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
+- Run/Attempt and EvaluationOperation/EvaluationAttempt recovery;
+- holder-driven Run/EvaluationOperation Sandbox reconciliation by durable SandboxKey;
+- authorization/broker, Resource, Budget, Workspace, Artifact and Integration reconciliation rules;
 - durable RecoveryFindings;
 - invariant scanning and quarantine;
 - SQLite integrity/version checks and supported backup procedure;
@@ -1139,3 +1234,4 @@ Defer:
 26. **Clean daemon shutdown and cancellation of external work are separate intents.**
 27. **Crash/fault-injection testing at external-side-effect and restore-replay boundaries is a required v1 quality gate.**
 28. **A small Recovery Coordinator gates startup and scans invariants; domain controllers retain domain-specific reconciliation logic.**
+29. **Sandbox recovery is holder-driven, not Run-traversal-driven: every non-RELEASED Sandbox is reconciled by immutable SandboxKey plus exactly one Run/EvaluationOperation holder, and ambiguous Sandbox existence blocks overlapping replacement/launch.**
