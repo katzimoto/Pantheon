@@ -62,6 +62,7 @@ source
 subject
 subject_revision
 actor
+command_epoch
 command_id
 causation_event_id
 correlation_id
@@ -69,6 +70,14 @@ trace_id
 span_id
 payload
 ```
+
+`command_epoch` and `command_id` are nullable command-causality provenance and obey an all-or-none pair rule:
+
+```text
+command_epoch IS NULL iff command_id IS NULL
+```
+
+When present, the pair is a copy of the complete authoritative Operator command identity `(commandEpoch, commandId)` defined by the command/idempotency contract. `command_epoch` is the command's RestoreGeneration/CommandEpoch, not the Event's JournalEpoch. An Event row does not need a foreign-key retention dependency on the mutable/idempotency `commands` table merely to preserve this immutable historical identity.
 
 The Event Journal is not used to reconstruct ordinary controller state by replaying from genesis. Current Goal, Task, Run, Attempt, Reservation, Budget, Workspace and other resource tables remain authoritative for restart/recovery.
 
@@ -149,6 +158,18 @@ The durable local ordering cursor is:
 
 This prevents an older restored database from producing unrelated Events that appear to extend an already-exported sequence range.
 
+JournalEpoch and commandEpoch are intentionally different dimensions:
+
+```text
+JournalEpoch
+  scopes Event-stream ordering/history continuity
+
+commandEpoch / RestoreGeneration
+  scopes Operator command authority/idempotency identity
+```
+
+A disaster restore may rotate both, but one never substitutes for the other. The same textual `commandId` may legitimately exist in two different command epochs and therefore identifies two different commands.
+
 ## Occurrence time versus record time
 
 Events record both:
@@ -195,7 +216,9 @@ actor:
   ref: controller://scheduler
 
 causality:
-  commandId: cmd_891
+  command:
+    epoch: restoregen_...
+    id: cmd_891
   causationEventId: evt_...
   correlationId: corr_...
 
@@ -209,7 +232,7 @@ data:
   activeRun: run_456
 ```
 
-Not every optional field is present for every Event.
+Not every optional field is present for every Event. When `causality.command` is present, both `epoch` and `id` are required; an Event never records a bare `commandId` that could become ambiguous across RestoreGenerations.
 
 ## Event type registry
 
@@ -283,9 +306,25 @@ EVENT
 Task became Cancelled
 ```
 
-Every mutating external/API command receives a durable idempotency `commandId`. Events caused by that command reference it.
+Every mutating Operator/API command has durable idempotency identity:
 
-A command ID does not replace Event identity.
+```text
+(commandEpoch, commandId)
+```
+
+where `commandEpoch` is the current RestoreGeneration when that command is admitted. Events caused by that command copy the complete pair in the same authoritative transaction as the state mutation/Event insertion.
+
+A `commandId` is unique only within its command epoch; it must never be interpreted as globally unique across disaster restores. For example:
+
+```text
+restoregen_A + cmd_123
+!=
+restoregen_B + cmd_123
+```
+
+The copied Event causality is historical provenance only. It does not make the Event an idempotency row, does not authorize replay of the command, and does not replace current command/RestoreGeneration checks.
+
+A command identity does not replace Event identity.
 
 ## Causation, correlation and tracing
 
@@ -530,7 +569,7 @@ Useful learning dimensions include:
 12. Event types are stable, low-cardinality and versioned through an Event Type Registry.
 13. Agents/backends cannot manufacture authoritative lifecycle/audit Events.
 14. Source, subject and actor are distinct fields.
-15. Commands are intent; Events are facts; mutating commands carry idempotent command IDs.
+15. Commands are intent; Events are facts; an Event caused by an Operator command records the complete `(commandEpoch, commandId)` identity, never a bare cross-generation `commandId`.
 16. Causation, correlation and distributed trace context remain distinct.
 17. Trace context never carries authority.
 18. Durable Event payloads are bounded and metadata-first; large/sensitive bodies become restricted Artifacts.
