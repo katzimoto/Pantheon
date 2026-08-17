@@ -160,6 +160,8 @@ They are operator/config controlled and cannot silently expand through Agent Gen
 
 Manifest references approved/versioned Genome sources. Context Builder resolves selected immutable versions into the Run ContextPlan.
 
+For `genome.memory.retrieval.mode`, `adaptive` means Pantheon-controlled deterministic relevance selection against the frozen Run inputs; it does **not** mean model/Agent judgment. `always` runs the configured deterministic retriever for every Run, while `disabled` skips initial Memory preload retrieval. The Context Builder freezes exact selected Memory versions plus the retriever/policy/index provenance needed to reconstruct the selection.
+
 V1 runtime uses static approved SOUL/BEHAVIOR/Skills/Memory. Automatic reflection/promotion is implementation-deferred; manifests should configure learning disabled for v1 deployments.
 
 ## Execution requirements

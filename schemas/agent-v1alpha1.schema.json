@@ -70,7 +70,10 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "mode": {"enum": ["adaptive", "always", "disabled"]},
+                "mode": {
+                  "enum": ["adaptive", "always", "disabled"],
+                  "description": "Initial Memory preload mode. adaptive uses Pantheon-controlled deterministic relevance retrieval against frozen Run inputs and may select zero items; always runs the configured deterministic retriever for every Run; disabled skips initial Memory preload retrieval. Model/Agent judgment is not part of v1 retrieval selection."
+                },
                 "maxTokens": {"type": "integer", "minimum": 0}
               }
             }

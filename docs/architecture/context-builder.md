@@ -200,6 +200,28 @@ The following Agent fields become direct Context Builder inputs:
 
 V1 uses static approved SOUL, BEHAVIOR, Skills, and bounded Memory. Autonomous Genome learning/reflection/promotion is post-v1.
 
+## Memory retrieval modes
+
+`genome.memory.retrieval.mode` controls only Pantheon-owned initial Memory preload selection. It never delegates semantic context selection to the Agent/model.
+
+V1 meanings are:
+
+```text
+disabled
+  do not run initial Memory retrieval for preload
+
+always
+  run the configured deterministic Memory retriever for every Run
+
+adaptive
+  run deterministic relevance-based retrieval against the frozen
+  Context source snapshot; the correct result may be zero Memory items
+```
+
+`adaptive` means the retriever adapts its result to the authoritative Task/Goal/Agent/source inputs, not that a model decides what it wants to remember. Given the same frozen source snapshot, ContextPolicy, retriever implementation/version, retriever parameters/index identity, and token ceiling, selection and ordering must be deterministic.
+
+The ContextPlan records enough retrieval provenance to reconstruct the decision, including the retriever/policy version and any versioned index/corpus identity that affects ranking, plus the exact selected Memory item digests. BM25, vector, hybrid, or another retrieval technique is an implementation choice only if it satisfies this deterministic/frozen-provenance contract.
+
 ## Repository/workspace context
 
 Pantheon does not preload an entire repository.
@@ -260,11 +282,11 @@ V1 does not use an LLM to decide what pre-launch requirements or context to remo
 
 ## Memory freezing
 
-If the memory retriever selects items A and C, the ContextPlan records their exact digests/versions and the retriever/policy version.
+If the memory retriever selects items A and C, the ContextPlan records their exact digests/versions and the retriever/policy/index provenance that affected selection.
 
-Later memory changes do not alter the Run.
+Later memory, index, or retriever changes do not alter the Run.
 
-The exact storage and retrieval implementation is not fixed here; the selected inputs are.
+The exact storage and retrieval implementation is not fixed here; the selected inputs and the provenance needed to reproduce their deterministic selection are.
 
 ## Blocking continuation
 
@@ -370,7 +392,7 @@ Pantheon promises to reconstruct the semantic inputs and control-plane decisions
 - Agent/SOUL/BEHAVIOR/Skill/Memory versions selected;
 - starting WorkspaceRevision;
 - continuation/recovery evidence;
-- ContextPolicy/Builder version;
+- ContextPolicy/Builder/retriever provenance;
 - backend renderer/version provenance where available.
 
 Pantheon does not promise that a stochastic model rerun yields identical output tokens.
@@ -417,8 +439,8 @@ context.measurement-failed
 9. Large repositories and Artifacts are primarily just-in-time resources.
 10. Backends report factual context capacity/measurement but do not decide semantic relevance.
 11. Mandatory context is never silently truncated.
-12. V1 context selection/trimming is deterministic; model-generated pre-launch compaction is deferred.
-13. Selected Memory/Skill inputs are frozen by exact version/digest.
+12. V1 context selection/trimming, including `adaptive` Memory retrieval, is deterministic; model-generated pre-launch selection/compaction is deferred.
+13. Selected Memory/Skill inputs are frozen by exact version/digest, with retrieval provenance frozen where Memory ranking is used.
 14. Blocking continuation and Acceptance rejection use immutable structured context rather than previous opaque provider sessions.
 15. Tool visibility is distinct from authorization.
 16. Secrets and security credentials never enter ContextPlan.
