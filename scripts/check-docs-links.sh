@@ -1,10 +1,19 @@
 #!/bin/sh
-# Validate documentation references.
+# Validate documentation structure. Two independent checks:
 #
-# Pantheon docs reference each other with repository-root-relative paths written
-# as inline code, e.g. `docs/architecture/tasks/task-lifecycle.md`, plus ordinary
-# Markdown links. This script checks that every such reference resolves to a file
-# that exists. It has no dependencies beyond POSIX sh, grep and sed.
+#   1. Every reference resolves. Pantheon docs reference each other with
+#      repository-root-relative paths written as inline code, e.g.
+#      `docs/architecture/tasks/task-lifecycle.md`, plus ordinary Markdown
+#      links. Each must point at something that exists.
+#
+#   2. The architecture map is a complete inventory. Every canonical contract
+#      under a docs/architecture domain directory must be listed in
+#      docs/architecture/README.md exactly once, and every contract the map
+#      lists must exist. A contract missing from the map is invisible to agents
+#      navigating by it, which check 1 cannot detect.
+#
+# Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
+# comm, uniq, wc, tr). No interpreter, package manager or external tooling.
 #
 # Usage: scripts/check-docs-links.sh        (run from anywhere in the repository)
 
@@ -51,19 +60,15 @@ done < /tmp/docs-link-check.$$
 rm -f /tmp/docs-link-check.$$
 
 # 3. Map inventory completeness, both directions.
-#
-# docs/architecture/README.md is the sole full inventory of canonical
-# architecture contracts. A contract missing from it is effectively invisible to
-# an agent navigating by the map, so absence is an error even though every path
-# in the file still resolves. Check 1 above only proves mapped paths exist.
 map=docs/architecture/README.md
 if [ -f "$map" ]; then
 	# Contracts listed in the map's domain tables, one per row.
 	sed -n 's#^| `\(docs/architecture/[a-z0-9-]*/[a-z0-9-]*\.md\)` |.*#\1#p' "$map" |
 		sort >/tmp/docs-map-listed.$$
 
-	# Contracts on disk. overview.md and the navigation READMEs are not domain
-	# contracts and are referenced in prose instead, so they are excluded.
+	# Contracts on disk. -mindepth 2 skips overview.md and the architecture map
+	# itself; -name excludes any per-domain README. Those are navigation or
+	# system-model documents, not domain contracts, and are linked in prose.
 	find docs/architecture -mindepth 2 -name '*.md' ! -name 'README.md' |
 		sed 's|^\./||' | sort >/tmp/docs-map-ondisk.$$
 
