@@ -73,6 +73,7 @@ ResourceDescriptor / Reservation
 Budget / Usage summary
 Grant / Approval
 Evaluation
+SecretDescriptor
 RecoveryFinding / RecoveryDecision
 ConfigurationRevision
 IntegrationIntent
@@ -88,13 +89,14 @@ revise/cancel Goal
 cancel/retry Task
 approve/deny Approval
 adjust Budget configuration
+create/update/reconcile SecretDescriptor material/state
 apply/rollback configuration
 request/cancel Integration
 force-resolve exact UNKNOWN obligation
 pause/resume dispatch
 ```
 
-There is no generic `POST /runs`, `POST /attempts`, `PATCH phase`, or `DELETE reservation` escape hatch.
+There is no generic `POST /runs`, `POST /attempts`, `PATCH phase`, `DELETE reservation`, raw SecretProvider CRUD, or other escape hatch around the owning controller/broker.
 
 ## Read endpoints
 
@@ -128,6 +130,9 @@ GET /api/v1/evaluations[/...]
 GET /api/v1/approvals[/...]
 GET /api/v1/grants[/...]
 
+GET /api/v1/secrets
+GET /api/v1/secrets/{id}
+
 GET /api/v1/recovery/findings[/...]
 GET /api/v1/recovery/decisions[/...]
 
@@ -139,6 +144,15 @@ GET /api/v1/events
 ```
 
 Responses are normalized public representations, not row dumps or backend-private attachments.
+
+Secret reads expose only non-sensitive `SecretDescriptor`/reconciliation metadata, for example logical SecretRef, provider instance/opaque item reference where safe for Operator display, current non-secret `SecretVersionId`, lifecycle/reconciliation state, revision and pending non-secret mutation metadata. They never return secret material, authorization headers, private keys, passwords/tokens or provider-native raw credential values.
+
+V1 intentionally has no endpoint equivalent to:
+
+```text
+GET /api/v1/secrets/{id}/value
+GET /api/v1/secrets/{id}/raw
+```
 
 ## Required operator mutation surface
 
@@ -167,6 +181,61 @@ POST /api/v1/approvals/{id}/actions/deny
 ```
 
 Only Operator Control may perform these.
+
+### Secret management
+
+Secret management is an Operator-only semantic surface over the Secret subsystem defined in `docs/architecture/security/secret-store-and-credential-brokering.md`.
+
+V1 exposes:
+
+```text
+POST /api/v1/secrets
+
+POST /api/v1/secrets/{id}/actions/set
+POST /api/v1/secrets/{id}/actions/rotate
+POST /api/v1/secrets/{id}/actions/delete
+POST /api/v1/secrets/{id}/actions/enable
+POST /api/v1/secrets/{id}/actions/disable
+POST /api/v1/secrets/{id}/actions/reconcile
+```
+
+`POST /api/v1/secrets` creates the logical `SecretDescriptor`/provider association and non-sensitive metadata. It does not need to carry secret material; v1 keeps descriptor creation separate from setting material so a durable metadata resource is not conflated with a cross-system SecretProvider mutation.
+
+`set` and `rotate` accept secret material only in the live authenticated local Operator request path. The daemon validates current command/revision/management authority, generates the target non-secret `SecretVersionId`, durably commits the corresponding `SecretMutationIntent` **without the material**, then performs the external provider mutation and reconciliation according to the Secret subsystem contract.
+
+Sensitive material must never enter:
+
+```text
+commands request hash/body persistence
+Events
+audit payloads
+ordinary HTTP access/request logs
+traces
+SQLite
+Artifacts
+```
+
+Middleware must therefore treat `set`/`rotate` bodies as sensitive at ingress rather than relying only on later redaction.
+
+`delete` changes Pantheon's managed secure-store item/material according to the SecretProvider mutation protocol. For a static stored secret, successful deletion means Pantheon can no longer retrieve that provider item; it does not claim revocation of credentials already copied/issued by an external service.
+
+`disable`/`enable` are authoritative Pantheon state transitions. `DISABLED` immediately prevents new credential use but does not claim that the external SecretProvider item has disappeared or been revoked. Re-enabling still requires current provider/reconciliation state to permit use.
+
+`reconcile` is observation-oriented:
+
+```text
+inspect current provider item/version identity
+→ compare with durable SecretDescriptor/mutation history
+→ ACTIVE | LOCKED | MISSING | DRIFTED | UNKNOWN
+```
+
+It never silently changes provider secret material merely to make metadata match.
+
+A `DRIFTED` secret is not repaired through a generic `force=true` request. The operator chooses an explicit semantic action: provide fresh material through `set/rotate`, disable/delete the descriptor/item, or use an explicit narrowly designed drift-resolution command if v1 implements adoption of an observed provider identity. Any adoption operation must be expected-revision/expected-observed-identity bound and audited; it must not expose material or silently reinterpret arbitrary current secure-store contents as belonging to Pantheon history.
+
+State-dependent Secret mutations require the same normal Operator command identity and optimistic-concurrency rules as other authoritative resources. `If-Match` is required for `set`, `rotate`, `delete`, `enable`, `disable`, reconciliation dispositions and any drift-resolution command when they depend on the currently observed descriptor revision. Provider calls never occur inside the SQLite transaction that creates the durable intent.
+
+CredentialBinding configuration is **not** managed through this surface. Mapping an action/resource to a logical SecretRef belongs to the immutable `credentialBindings` ConfigurationRevision component and changes only through configuration validate/diff/apply/rollback. The Secret API answers what a logical SecretRef currently is and whether/material-version state is usable; configuration answers which operation may use that logical credential authority.
 
 ### Dispatch control
 
@@ -262,7 +331,7 @@ The caller must then treat the pre-restore command outcome as `UNKNOWN`, inspect
 
 This restore boundary is deliberately stronger than transport retry idempotency: it prevents a restored snapshot from silently converting a previously consumed command identity into fresh external-effect authority.
 
-Sensitive secret-set mutations remain a deliberate exception only to request hashing: secret bytes are never part of durable request hashes/logs. Their command identity is still bound to the RestoreGeneration, command ID remains single-use, and the durable SecretMutationIntent contains only non-secret metadata/version identity.
+Sensitive secret `set`/`rotate` mutations are a deliberate exception only to persisted request hashing/body retention: secret bytes are never part of durable request hashes/logs. Their command identity is still bound to the RestoreGeneration, command ID remains single-use, and the durable SecretMutationIntent contains only non-secret metadata/version identity. Repeating a transport request with the same command ID reconciles the existing mutation; Pantheon never persists or compares the sensitive bytes to decide whether the retry payload was identical.
 
 ## ETag / optimistic concurrency
 
@@ -270,7 +339,7 @@ Mutable resources expose strong opaque ETags derived from authoritative identity
 
 Stale-sensitive mutations use `If-Match`. Missing mandatory precondition returns `428 Precondition Required`; revision mismatch returns `412 Precondition Failed`.
 
-Require preconditions where a command is based on observed mutable state, for example Goal revision, configuration apply/rollback, budget/config changes, dispatch desired-state changes and exact RecoveryFinding force-resolution.
+Require preconditions where a command is based on observed mutable state, for example Goal revision, configuration apply/rollback, budget/config changes, SecretDescriptor `set/rotate/delete/enable/disable` and state-adopting reconciliation, dispatch desired-state changes and exact RecoveryFinding force-resolution.
 
 State-independent idempotent commands such as cancel-if-nonterminal need not require a client-supplied prior revision unless controller semantics need it.
 
@@ -284,7 +353,7 @@ Use HTTP status according to what has durably happened:
 202  durable command/intent accepted but external/controller processing continues
 ```
 
-`202` response points at a Command/intent resource where clients can observe completion.
+`202` response points at a Command/intent resource where clients can observe completion. SecretProvider mutations commonly use this form after the non-secret `SecretMutationIntent` has durably committed but provider reconciliation is still in progress.
 
 ## Problem Details
 
@@ -305,6 +374,10 @@ approval-required
 budget-blocked
 temporarily-unavailable
 subject-fenced
+secret-locked
+secret-missing
+secret-drifted
+secret-unknown
 cursor-gone
 recovery-force-resolution-required
 internal
@@ -327,6 +400,8 @@ GET /health/ready
 An operator-paused scheduler does not necessarily make the daemon unhealthy/unready: readiness reports whether the control plane **could safely** dispatch if desired, while `GET /api/v1/dispatch` reports whether dispatch is currently desired/effective. Deployments may layer stricter product-specific readiness semantics outside this architecture, but they must not erase the durable pause distinction.
 
 During startup recovery, live may be 200 while ready is 503. Read-only diagnostics may remain available while new dispatch is fenced.
+
+A locked/missing/drifted/unknown individual SecretProvider item is normally operation-scoped and does not by itself make the entire daemon unready; operations requiring that SecretRef fail closed according to the Secret subsystem's blast-radius rules.
 
 ## System discovery
 
@@ -420,6 +495,8 @@ pantheon sandbox list|get
 
 pantheon approval list|approve|deny
 
+pantheon secret list|status|create|set|rotate|delete|enable|disable|reconcile
+
 pantheon recovery list|show|force-resolve
 
 pantheon config status|validate|diff|apply|history|rollback
@@ -433,9 +510,13 @@ pantheon doctor
 pantheon version
 ```
 
+For `pantheon secret set` and `pantheon secret rotate`, material comes from an interactive no-echo prompt, stdin, file descriptor or equivalent secure local input path. V1 must not encourage `--value <secret>` because shell history/process-list exposure is incompatible with the Secret material path. The CLI sends the material only to `pantheond` over Operator Control and never contacts SecretProvider directly.
+
+There is no `pantheon secret get --raw`, `show-value` or equivalent command in v1. `pantheon secret status` displays only normalized non-sensitive descriptor/provider/version/reconciliation metadata.
+
 Dispatch CLI sugar should expose the durable desired state explicitly, for example `pantheon dispatch status|pause|resume`; it is an Operator API client over the endpoints above, not a process-local scheduler switch.
 
-No commands directly create Runs/Attempts, set lifecycle phases, delete Reservations or mutate shared Git refs outside semantic controllers.
+No commands directly create Runs/Attempts, set lifecycle phases, delete Reservations, mutate shared Git refs outside semantic controllers, expose secret material, or modify CredentialBinding configuration outside normal configuration publication.
 
 ## `--wait`
 
@@ -445,15 +526,22 @@ No commands directly create Runs/Attempts, set lifecycle phases, delete Reservat
 
 Read commands support stable human output plus `-o json`/`-o yaml` where applicable. JSON/YAML stdout contains only structured result; interactive progress/diagnostics go to stderr.
 
+Secret status/list machine-readable output follows the same rule and contains only non-sensitive metadata; sensitive input is never echoed into structured stdout.
+
 ## Doctor
 
 `pantheon doctor` calls daemon diagnostic APIs such as PersistenceInvariantChecker, configuration/source drift, recovery findings, backend/Sandbox health and storage consistency. It does not inspect/mutate `pantheon.db` directly.
 
+Secret diagnostics may report SecretDescriptor/provider availability/reconciliation states but must never retrieve/display raw material merely for diagnostic completeness.
+
 ## Security
 
 - Operator socket is physically absent/unreachable from untrusted Agent Sandboxes.
-- Agent Control route set cannot invoke approvals, configuration, budgets, force-resolution, dispatch control or unrelated resources.
-- Raw secrets/tickets/Agent credentials are never returned by generic API reads.
+- Agent Control route set cannot invoke approvals, configuration, budgets, Secret management, force-resolution, dispatch control or unrelated resources.
+- Raw secrets/tickets/Agent credentials are never returned by generic API reads or SecretDescriptor endpoints.
+- `set`/`rotate` ingress is sensitive: bodies are excluded from durable request storage/hashes, Events, traces and ordinary request logging before generic middleware can record them.
+- CLI never contacts SecretProvider directly and v1 exposes no raw-secret read/display command.
+- CredentialBinding mapping remains ConfigurationRevision state, not mutable Secret API state.
 - Artifact refs remain identifiers, not capabilities; read/export is authorized.
 - Future remote transport requires explicit authentication/TLS/principal mapping before enablement.
 
@@ -461,12 +549,15 @@ Read commands support stable human output plus `-o json`/`-o yaml` where applica
 
 1. `pantheond` is the only control-plane authority.
 2. Operator Control and Agent Control are distinct trust surfaces/principals/route sets.
-3. Public API exposes semantic architecture resources/commands, not raw lifecycle/table CRUD.
+3. Public API exposes semantic architecture resources/commands, not raw lifecycle/table/SecretProvider CRUD.
 4. Every normal mutation is idempotent only within the current `(RestoreGeneration, commandId)` identity; old command epochs fail closed after disaster restore even if historical command rows were rewound away. Sensitive secret commands never persist secret bytes in hashes/logs.
-5. ETags/If-Match map client optimistic concurrency to controller revision CAS.
-6. Dispatch pause/resume mutates durable desired state; `GET /dispatch` distinguishes desired mode from effective dispatchability and ordinary restart never silently resumes a pause.
-7. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, recovery-quarantine/force-resolution and configuration operations required to operate the system.
-8. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.
-9. List + Event watch is gap-free through same-snapshot Journal cursor.
-10. CLI is only an API client; `--wait` watches durable state/events.
-11. Remote/TCP access is deferred until a real authentication/security model exists.
+5. ETags/If-Match map client optimistic concurrency to controller revision CAS, including state-dependent SecretDescriptor mutations.
+6. SecretDescriptor reads expose metadata only; v1 has no raw secret read/display endpoint or CLI command.
+7. Secret material for `set`/`rotate` exists only in the live Operator request/Secret Broker path; durable SecretMutationIntent is committed without bytes before the provider effect.
+8. Secret management and CredentialBinding configuration are separate: Operator Secret API manages logical descriptor/material/reconciliation state, while ConfigurationRevision owns action/resource-to-SecretRef authority mappings.
+9. Dispatch pause/resume mutates durable desired state; `GET /dispatch` distinguishes desired mode from effective dispatchability and ordinary restart never silently resumes a pause.
+10. Operator surface includes dispatch, resource/reservation, Workspace/Sandbox, backend, Secret management, recovery-quarantine/force-resolution and configuration operations required to operate the system.
+11. UNKNOWN force-resolution is exact, revision-bound, audited and operator-only.
+12. List + Event watch is gap-free through same-snapshot Journal cursor.
+13. CLI is only an API client; `--wait` watches durable state/events.
+14. Remote/TCP access is deferred until a real authentication/security model exists.
