@@ -27,6 +27,8 @@ cd "$root"
 ./scripts/check-action-pins.sh
 ./scripts/check-docs-links.sh
 ./scripts/check-crate-deps.sh
+./scripts/check-skill-symlinks.sh
+./scripts/check-hooks.sh
 
 cargo fmt --all -- --check
 
@@ -45,5 +47,16 @@ cargo test --workspace --locked
 # it must not own, and a broken link or malformed doc comment in that statement is
 # a defect like any other.
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+
+# Record success as a local, transient fingerprint (.git/pantheon/), never
+# committed repository authority. This is what lets a local Stop hook detect
+# that the working tree changed since the last successful run; see
+# docs/development/agent-skills-and-hooks.md. Not a second verification
+# command — it only remembers this run's own result. Best-effort: every
+# check above already passed, so an environment quirk that keeps this local
+# bookkeeping step from writing (an unwritable .git/, an unusual worktree
+# layout) must not turn an otherwise-successful verification into a failure.
+./scripts/hooks/record-verified.sh "$root" ||
+	echo "verify: warning: could not record local verification state (non-fatal)" >&2
 
 echo "verify: OK"

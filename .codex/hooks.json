@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "command": "sh -c 'cd \"$(git rev-parse --show-toplevel)\" && exec scripts/hooks/check-stale-verification-codex.sh'"
+      }
+    ]
+  }
+}
