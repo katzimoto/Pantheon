@@ -47,6 +47,7 @@ the system should do.
 | `docs/reviews/archive/2026-08-final-adversarial-architecture-review.txt` | Byte-preserved raw snapshot of the final adversarial review from its historical branch. Its two remaining blockers were subsequently dispositioned. |
 | `docs/reviews/2026-08-adversarial-review-closure.md` | Historical closure note mapping the second/final review blockers to the canonical contracts that subsequently absorbed them. Not architecture. |
 | `docs/reviews/2026-08-rust-agent-skill-research.md` | Research/decision result ranking Rust-specific agent-skill candidates (Issue #22): which are Pantheon-specific enough to add, defer, or reject, and why. Not a skill catalog; skills are implemented by later missions inside the mechanism Issue #21 establishes. |
+| `docs/reviews/2026-08-persistence-recovery-skill-evaluation.md` | Evaluation record for the `persistence-and-recovery-transaction-review` skill (Issue #42): trigger/non-trigger runs against slices of Issues #16/#17/#18 and a fresh-context with/without comparison. Evidence, not a skill or an authority. |
 
 The two files under `docs/reviews/archive/` are raw historical snapshots rather
 than live Markdown documentation. They intentionally retain the old paths,
