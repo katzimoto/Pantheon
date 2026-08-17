@@ -113,6 +113,17 @@ Before reporting a change complete:
 - every line of the diff traces to the task;
 - work you found but did not do is reported.
 
+A change reaches `main` through a pull request carrying the evidence for those
+claims, reviewed by someone other than its author.
+`docs/development/change-lifecycle.md` is that contract, and it also covers
+taking over work someone else left unfinished.
+
+If you stop before the work is finished — the session ends, ownership changes,
+or you are blocked — leave a handoff on the pull request, as that contract
+describes. It is the one part of the lifecycle that nothing else in the
+repository will do for you. What you know and do not write down is lost with
+the session.
+
 ## About this file
 
 `AGENTS.md` is the canonical contract for every coding agent. `CLAUDE.md`
