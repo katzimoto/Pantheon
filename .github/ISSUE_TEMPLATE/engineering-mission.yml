@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Pantheon has one issue form. It covers implementation, bugs,
+        This is Pantheon's one mission form. It covers implementation, bugs,
         architecture and documentation alike; those differ in what you write,
         not in which template you pick.
 

@@ -12,7 +12,7 @@ into exactly the documents your task needs.
 | Detailed architecture contracts | `docs/architecture/<domain>/` | **Canonical.** One document per subsystem contract. |
 | Reviews and review process | `docs/reviews/` | **Not canonical.** Historical analysis and review ledgers. |
 | Schemas | `schemas/` | **Canonical** for the artifacts they describe. |
-| Development process | `docs/development/` | **Canonical** for how work is specified and carried out, not for what Pantheon is. Currently `docs/development/missions.md`, the Engineering Mission contract. |
+| Development process | `docs/development/` | **Canonical** for how engineering work is specified, structured, related and decomposed. Not for what Pantheon is, and not for how an agent operates — that is `AGENTS.md`. Currently `docs/development/missions.md`, the Engineering Mission contract. |
 
 ## Where to start
 
@@ -69,7 +69,7 @@ then they are not implementation requirements. See `docs/reviews/README.md`.
 | A system-wide invariant or model change | `docs/architecture/overview.md` |
 | A review, audit or external analysis | `docs/reviews/` |
 | Superseded material worth keeping | `docs/reviews/`, with a `## Status` line saying what superseded it |
-| A rule about how work is specified, decomposed or carried out | `docs/development/` |
+| A rule about how engineering work is specified, structured or decomposed | `docs/development/` |
 
 Rules for any new document:
 

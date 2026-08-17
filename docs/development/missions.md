@@ -7,8 +7,19 @@ Engineering Mission is and how missions relate to each other. It has no
 authority over what Pantheon *is* — that lives in `docs/architecture/` — and
 none over how an agent works, which lives in `AGENTS.md`.
 
-`.github/ISSUE_TEMPLATE/engineering-mission.yml` is the creation interface for
-this contract. The form is an adapter; the semantics below survive it.
+The contract is the semantics below, not any particular way of recording them:
+
+```text
+Engineering Mission semantics
+  -> a GitHub Issue is the mission record
+    -> the Issue Form, the REST API, gh, and any future Pantheon adapter
+       are ways of creating that record
+```
+
+`.github/ISSUE_TEMPLATE/engineering-mission.yml` is the default interface for a
+human authoring one, and nothing more. A mission opened through the API, a CLI
+or a tool is no less a mission for having skipped the form; it is judged against
+this document either way.
 
 ## What a mission is
 
@@ -154,7 +165,7 @@ A mission may grant that authority explicitly under scope and constraints when
 decomposition is part of the outcome. Absent that grant, deciding whether
 discovered work becomes another mission is a human decision.
 
-## Why there is only one form
+## Why there is one mission form
 
 Defects, features, refactors, architecture changes and documentation
 corrections are all bounded work with an outcome, a definition of done and a
@@ -168,4 +179,6 @@ Issue remains only the record of the mission.
 Separate templates per work type would duplicate most of their content,
 drift apart, and force authors to classify work before describing it. If a
 category ever needs materially different fields, that is the evidence for
-adding a form — not the expectation that it might.
+adding a form — not the expectation that it might. A route for something that
+is not a mission at all, such as support or vulnerability reporting, is a
+separate question this contract does not answer.

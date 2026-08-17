@@ -20,11 +20,11 @@
 #      rather than a separate copy. This verifies only that the import line is
 #      still there; it does not inspect the rest of CLAUDE.md.
 #
-#   5. There is one issue form. GitHub Issues are Pantheon's mission contract
-#      (docs/development/missions.md), and the Engineering Mission form is the
-#      single creation path for executable work. A second form beside it
-#      reintroduces per-work-type templates, and a missing config.yml silently
-#      restores blank issues as the default path.
+#   5. The mission form and its chooser configuration are intact. A GitHub
+#      Issue is Pantheon's mission record (docs/development/missions.md), and
+#      the Engineering Mission form is the default way a human authors one.
+#      This verifies that the form still exists and that blank issues stay
+#      disabled, so the form is still what the template chooser offers.
 #
 # Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
@@ -151,28 +151,30 @@ elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md; then
 	status=1
 fi
 
-# 5. One issue form, plus the chooser configuration that keeps it the default
-# path. The form's own YAML is validated by GitHub against the repository, so
-# re-checking it here would mean carrying a YAML toolchain to duplicate what the
-# platform already does. What GitHub cannot report is whether Pantheon still has
-# exactly one mission path, so that is what this checks. The form's filename is
-# not asserted: documentation names it in inline code, and check 1 already fails
-# when it moves.
-chooser=.github/ISSUE_TEMPLATE
-if [ ! -d "$chooser" ]; then
-	echo "missing issue form directory: $chooser" >&2
+# 5. The mission form exists, and blank issues stay disabled so it remains what
+# the template chooser offers. The form's own YAML is validated by GitHub against
+# the repository, so re-checking it here would mean carrying a YAML toolchain to
+# duplicate what the platform already does; the two facts GitHub cannot report
+# are whether the canonical form is still present and what the chooser is
+# configured to do.
+#
+# This deliberately does not assert that only one template exists. Whether
+# Pantheon ever grows a route for something that is not a mission at all — a
+# support or vulnerability path — is a decision for
+# docs/development/missions.md, not something this script should forbid.
+form=.github/ISSUE_TEMPLATE/engineering-mission.yml
+chooser=.github/ISSUE_TEMPLATE/config.yml
+[ -f "$chooser" ] || chooser=.github/ISSUE_TEMPLATE/config.yaml
+if [ ! -f "$form" ]; then
+	echo "missing Engineering Mission form: $form" >&2
 	status=1
-else
-	if [ ! -f "$chooser/config.yml" ] && [ ! -f "$chooser/config.yaml" ]; then
-		echo "$chooser: no config.yml; the template chooser is unconfigured" >&2
-		status=1
-	fi
-	forms=$(find "$chooser" -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) \
-		! -name 'config.yml' ! -name 'config.yaml' | wc -l | tr -d ' ')
-	if [ "$forms" -ne 1 ]; then
-		echo "$chooser: expected exactly one issue form beside config.yml, found $forms" >&2
-		status=1
-	fi
+fi
+if [ ! -f "$chooser" ]; then
+	echo "missing template chooser configuration: .github/ISSUE_TEMPLATE/config.yml" >&2
+	status=1
+elif ! grep -qE '^blank_issues_enabled:[[:space:]]*false[[:space:]]*$' "$chooser"; then
+	echo "$chooser: blank_issues_enabled is not false; a blank issue is a creation path again" >&2
+	status=1
 fi
 
 if [ "$status" -eq 0 ]; then
