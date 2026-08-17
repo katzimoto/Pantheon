@@ -50,12 +50,12 @@ kernel) — all under Milestone `v0.1.0 — MVP`.
 confirm current guidance and to identify real agent/community failure modes
 rather than to substitute for repository evidence):
 
-- [Cargo reference and workspace RFC 2906](https://www.ncameron.org/rfcs/2906.html) — workspace dependency mechanics.
-- [Rust FAQ: Rust 2024 edition](https://www.rustfaq.org/en/what-changed-in-rust-edition-2024/) — 2024 edition is stable since Rust 1.85; Pantheon already pins `1.97.1`/edition 2024, so this is settled, not a gap.
-- [rusqlite](https://docs.rs/rusqlite) / [SQLx](https://sqlx.dev/) / [refinery](https://github.com/rust-db/refinery) documentation — SQLite driver and migration-tooling landscape for the crate #16 will need to choose.
+- [The Cargo Book: Workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html) (official Cargo reference) — workspace dependency mechanics.
+- [The Rust Edition Guide: Rust 2024](https://doc.rust-lang.org/edition-guide/rust-2024/index.html) (official) — 2024 edition is stable since Rust 1.85; Pantheon already pins `1.97.1`/edition 2024, so this is settled, not a gap.
+- [rusqlite](https://docs.rs/rusqlite) / [SQLx](https://sqlx.dev/) / [refinery](https://github.com/rust-db/refinery) documentation, alongside SQLite's own [`lang_transaction.html`](https://www.sqlite.org/lang_transaction.html), [`wal.html`](https://www.sqlite.org/wal.html), and [`pragma.html`](https://www.sqlite.org/pragma.html) (official SQLite documentation, authoritative for the transaction-mode/WAL/PRAGMA behavior `sqlite-persistence-and-transactions.md` builds on) — SQLite driver and migration-tooling landscape for the crate #16 will need to choose.
 - [tokio-rs/loom](https://github.com/tokio-rs/loom) and [awslabs/shuttle](https://github.com/awslabs/shuttle) — deterministic/permutation concurrency testing tools and what class of bug they target (hand-rolled unsafe/lock-free primitives and arbitrary interleavings), via their own docs and [Properly Testing Concurrent Data Structures](https://matklad.github.io/2024/07/05/properly-testing-concurrent-data-structures.html).
-- [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) and the [Rust Project Goals page for it](https://rust-lang.github.io/rust-project-goals/2025h2/cargo-semver-checks.html) — automated public-API semver diffing, and that it is designed around a *published* crate to diff against.
-- [Oxide RFD 400, "Dealing with cancel safety in async Rust"](https://rfd.shared.oxide.computer/rfd/0400) — the most concrete primary source found on async cancellation failure modes: `select!` loops, `tokio::sync::Mutex` held across `.await`, task aborts, and the recommended mitigations (message-passing/actors, `reserve`-then-send splits, background tasks for cancel-unsafe work).
+- [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) and the [Rust Project Goals page for it](https://rust-lang.github.io/rust-project-goals/2025h2/cargo-semver-checks.html) — automated public-API semver diffing. It supports comparing against a published registry version, but also a `--baseline-rev` (Git revision), `--baseline-root` (local manifest), or `--baseline-rustdoc` (arbitrary rustdoc JSON) — publication to crates.io is not required.
+- [Tokio's own `select!` documentation](https://docs.rs/tokio/latest/tokio/macro.select.html) (official, "Cancellation safety" section) — the authoritative definition of cancellation safety and how to reason about it, preferred here over secondary commentary for the core claim. [Oxide RFD 400, "Dealing with cancel safety in async Rust"](https://rfd.shared.oxide.computer/rfd/0400) supplements it with concrete failure-mode case studies: `select!` loops, `tokio::sync::Mutex` held across `.await`, task aborts, and mitigations (message-passing/actors, `reserve`-then-send splits, background tasks for cancel-unsafe work).
 - [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) — official categories (naming, documentation, predictability, flexibility, type safety, dependability, debuggability, future-proofing); used to identify what is *already* well-covered, general model knowledge.
 - cargo-deny / cargo-vet / cargo-audit landscape (via the [Rust Engineering Practices supply-chain chapter](https://microsoft.github.io/RustTraining/engineering-book/ch06-dependency-management-and-supply-chain-s.html) and the [cargo-vet project](https://github.com/mozilla/cargo-vet)) — current supply-chain tooling, none of which Pantheon's `verify.sh` currently runs.
 - Community/industry commentary on LLM/agent-generated Rust ([Rust and LLMs: The Compiler Does What Code Review Shouldn't Have To](https://blog.rezvov.com/rust-and-llms-the-compiler-does-what-code-review-shouldnt-have-to), [How Rust's Compiler Catches What Coding Agents Get Wrong](https://marclove.com/blog/2025-12-13-rust-feedback-loop-catches-claude-code-hallucinations-dead-code-bugs/)) — used only as evidence of a general failure *pattern* (agents reach for `unsafe`, `Box::leak`, `Arc<Mutex<T>>`, or premature `.clone()` to escape borrow-checker rejections instead of fixing ownership), not as justification by itself. Pantheon already forecloses the most dangerous instance of this pattern by denying `unsafe_code` workspace-wide and by not blanket-banning `unwrap`/`expect` (see `docs/development/implementation.md`), so this generic pattern is explicitly **not** proposed as a skill below — it is a lint-policy and code-review concern, not a progressive-disclosure procedural gap.
@@ -122,10 +122,25 @@ immediate, concrete near-term value rather than being speculative.
   `scripts/check-crate-deps.sh`, the committed `Cargo.lock`.
 - **Workflow/output**: confirm the dependency is justified by real code that
   needs it now (not speculative); reject wildcard versions and mutable-branch
-  Git sources; for a new crate, add its `//!` boundary statement and its
-  allowlist entry together in the same change; run `cargo update -p <crate>`
-  (not a broad `cargo update`) so the lockfile diff stays minimal and
-  reviewable; finish by running `./scripts/verify.sh --locked` and treating a
+  Git sources. Before adding it, perform targeted due diligence the current
+  mechanical checks do not cover: check for open RUSTSEC security advisories
+  against the exact version being pinned; check upstream maintenance and
+  provenance (is it actively maintained, does the source repository match
+  the published crate, is the maintainer/publishing history consistent);
+  check license compatibility with Pantheon's own license and its other
+  dependencies; check the crate's minimum supported Rust version against
+  Pantheon's pinned `1.97.1`/edition 2024; check which features are
+  required versus enabled by default, and disable defaults that pull in
+  unneeded surface area; check what the dependency itself transitively
+  pulls in, since a small direct addition can be a large transitive one.
+  This is procedural diligence the skill performs by hand — it does not
+  require adding `cargo-deny`/`cargo-vet`/`cargo-audit` to CI as part of
+  this mission, and does not block on tooling that does not exist yet. For
+  a new crate, add its `//!` boundary statement and its allowlist entry
+  together in the same change; run `cargo update -p <crate>` (not a broad
+  `cargo update`) so the lockfile diff stays minimal and reviewable; finish
+  by running `./scripts/verify.sh` (its `--locked` invocations are internal
+  to the script, not a separate flag the caller supplies) and treating a
   failure there as the actual gate, not the skill's own judgment.
 - **Must not duplicate/decide**: it does not decide whether a new crate
   boundary is architecturally justified — `docs/development/implementation.md`
@@ -250,8 +265,8 @@ threads/tasks rather than delegating serialization to SQLite.
 candidate: public-protocol-type-evolution
 repeated Pantheon-specific workflow: not yet
 failure impact: high, once real
-compiler/CI already catches it: no (cargo-semver-checks needs a published
-  baseline to diff against; pantheon-operator-protocol is not published)
+compiler/CI already catches it: no (there is no public API surface yet for
+  any tool, `cargo-semver-checks` included, to diff against)
 progressive-disclosure value: medium, once real
 recommended mechanism: skill, deferred
 trigger examples (future, not current):
@@ -271,16 +286,20 @@ domain types or persistence rows, specifically so an internal refactor does
 not become a public breaking change. That is a genuine Pantheon-specific
 invariant, not generic semver advice, and `cargo-semver-checks` is real,
 maintained, official-adjacent tooling that automates exactly this kind of
-diff for a crate with a prior published version to compare against. But the
-crate currently has zero types, so there is nothing to evolve and no prior
-baseline to diff against; a skill written now would either restate generic
-semver knowledge (rejected by the issue) or invent a protocol shape ahead of
-the mission that actually defines it. This is the clearest "defer until
-evidence" case in the set: revisit at the first mission that adds real
-wire types to `pantheon-operator-protocol`, and consider wiring
-`cargo-semver-checks` (or an equivalent local diff against the last agreed
-schema/type snapshot, since the crate is not published to crates.io) into
-that mission's verification rather than only into a skill.
+diff. It does not require a crates.io publication to do so — it also
+supports a `--baseline-rev` (Git revision), `--baseline-root` (local
+manifest), or `--baseline-rustdoc` (arbitrary rustdoc JSON) baseline, any of
+which would work against an unpublished crate like
+`pantheon-operator-protocol`. The reason to defer is not a tooling
+limitation: the crate currently declares zero types, so there is no API
+surface yet for any baseline strategy to diff against, and a skill written
+now would either restate generic semver knowledge (rejected by the issue) or
+invent a protocol shape ahead of the mission that actually defines it. This
+is the clearest "defer until evidence" case in the set: revisit at the first
+mission that adds real wire types to `pantheon-operator-protocol`, and
+consider wiring `cargo-semver-checks` with a `--baseline-rev` pinned to the
+last agreed revision into that mission's verification rather than only into
+a skill.
 
 ### 5. Error-boundary design
 
@@ -333,11 +352,14 @@ No crate in the workspace depends on `tokio` or any async runtime today;
 every crate is synchronous scaffolding. Async cancellation is nonetheless
 worth flagging now as a **strong** future candidate, because the failure
 mode it addresses is not generic — it is structurally the same discipline
-Pantheon already imposes on itself for external operations. Oxide's RFD 400
-is a concrete primary source: `tokio::select!` silently drops in-flight
-work from a non-cancel-safe branch, `tokio::sync::Mutex` held across an
-`.await` can leave shared state invalid under cancellation, and task aborts
-cancel at an arbitrary await point. Pantheon's own launch-contact model
+Pantheon already imposes on itself for external operations. Tokio's own
+`select!` documentation states the core definition authoritatively: a future
+is cancellation safe when dropping it before completion and recreating it is
+a no-op, and cancellation always happens at an `.await` point. Oxide's RFD
+400 supplements that definition with concrete case studies: `tokio::select!`
+silently drops in-flight work from a non-cancel-safe branch, `tokio::sync::Mutex`
+held across an `.await` can leave shared state invalid under cancellation,
+and task aborts cancel at an arbitrary await point. Pantheon's own launch-contact model
 (`NOT_CONTACTED` / `CONTACT_MAY_HAVE_OCCURRED`, "`UNKNOWN` never authorizes
 duplicate replacement work") is the same "did the operation actually
 complete, and can I safely retry" question the async-cancellation-safety
@@ -390,8 +412,8 @@ than synthetic trivia, consistent with the issue's instruction:
   once with the skill available and once without — and compare whether the
   required test shapes (concurrent-CAS race, injected-failure rollback,
   idempotent replay for the persistence skill; a clean first-attempt
-  `./scripts/verify.sh --locked` pass with no allowlist/lockfile round-trip
-  for the dependency skill) were produced correctly on the first attempt.
+  `./scripts/verify.sh` pass with no allowlist/lockfile round-trip for the
+  dependency skill) were produced correctly on the first attempt.
   This reuses real mission acceptance criteria as the evaluation harness
   instead of inventing a parallel benchmark.
 
@@ -416,8 +438,10 @@ input rather than re-deriving them.
 
 No skill, hook, validator, dependency, or crate was added by this mission.
 This document is the decision record the mission's acceptance criteria
-require. It authorizes exactly two future skill-implementation missions —
-`dependency-change-procedure` and `persistence-and-recovery-transaction-review`
-— scoped as specified above, and leaves the remaining four candidates on
-explicit, evidence-based hold rather than reopening the research question
+require. As a non-canonical research result, it does not itself authorize
+anything; it recommends `dependency-change-procedure` and
+`persistence-and-recovery-transaction-review` as candidates for a later
+Engineering Mission to implement, scoped as specified above, and leaves the
+remaining four candidates on explicit, evidence-based hold rather than
+reopening the research question
 each time they resurface.

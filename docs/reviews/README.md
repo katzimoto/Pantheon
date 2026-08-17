@@ -45,10 +45,10 @@ the system should do.
 | `docs/reviews/2026-08-second-architecture-review-instructions.md` | The brief written for a second adversarial review: scope, decisions to treat as current at the time of writing, and required output format. Process material, not architecture. |
 | `docs/reviews/2026-08-rust-agent-skill-research.md` | Research/decision result ranking Rust-specific agent-skill candidates (Issue #22): which are Pantheon-specific enough to add, defer, or reject, and why. Not a skill catalog; skills are implemented by later missions inside the mechanism Issue #21 establishes. |
 
-Both documents predate the documentation reorganization; their references to
-architecture files were updated to the current paths, but their content is
-otherwise unchanged and reflects the state of the project when they were
-written.
+The first two documents predate the documentation reorganization; their
+references to architecture files were updated to the current paths, but
+their content is otherwise unchanged and reflects the state of the project
+when they were written.
 
 ## Adding to this area
 
