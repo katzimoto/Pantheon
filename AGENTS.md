@@ -35,7 +35,7 @@ and CI verification never drift into two different commands.
 
 Pantheon-specific procedural guidance lives once, at
 `.agents/skills/<name>/SKILL.md`; `docs/development/agent-skills-and-hooks.md`
-is canonical for that mechanism, the four MVP skills, and what a lifecycle
+is canonical for that mechanism, the skill catalog, and what a lifecycle
 hook may and may not do. A skill never outranks this file, canonical
 architecture, or `./scripts/verify.sh` — it only operationalizes them.
 

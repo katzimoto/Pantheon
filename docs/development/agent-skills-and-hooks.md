@@ -58,10 +58,11 @@ drift.
 ├── pantheon-change-verification/SKILL.md
 ├── pantheon-pr-evidence/SKILL.md
 ├── pantheon-independent-review/SKILL.md
-└── dependency-change-procedure/SKILL.md
+├── dependency-change-procedure/SKILL.md
+└── persistence-and-recovery-transaction-review/SKILL.md
 ```
 
-### The MVP skills
+### The skill catalog
 
 | Skill | Operationalizes | Use when |
 |---|---|---|
@@ -70,6 +71,7 @@ drift.
 | `pantheon-pr-evidence` | `docs/development/change-lifecycle.md` pull request contract | Opening or updating a pull request |
 | `pantheon-independent-review` | `docs/development/change-lifecycle.md` independent review contract | Reviewing a PR as a principal distinct from its author, from fresh context |
 | `dependency-change-procedure` | `docs/development/implementation.md` dependency and new-crate policy | Adding or materially changing a Rust dependency, or adding a new crate |
+| `persistence-and-recovery-transaction-review` | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`, `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`, `docs/development/implementation.md` | Implementing or reviewing authoritative `pantheon-store` mutations, authoritative/revisioned schema, command/idempotency/Event Journal transactions, or recovery/reconciliation paths |
 
 Each skill's own frontmatter `description` and body state its trigger and
 non-trigger conditions precisely; this table is a map, not a substitute for
