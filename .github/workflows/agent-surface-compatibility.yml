@@ -1,0 +1,87 @@
+name: Agent surface compatibility
+
+# A scheduled/manual compatibility signal for the external coding-agent
+# surfaces Pantheon intentionally supports (Claude Code, Codex CLI, OpenCode,
+# and the Agent Skills format) — see
+# docs/development/agent-skills-and-hooks.md. Those products change
+# independently of Pantheon, so this monitors them without gating ordinary
+# repository work: it deliberately does NOT trigger on pull_request, and a
+# failed scheduled run is an actionable diagnostic that drives follow-up only
+# through an explicit human decision. Nothing here rewrites adapters, changes
+# support claims, creates Issues, or weakens hooks to make itself green.
+# The canonical correctness gate stays ./scripts/verify.sh, which this workflow
+# never replaces or depends on.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compat:
+    name: Compatibility with supported agent surfaces
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full-length commit SHA, the only immutable way to
+      # reference an action, and enforced by scripts/check-action-pins.sh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Install pinned versions of the vendor CLIs and of the Agent Skills
+      # reference tooling so the tested version is attributable and a reported
+      # change can be distinguished from Pantheon repository drift. Best-effort
+      # on purpose: an install failure is an upstream availability signal that
+      # is recorded and surfaced in the report, not a network blip that fails
+      # the job wholesale. The compatibility check itself never hard-depends on
+      # these tools being present.
+      - name: Install pinned agent tool versions (best-effort)
+        env:
+          AGENT_COMPAT_TOOLS_DIR: ${{ runner.temp }}/agent-compat-tools
+        run: |
+          set -u
+          mkdir -p "$AGENT_COMPAT_TOOLS_DIR"
+          install_cli() {
+            if ! npm install --prefix "$AGENT_COMPAT_TOOLS_DIR" "$2" >/dev/null 2>&1; then
+              printf 'install-failed: %s@%s\n' "$1" "${2##*@}" > "$AGENT_COMPAT_TOOLS_DIR/$1.install-failed"
+            fi
+          }
+          install_cli claude '@anthropic-ai/claude-code@2.1.234'
+          install_cli codex '@openai/codex@0.147.0'
+          install_cli opencode 'opencode-ai@1.18.18'
+          if ! python3 -m venv "$AGENT_COMPAT_TOOLS_DIR/venv" 2>/dev/null \
+             || ! "$AGENT_COMPAT_TOOLS_DIR/venv/bin/pip" install --quiet 'skills-ref==0.1.1'; then
+            python3 -m pip install --user 'skills-ref==0.1.1' 2>/dev/null \
+              || python3 -m pip install --user --break-system-packages 'skills-ref==0.1.1' 2>/dev/null \
+              || printf 'install-failed: skills-ref@0.1.1\n' > "$AGENT_COMPAT_TOOLS_DIR/skills-ref.install-failed"
+          fi
+          printf '%s\n' \
+            "$AGENT_COMPAT_TOOLS_DIR/node_modules/.bin" \
+            "$AGENT_COMPAT_TOOLS_DIR/venv/bin" \
+            "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Offline, no vendor tools needed: proves the checks catch a changed
+      # adapter/spec assumption, so the negative-case mechanism is exercised on
+      # every run rather than only at authoring time.
+      - name: Self-test the compatibility checks (offline)
+        run: ./scripts/check-agent-surface-compatibility.sh --self-test
+
+      # The compatibility matrix check. Version pins here are the declared
+      # tested versions; the report records each installed tool's actual
+      # version and flags any difference. The report goes to the step summary
+      # so a scheduled run preserves its evidence.
+      - name: Run the compatibility matrix check
+        env:
+          AGENT_COMPAT_TOOLS_DIR: ${{ runner.temp }}/agent-compat-tools
+        run: |
+          set -o pipefail
+          ./scripts/check-agent-surface-compatibility.sh \
+            --pin claude=2.1.234 \
+            --pin codex=0.147.0 \
+            --pin opencode=1.18.18 \
+            --pin skills-ref=0.1.1 \
+          | tee -a "$GITHUB_STEP_SUMMARY"

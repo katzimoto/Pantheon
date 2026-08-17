@@ -263,6 +263,70 @@ documented contract actually supports and says so here. All three surfaces
 get the same skill bodies regardless: the portability gap is entirely in
 hook enforcement strength, not in what procedural guidance is available.
 
+## Upstream compatibility monitoring
+
+The portability boundary above is a snapshot. The vendor products behind it
+change independently of Pantheon, and the canonical gate must not move with
+them: `./scripts/verify.sh` stays local, deterministic, and free of external
+agent installations. Upstream drift is a different concern — worth observing,
+never an unconditional correctness gate.
+
+`scripts/check-agent-surface-compatibility.sh` records and observes the
+repository side of that boundary. It encodes the documented upstream contracts
+Pantheon currently relies on, checks the adapters against them, and reports
+each capability as pass, known limitation, or unsupported-to-test — it never
+fabricates a behavior it did not exercise. It is deliberately not part of
+`./scripts/verify.sh`, and it does not duplicate the deterministic checks that
+verify.sh owns (canonical skill bodies, symlink integrity, hook self-tests,
+documentation structure). `.github/workflows/agent-surface-compatibility.yml`
+runs it on a schedule and on demand, installing pinned versions of the vendor
+CLIs (`@anthropic-ai/claude-code`, `@openai/codex`, `opencode-ai`) and of the
+Agent Skills reference tooling (`skills-ref`, pinned by immutable version) so
+the tested version is attributable and a reported change can be told apart from
+Pantheon repository drift.
+
+### The tested compatibility matrix
+
+| Surface | Capability observed | Tested boundary | Assumption anchor |
+|---|---|---|---|
+| Claude Code | Hook wiring: `Stop`, `PostToolUse` (matcher `Edit\|Write`) | Events, input fields and `CLAUDE_PROJECT_DIR` documented at <https://code.claude.com/docs/en/hooks> (verified 2026-08-17); block via exit 2; session-level firing not exercised (auth-gated) | `.claude/settings.json`, this document |
+| Codex CLI | Hook wiring: `Stop`, output `{"decision":"block","reason":"..."}` with a non-empty reason | Documented at <https://developers.openai.com/codex/hooks> (verified 2026-08-17); activation preconditions `[features] codex_hooks = true` and a trusted project are user-controlled and recorded, not simulated | `.codex/hooks.json`, this document |
+| OpenCode | Plugin uses only documented hooks: `event` (`event.type === "session.idle"`) and `tool.execute.before` (documented `output.args.filePath`; `output.args.patchText` for the `apply_patch` tool GPT-series sessions substitute for `edit`/`write` is a practical field recorded here). `tool.execute.after` is not used: its documented output shape `{title, output, metadata}` has no file-path field, so using it would be an undocumented-field guess | Documented at <https://opencode.ai/docs/plugins> (verified 2026-08-17); live-session events not exercised; blocking parity with Claude/Codex not claimed | `.opencode/plugins/pantheon-hooks.js`, this document |
+| Agent Skills | Conformance of every canonical `.agents/skills/<name>/SKILL.md` via the upstream reference tool `skills-ref` (pinned `==0.1.1`) | Specification at <https://agentskills.io/specification>; `skills-ref` is a reference/demonstration implementation, so its verdict is a conformance smoke signal, not a production guarantee | `.agents/skills/`, this document |
+| Workflow placement | Trigger is `schedule` + `workflow_dispatch` only | Never `pull_request`, so a compatibility failure never gates an ordinary PR | `.github/workflows/agent-surface-compatibility.yml` |
+
+The script's machine-readable copy of the matrix — the verified events/fields,
+the upstream references, and the verification date — lives in its header and is
+printed by every run, so the recorded contract and the checked contract cannot
+drift apart silently. Extending a surface means recording the new contract here
+and in the matrix first, then wiring it; a wired-but-unrecorded event fails the
+check on purpose so the human decides whether to keep it.
+
+### Behaviour of the workflow
+
+- Scheduled (weekly) and manually dispatched; never a required PR check.
+- Installs pinned tool versions best-effort; an install failure is surfaced as
+  an upstream availability signal, not masked.
+- A contract violation fails the scheduled run with an actionable diagnostic
+  naming the affected surface, tested version, failed assumption, and the
+  Pantheon file/document encoding it. It never auto-fixes: no adapter rewrites,
+  no support-claim changes, no Issues, no hook weakening. Follow-up is an
+  explicit human/mission decision.
+- `./scripts/verify.sh` remains the canonical gate and never depends on vendor
+  availability; the two are intentionally different altitudes.
+
+### Running locally
+
+`scripts/check-agent-surface-compatibility.sh --self-test` exercises the
+positive controls and the negative fixtures entirely against disposable scratch
+files; it needs no vendor tools and no network, and it is how the controlled
+negative case (a changed adapter/spec assumption becoming an actionable
+failure) stays reproducible. The default run checks the real adapters and
+reports whichever tools are installed as `unsupported-to-test` when they are
+absent — the workflow installs them. `--pin name=version` declares the expected
+version for attribution; the script reports the installed version and notes any
+difference.
+
 ## What hooks must never do
 
 Per Issue #21's constraints, restated here because it is the operative rule
