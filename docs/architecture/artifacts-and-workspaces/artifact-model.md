@@ -148,6 +148,8 @@ Evidence binds a Candidate/Artifact/GoalCompletionCandidate to a criterion + exa
 
 A `code.changeset` **must be complete from Pantheon's CAS plus its immutable manifest**. Pantheon must not depend on the repository's mutable/prunable Git object database as the only payload store.
 
+For integration correctness, completeness includes the exact changed-path **preimage** and **result** state needed to reconcile the changeset against a later target. Git object retention may accelerate richer integration, but it is not required to recover the changed-path semantics of a retained Artifact.
+
 ### Canonical identity
 
 The changeset manifest binds at least:
@@ -159,14 +161,35 @@ canonical ordered changed-path entries
 result-tree Git OID as optional/verification metadata where applicable
 ```
 
-Each changed-path entry is canonical data, conceptually:
+Each changed-path entry is canonical before/after data, conceptually:
 
 ```yaml
 - path: <lossless canonical path representation>
   operation: add | modify | delete
-  mode: <canonical repository file mode/type>
-  blob: sha256:<Pantheon CAS blob digest>   # add/modify only
+
+  before:
+    state: present | absent
+    mode: <canonical repository file mode/type>        # present only
+    blob: sha256:<Pantheon CAS blob digest>            # present payload where applicable
+
+  after:
+    state: present | absent
+    mode: <canonical repository file mode/type>        # present only
+    blob: sha256:<Pantheon CAS blob digest>            # present payload where applicable
 ```
+
+The operation and states must agree:
+
+```text
+add      -> before absent,  after present
+modify   -> before present, after present
+             including content, mode or supported type change
+delete   -> before present, after absent
+```
+
+`before` is authoritative only when derived by Pantheon from the resolved immutable base through controller-owned/trusted repository state or another equally authoritative immutable source. An Agent-supplied path, patch, local commit or claimed old blob can never define the preimage.
+
+`after` is authoritative only when captured from the exact settled Workspace state through the root-confined/no-follow capture boundary.
 
 For v1 Git-style code trees, supported content modes/types are conceptually:
 
@@ -177,15 +200,23 @@ symbolic link
 declared gitlink/submodule only where repository policy explicitly supports it
 ```
 
-For a regular/executable file, `blob` is the digest of that file's bytes captured from the exact confined source object.
+For a regular/executable file, a present-state `blob` is the digest of that file's bytes. For `before`, those bytes come from the immutable trusted base. For `after`, those bytes come from the exact confined Workspace source object.
 
-For a symbolic link, `mode` identifies symlink semantics (for Git, conventionally mode `120000`) and `blob` is the digest of the **link-target bytes themselves**. Pantheon never dereferences the link while constructing the Artifact. An absolute or escaping-looking target remains inert manifest/content data unless a later authorized materializer deliberately interprets it under its own safe policy.
+For a symbolic link, `mode` identifies symlink semantics (for Git, conventionally mode `120000`) and `blob` is the digest of the **link-target bytes themselves**. Pantheon never dereferences either the base-side or result-side link while constructing the Artifact. An absolute or escaping-looking target remains inert manifest/content data unless a later authorized materializer deliberately interprets it under its own safe policy.
 
 FIFOs, Unix sockets, block/character devices and undeclared filesystem/mount escapes are not valid v1 `code.changeset` payload entries. Capture rejects them rather than interacting with them as files.
 
-Entries are sorted by canonical path bytes. Deletion has no payload Blob. Rename is not a distinct identity requirement in v1; it may be represented as delete+add because semantic candidate identity is resulting content, not a diff heuristic.
+Entries are sorted by canonical path bytes. Rename is not a distinct identity requirement in v1; it may be represented as delete+add because semantic candidate identity is resulting changed-path state, not a diff heuristic.
 
 For repositories whose paths are not representable losslessly as normal UTF-8 strings, the manifest uses an explicitly lossless byte encoding rather than lossy path normalization.
+
+### Changed-path preimage completeness
+
+Every present `before` or `after` state whose semantics depend on payload bytes must reference immutable Pantheon CAS content. A retained changeset therefore retains the changed-path preimage bytes needed for later reconciliation as normal Artifact members.
+
+Pantheon does **not** need to duplicate the entire base repository in CAS. Only the preimage state for paths represented by the changeset is required by this contract.
+
+`baseCommit` remains useful provenance/verification metadata and may support richer repository-level integration when its Git objects remain available, but the preimage blobs in the changeset are what make changed-path integration independent of Task-local Git object retention.
 
 ### No Git-generated patch bytes in identity
 
@@ -199,7 +230,7 @@ If Pantheon ever standardizes a canonical patch representation, its exact format
 
 `baseCommit`, observed/result tree OIDs and worker commit OIDs are useful immutable Git identifiers and may be recorded for integration/reconciliation. But retaining those OIDs does not make Git's ODB the Artifact store.
 
-Pantheon CAS stores the changed regular/executable file bytes and symlink target bytes required to reconstruct/apply the changeset even if Git GC later prunes Task-local objects.
+Pantheon CAS stores both required changed-path preimage bytes and resulting regular/executable file bytes or symlink target bytes needed to reconcile/apply the changeset even if Git GC later prunes Task-local objects.
 
 ### Optional Git object pinning
 
@@ -235,22 +266,49 @@ Sealing a code candidate:
 Task Workspace mutable state
   ↓ controller pins trusted capture root
   ↓ controller captures WorkspaceRevision through root-confined/no-follow source reads
-  ↓ compare canonical final state to immutable base
-  ↓ copy regular/executable bytes and symlink-target bytes into Pantheon CAS
+  ↓ compare canonical final state to immutable trusted base
+  ↓ capture each changed path's authoritative before state from the immutable base
+  ↓ capture each changed path's authoritative after state from settled Workspace state
+  ↓ copy required before/after regular/executable bytes and symlink-target bytes into Pantheon CAS
   ↓ reject unsupported special filesystem objects
   ↓ build canonical code.changeset manifest
-  ↓ verify completeness/digests
+  ↓ verify before/after completeness/digests
   ↓ optional Git object pins
   ↓ commit Artifact/Candidate refs
 ```
 
-After this point Acceptance never needs to trust a mutable Workspace.
+After this point Acceptance never needs to trust a mutable Workspace, and later integration does not need Task-local base objects merely to recover the changed-path preimages.
 
 ## Integration
 
-Integration Controller consumes accepted immutable `code.changeset` content. It may materialize/reconstruct the result against the intended repository and perform a controlled three-way/application strategy with explicit expected target-ref CAS.
+Integration Controller consumes accepted immutable `code.changeset` content. It materializes/reconstructs the result against the intended repository and may perform a controlled changed-path three-way/application strategy with explicit expected target-ref CAS.
 
-An integration conflict does not invalidate the accepted Artifact; it means current external target state differs from the integration precondition.
+For each changed path, the canonical Artifact provides:
+
+```text
+base/preimage = before
+proposed      = after
+current       = authorized current target state
+```
+
+Useful deterministic cases include:
+
+```text
+current == before
+→ cleanly apply after
+
+current == after
+→ already applied / no-op for that path
+
+current differs from both
+→ perform the permitted three-way/conflict analysis
+```
+
+For text/content that the configured Integration policy can merge safely, the three semantic inputs are the current target bytes, Artifact `before` bytes, and Artifact `after` bytes. For binary, mode/type, structural or otherwise unsupported/ambiguous merges, Pantheon fails with an Integration conflict rather than guessing.
+
+This changed-path self-containment does not promise bit-for-bit reproduction of every Git history-aware merge algorithm. If the trusted repository still has `baseCommit`/tree objects, Integration Controller may use them for richer verification or repository-level merge behavior under its controller-owned Git boundary; absence of those optional objects cannot erase the Artifact's own before/after changed-path semantics.
+
+An integration conflict does not invalidate the accepted Artifact; it means current external target state differs from the integration precondition or cannot be reconciled safely under current integration policy.
 
 Materialization treats symlink-target bytes as symlink content according to the declared changeset mode; it does not substitute the contents of the path to which that symlink happens to resolve on the materializing host.
 
@@ -264,7 +322,7 @@ Active credential material is never an Artifact kind. `artifact.seal` cannot rea
 
 ## Garbage collection
 
-GC follows reachability/retention metadata, not mere age. Before deleting a Blob, Pantheon verifies no retained Artifact manifest references it. Before releasing optional Git object pins, Pantheon verifies no Integration/Workspace obligation still depends on them and the canonical CAS-complete Artifact remains available.
+GC follows reachability/retention metadata, not mere age. Before deleting a Blob, Pantheon verifies no retained Artifact manifest references it. For retained `code.changeset` Artifacts this includes required `before` preimage blobs as well as `after` result blobs. Before releasing optional Git object pins, Pantheon verifies no Integration/Workspace obligation still depends on them and the canonical CAS-complete Artifact remains available.
 
 ## Core invariants
 
@@ -274,9 +332,11 @@ GC follows reachability/retention metadata, not mere age. Before deleting a Blob
 4. Candidate is immutable/content-addressed and at most one exists per Run.
 5. Evidence is separate and bound to exact immutable subject/evaluator version.
 6. `code.changeset` is complete from canonical manifest + Pantheon CAS payload; it never relies solely on prunable Git ODB state.
-7. Git-generated patch text is not authoritative changeset identity in v1.
-8. Git OIDs/optional controller refs are useful verification/retention metadata, not a substitute for CAS-complete payload.
-9. Workspace-derived Artifact capture uses trusted-root, root-confined, no-follow source-object resolution; symlink payload is link-target bytes, never dereferenced target content.
-10. Unsupported special filesystem objects do not become v1 `code.changeset` payloads.
-11. Artifact refs are not bearer capabilities.
-12. Active secrets are never Artifacts.
+7. Every changed path carries canonical before/after state: before is derived from the trusted immutable base, after from the settled confined Workspace, and every required present-state payload is retained in CAS.
+8. A retained changeset therefore preserves the preimage/result material required to reconcile its changed paths against a later target even when Task-local Git base objects are gone.
+9. Git-generated patch text is not authoritative changeset identity in v1.
+10. Git OIDs/optional controller refs are useful verification/retention metadata, not a substitute for CAS-complete payload.
+11. Workspace-derived Artifact capture uses trusted-root, root-confined, no-follow source-object resolution; symlink payload is link-target bytes, never dereferenced target content.
+12. Unsupported special filesystem objects do not become v1 `code.changeset` payloads.
+13. Artifact refs are not bearer capabilities.
+14. Active secrets are never Artifacts.

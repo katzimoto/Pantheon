@@ -257,11 +257,19 @@ capture WorkspaceRevision through sterile projection/confined inspection
   ↓
 validate allowed path/scope + filesystem-object types
   ↓
-compare immutable base to final logical state
+compare immutable trusted base to final logical state
   ↓
-copy changed-file/symlink payload bytes through root-confined no-follow reads into Pantheon CAS
+for each changed path, derive authoritative before state
+from the resolved immutable base through controller-owned/sterile repository state
   ↓
-build canonical ordered code.changeset manifest
+for each changed path, capture authoritative after state
+from the settled Workspace through root-confined no-follow reads
+  ↓
+copy required before/after regular/executable bytes and symlink-target bytes into Pantheon CAS
+  ↓
+build canonical ordered code.changeset before/after manifest
+  ↓
+verify changed-path preimage/result completeness and digests
   ↓
 optional controller-owned Git object pins for efficiency
   ↓
@@ -269,6 +277,12 @@ commit Artifact + Candidate + Task/Run lifecycle transition
 ```
 
 The authoritative changeset payload is CAS-complete as defined by `docs/architecture/artifacts-and-workspaces/artifact-model.md`; it does not rely solely on Task Git ODB objects that later GC could prune.
+
+The worker cannot supply or override authoritative preimage state. An Agent-local patch, commit, index entry, claimed old blob or Agent-writable Git object database is untrusted input. The `before` side is derived from the durable resolved base using controller-owned/trusted Git state or another equally authoritative immutable source.
+
+The `after` side remains subject to the existing Workspace capture boundary: source objects are read from the exact settled Workspace through root-confined/no-follow traversal, with symlinks represented as link-target bytes and unsupported special objects rejected.
+
+Only changed-path preimages are copied into CAS. Pantheon does not duplicate the entire base repository merely to make a small changeset self-contained.
 
 ## Path/scope validation
 
@@ -314,13 +328,42 @@ IntegrationIntent is persisted before mutating shared Git refs.
 
 ## Controlled integration
 
-Integration Controller materializes the accepted CAS-complete changeset and computes a controlled three-way/application result against the intended repository state.
+Integration Controller materializes the accepted CAS-complete changeset and computes a controlled changed-path three-way/application result against the intended repository state.
 
 Default v1 may use squash-style integration regardless of worker-local commit history. Worker commits remain provenance/development checkpoints, not authoritative branch history.
 
-Conflict means the current target state cannot satisfy the recorded integration preconditions; it does not invalidate the accepted Artifact.
+The canonical changeset itself supplies each changed path's immutable trusted `before` state and proposed `after` state. Integration observes the authorized current target state independently.
+
+Per changed path, useful deterministic cases are:
+
+```text
+current == before
+→ apply after cleanly
+
+current == after
+→ already applied / no-op for that path
+
+current differs from before and after
+→ use the configured permitted three-way/conflict strategy
+```
+
+For mergeable text/content, the semantic three-way inputs are:
+
+```text
+base    = Artifact.before
+current = current authorized target state
+other   = Artifact.after
+```
+
+For binary content, incompatible mode/type transitions, structural conflicts, unsupported gitlink/submodule semantics or any other case where current policy cannot establish a deterministic safe result, Integration Controller records a conflict rather than guessing.
+
+This changed-path self-containment does not promise bit-for-bit reproduction of every Git history-aware merge algorithm. When the trusted integration repository still contains `baseCommit`/tree objects, Integration Controller may use controller-owned Git machinery for richer repository-level verification/merge behavior. Those Git objects are optional acceleration/context; absence of Task-local base objects cannot erase the accepted Artifact's before/after changed-path semantics.
+
+Conflict means the current target state cannot satisfy the recorded integration preconditions or cannot be reconciled safely under current integration policy; it does not invalidate the accepted Artifact.
 
 Integration Git execution uses controller-owned/trusted repository state or another explicitly confined projection. Accepted Artifact bytes are data; they do not make repository-controlled configuration from a producer Workspace trustworthy.
+
+Materializing a symlink `before`/`after` state uses the recorded link-target bytes as repository content. It never dereferences that target on the materializing host to obtain replacement content.
 
 ## Git ref CAS
 
@@ -348,11 +391,13 @@ Crash between Git mutation and DB result is recovered by comparing expected targ
 
 ## Git object retention
 
-If integration/materialization temporarily relies on repository Git objects, controller may create refs under a Pantheon-owned namespace to pin those objects before committing a DB obligation that assumes continued availability.
+If integration/materialization temporarily benefits from repository Git objects, controller may create refs under a Pantheon-owned namespace to pin those objects.
 
 Pins are created only through controller-owned/trusted Git control state. Pantheon does not obtain host authority merely by pointing a privileged Git process at an Agent-writable object database or repository configuration.
 
-Those Git pins are storage optimization/retention, not `code.changeset` identity. The canonical Artifact remains reconstructable from Pantheon CAS.
+Those Git pins are storage optimization/retention, not `code.changeset` identity or a correctness prerequisite. A retained changeset's changed-path preimages and result payloads remain reconstructable from Pantheon CAS even after the optional Git pins or Task-local objects disappear.
+
+A controller must not commit an Integration obligation whose correctness depends on optional Git objects unless it either pins them under trusted controller state for the lifetime of that narrower operation or has a fail-closed fallback to the canonical CAS before/after semantics. Optional richer Git behavior may disappear; Artifact correctness may not.
 
 ## Startup reconciliation
 
@@ -375,7 +420,7 @@ Reconciliation of Agent-writable Git state follows the hostile-repository rule a
 
 ## Cleanup
 
-Workspace cleanup occurs only after required Candidate/Artifact/Integration data is durably preserved. Releasing the Workspace never deletes the only copy of accepted Task output.
+Workspace cleanup occurs only after required Candidate/Artifact/Integration data is durably preserved. Releasing the Workspace never deletes the only copy of accepted Task output or the only changed-path preimage required by a retained accepted changeset.
 
 Task terminalization, explicit reset/recovery and retention policy decide Workspace release. Run terminalization alone normally does not release a Task Workspace if Task may continue.
 
@@ -405,11 +450,14 @@ Workspace policy and Sandbox policy jointly enforce these boundaries.
 5. Worker commits/staging are not Candidate identity.
 6. WorkspaceRevision captures exact logical state without mutating worker staging semantics.
 7. `code.changeset` is CAS-complete and remains valid even if Task Git objects are later GC'd.
-8. Acceptance uses immutable sealed content, not live producer Workspace.
-9. Task success does not imply merge/push.
-10. IntegrationIntent precedes external shared-ref mutation and Git target update is CAS-protected/reconciled.
-11. Sandbox and Workspace isolation are distinct and both are required where applicable.
-12. Agent-writable repository state is untrusted input; Pantheon never executes a repository-configurable tool against it with ambient daemon/control-plane authority.
-13. Agent-writable filesystem structure is untrusted input; privileged capture is rooted in durable Workspace state, root-confined and no-follow, and never dereferences Agent-created indirection with ambient authority.
-14. Symlinks may be repository content but are captured as link-target bytes, never as dereferenced target content; unsupported special filesystem objects fail closed in v1.
-15. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.
+8. Every changed path's `before` state is derived from the trusted immutable base, never from Agent-claimed Git/preimage state; every `after` state is captured from the settled Workspace through the confined capture boundary.
+9. Retained changesets preserve required changed-path preimage and result payload in CAS, so integration correctness does not depend on Task-local base Git objects surviving.
+10. Acceptance uses immutable sealed content, not live producer Workspace.
+11. Task success does not imply merge/push.
+12. IntegrationIntent precedes external shared-ref mutation and Git target update is CAS-protected/reconciled.
+13. Integration may use optional trusted Git objects for richer behavior, but unsupported/ambiguous CAS-only reconciliation fails as an Integration conflict rather than guessing.
+14. Sandbox and Workspace isolation are distinct and both are required where applicable.
+15. Agent-writable repository state is untrusted input; Pantheon never executes a repository-configurable tool against it with ambient daemon/control-plane authority.
+16. Agent-writable filesystem structure is untrusted input; privileged capture is rooted in durable Workspace state, root-confined and no-follow, and never dereferences Agent-created indirection with ambient authority.
+17. Symlinks may be repository content but are captured as link-target bytes, never as dereferenced target content; unsupported special filesystem objects fail closed in v1.
+18. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.
