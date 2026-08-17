@@ -69,8 +69,9 @@ were done.
 3. Read `docs/architecture/overview.md` if you need the system model and do not
    already have it.
 4. Use `docs/architecture/README.md` to find the domain the task touches. It
-   carries reading recipes for common kinds of change; follow the matching one
-   instead of reading the tree.
+   maps the domains and links the change-specific reading recipes in
+   `docs/architecture/recipes.md`; follow the matching recipe instead of
+   reading the tree.
 5. Read only the contracts it names, then the relevant schemas, then
    implementation and tests where they exist.
 6. For a code change, read `docs/development/implementation.md` to place it:

@@ -1,0 +1,53 @@
+{
+  "eval_id": "skill-evals-infrastructure",
+  "skill": "agent-context-layout",
+  "condition": "candidate_a",
+  "agent_surface": "OpenCode general subagent (deepseek-v4-flash-free), single-session author demonstration, planning-only",
+  "skill_source": "b42af4f + candidate A edits: AGENTS.md 174 lines; docs/architecture/README.md 217 lines (map only, links recipes.md); docs/architecture/recipes.md 99 lines",
+  "observed_result": "Plan opens by establishing that the mission's outcome already exists on main (PR #53) and that the plan is a delta confirmation, not blind implementation; also notes unrelated uncommitted layout changes are out of scope for #48 and must not be absorbed. Documents in order: AGENTS.md, docs/README.md, docs/architecture/README.md, docs/architecture/recipes.md, docs/development/README.md, then the two contracts owning the subject: agent-skills-and-hooks.md and skill-evals.md, plus implementation.md, missions.md, change-lifecycle.md, scripts/verify.sh, check-skill-conformance.sh, run-skill-evals.py, check-skill-symlinks.sh. Skills: pantheon-mission-planning (first), pantheon-change-verification (before completion), pantheon-pr-evidence / pantheon-independent-review only if a PR is created. Placement: repository tooling only — scripts/ (deterministic check wired into verify.sh), docs/development/skill-evals.md (canonical two-layer contract), .agents/skills/<name>/evals/; the authority split is fixed: conformance -> gate, behavioral evals -> experimental evidence, never verify.sh. Evidence: deterministic checks present in ./scripts/verify.sh with --self-test, probabilistic harness reproducible and documented as non-gate, fixtures + recorded with/without comparison; if no delta is found the negative finding is itself the evidence. Verification: ./scripts/verify.sh plus reproducible paths (check-skill-conformance.sh --self-test, run-skill-evals.py list/benchmark).",
+  "grader": "Graded against the five fixture assertions. All five pass. The split map did not degrade the repository-infrastructure route: the agent still reached the development-process documents and no architecture recipe was expected for this change.",
+  "assertion_results": [
+    {
+      "text": "The plan retrieves docs/development/agent-skills-and-hooks.md and docs/development/skill-evals.md",
+      "passed": true,
+      "evidence": "Both named as 'the two contracts that own this mission's subject'."
+    },
+    {
+      "text": "The plan keeps deterministic conformance inside verify.sh and behavioral evaluation separate from it",
+      "passed": true,
+      "evidence": "'conformance -> gate; behavioral evals -> experimental evidence, never verify.sh'."
+    },
+    {
+      "text": "The plan invokes pantheon-mission-planning and pantheon-change-verification",
+      "passed": true,
+      "evidence": "Both named with correct triggers."
+    },
+    {
+      "text": "The plan names ./scripts/verify.sh as the completion gate",
+      "passed": true,
+      "evidence": "'./scripts/verify.sh from the repo root'."
+    },
+    {
+      "text": "The plan does not broaden scope into a general-purpose evaluation framework",
+      "passed": true,
+      "evidence": "Recognized the existing harness as sufficient; proposed delta-confirmation rather than a new framework, and refused to absorb unrelated working-tree changes."
+    }
+  ],
+  "coverage": {
+    "covered": [
+      "docs/development/agent-skills-and-hooks.md and skill-evals.md",
+      "deterministic conformance in the verify.sh gate",
+      "behavioral evaluation separate from the gate",
+      "scripts/ + docs/development/ placement",
+      "mission scope discipline (existing state recognized)",
+      "mandatory skills and ./scripts/verify.sh"
+    ],
+    "omissions": [],
+    "invented_requirements": []
+  },
+  "context_cost": {
+    "tokens": 2400,
+    "duration_ms": null,
+    "tool_calls": 15
+  }
+}

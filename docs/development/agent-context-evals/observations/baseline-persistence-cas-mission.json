@@ -1,0 +1,54 @@
+{
+  "eval_id": "persistence-cas-mission",
+  "skill": "agent-context-layout",
+  "condition": "baseline",
+  "agent_surface": "OpenCode general subagent (deepseek-v4-flash-free), single-session author demonstration, planning-only",
+  "skill_source": "current tree @ b42af4f: AGENTS.md 173 lines; docs/architecture/README.md 304 lines (Reading recipes inline)",
+  "observed_result": "Plan names canonical documents in order: AGENTS.md, docs/README.md, docs/architecture/overview.md, docs/architecture/README.md, docs/development/implementation.md, then the persistence-and-recovery contracts (sqlite-persistence-and-transactions.md, global-recovery-and-crash-reconciliation.md, recovery-policy.md) plus run-and-attempt.md; conditional reads deferred to backup-and-restore.md and event-and-observability-model.md per the persistence recipe. Skills invoked: pantheon-mission-planning (before planning), persistence-and-recovery-transaction-review (drives the invariant-family checklist), dependency-change-procedure (if a SQLite driver is added), pantheon-change-verification (before completion). Placement: crates/pantheon-store (owns connection policy, migrations, transaction boundaries, row/domain mapping, invariant checks), domain persistence-and-recovery; the CAS write anchored in sqlite-persistence-and-transactions.md (revision via WHERE run_id=? AND revision=?, increment, exactly one affected row, BEGIN IMMEDIATE, WAL/synchronous=FULL, no external effect inside the transaction). Evidence: revisioned-CAS race test (exactly one commits, typed stale/conflict outcome), required transaction/write-mode assertion, injected mid-transaction failure proving full rollback, concurrency/race test, persistence-invariant coverage. Verification: ./scripts/verify.sh after the final change.",
+  "grader": "Graded against the five fixture assertions. All five pass. Coverage names the persistence domain contracts, correct crate placement, both mandatory skills, verify.sh, and a typed stale/conflict outcome plus CAS race and mid-transaction rollback evidence.",
+  "assertion_results": [
+    {
+      "text": "The plan names the persistence-and-recovery domain contracts as the canonical retrieval",
+      "passed": true,
+      "evidence": "Names sqlite-persistence-and-transactions.md, global-recovery-and-crash-reconciliation.md, recovery-policy.md and conditional consults from the persistence recipe."
+    },
+    {
+      "text": "The plan places the implementation in crates/pantheon-store",
+      "passed": true,
+      "evidence": "'Crate: pantheon-store' with ownership rationale and the pantheon-store -> pantheon-core edge."
+    },
+    {
+      "text": "The plan invokes pantheon-mission-planning before planning and persistence-and-recovery-transaction-review for the change",
+      "passed": true,
+      "evidence": "Both skills named, plus dependency-change-procedure and pantheon-change-verification."
+    },
+    {
+      "text": "The plan names ./scripts/verify.sh as the completion gate",
+      "passed": true,
+      "evidence": "'Run ./scripts/verify.sh after the final change'."
+    },
+    {
+      "text": "The plan does not broaden scope to unrelated subsystems",
+      "passed": true,
+      "evidence": "Stays on persistence; backup/event/execution reads kept conditional."
+    }
+  ],
+  "coverage": {
+    "covered": [
+      "persistence-and-recovery domain contracts",
+      "revision/CAS with exactly-one-affected-row check",
+      "transaction mode (BEGIN IMMEDIATE, WAL, synchronous=FULL)",
+      "typed stale/conflict outcome",
+      "no external effect inside the transaction",
+      "crates/pantheon-store placement",
+      "mandatory skills and ./scripts/verify.sh"
+    ],
+    "omissions": [],
+    "invented_requirements": []
+  },
+  "context_cost": {
+    "tokens": 2600,
+    "duration_ms": null,
+    "tool_calls": 16
+  }
+}

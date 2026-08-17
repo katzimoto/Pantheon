@@ -1,0 +1,66 @@
+[
+  {
+    "eval_id": "persistence-cas-mission",
+    "skill": "agent-context-layout",
+    "trigger": "positive",
+    "prompt": "Start working on Engineering Mission #17: \"Pantheon can perform a revisioned authoritative write — a `Run` status row update in `pantheon-store` guarded by a revision/CAS predicate inside a transaction — without weakening durable-state guarantees.\" Produce a pre-edit plan: which canonical documents to read and in what order, which Pantheon skills to invoke, where the implementation belongs, what evidence the change must carry, and how to verify it when done.",
+    "expected_output": "Follows AGENTS.md start-here: reads docs/README.md, then docs/architecture/README.md, retrieves the persistence-and-recovery domain contracts (sqlite-persistence-and-transactions.md, global-recovery-and-crash-reconciliation.md, recovery-policy.md) and the conditional consults from the persistence recipe, reads docs/development/implementation.md to place the change in crates/pantheon-store, invokes pantheon-mission-planning before planning and persistence-and-recovery-transaction-review for the change, and plans ./scripts/verify.sh at completion. Stays in mission scope.",
+    "assertions": [
+      "The plan names the persistence-and-recovery domain contracts as the canonical retrieval",
+      "The plan places the implementation in crates/pantheon-store",
+      "The plan invokes pantheon-mission-planning before planning and persistence-and-recovery-transaction-review for the change",
+      "The plan names ./scripts/verify.sh as the completion gate",
+      "The plan does not broaden scope to unrelated subsystems"
+    ],
+    "condition": "baseline",
+    "layout": "current tree @ b42af4f: AGENTS.md 173 lines; docs/architecture/README.md 304 lines with the Reading recipes section inline"
+  },
+  {
+    "eval_id": "persistence-cas-mission",
+    "skill": "agent-context-layout",
+    "trigger": "positive",
+    "prompt": "Start working on Engineering Mission #17: \"Pantheon can perform a revisioned authoritative write — a `Run` status row update in `pantheon-store` guarded by a revision/CAS predicate inside a transaction — without weakening durable-state guarantees.\" Produce a pre-edit plan: which canonical documents to read and in what order, which Pantheon skills to invoke, where the implementation belongs, what evidence the change must carry, and how to verify it when done.",
+    "expected_output": "Follows AGENTS.md start-here: reads docs/README.md, then docs/architecture/README.md, retrieves the persistence-and-recovery domain contracts (sqlite-persistence-and-transactions.md, global-recovery-and-crash-reconciliation.md, recovery-policy.md) and the conditional consults from the persistence recipe, reads docs/development/implementation.md to place the change in crates/pantheon-store, invokes pantheon-mission-planning before planning and persistence-and-recovery-transaction-review for the change, and plans ./scripts/verify.sh at completion. Stays in mission scope.",
+    "assertions": [
+      "The plan names the persistence-and-recovery domain contracts as the canonical retrieval",
+      "The plan places the implementation in crates/pantheon-store",
+      "The plan invokes pantheon-mission-planning before planning and persistence-and-recovery-transaction-review for the change",
+      "The plan names ./scripts/verify.sh as the completion gate",
+      "The plan does not broaden scope to unrelated subsystems"
+    ],
+    "condition": "candidate_a",
+    "layout": "b42af4f + candidate A edits: AGENTS.md 174 lines (recipe location named in start-here); docs/architecture/README.md 217 lines (map only, links recipes.md); docs/architecture/recipes.md 99 lines (conditional retrieval)"
+  },
+  {
+    "eval_id": "skill-evals-infrastructure",
+    "skill": "agent-context-layout",
+    "trigger": "positive",
+    "prompt": "Start working on Engineering Mission #48: \"Pantheon has a small, reproducible evaluation layer for repository-local Agent Skills that distinguishes deterministic format/conformance checks from probabilistic agent-behavior evaluation, while AGENTS.md, canonical documentation and ./scripts/verify.sh remain authoritative.\" Produce a pre-edit plan: which canonical documents to read and in what order, which Pantheon skills to invoke, where the implementation belongs, what evidence the change must carry, and how to verify it when done.",
+    "expected_output": "Routes to the development-process documents (docs/development/README.md, agent-skills-and-hooks.md, skill-evals.md), plans a deterministic conformance check in scripts/ wired into verify.sh and a separate probabilistic harness kept out of the gate, invokes pantheon-mission-planning and pantheon-change-verification, and plans ./scripts/verify.sh. Does not propose a general benchmark framework.",
+    "assertions": [
+      "The plan retrieves docs/development/agent-skills-and-hooks.md and docs/development/skill-evals.md",
+      "The plan keeps deterministic conformance inside verify.sh and behavioral evaluation separate from it",
+      "The plan invokes pantheon-mission-planning and pantheon-change-verification",
+      "The plan names ./scripts/verify.sh as the completion gate",
+      "The plan does not broaden scope into a general-purpose evaluation framework"
+    ],
+    "condition": "baseline",
+    "layout": "current tree @ b42af4f: AGENTS.md 173 lines; docs/architecture/README.md 304 lines with the Reading recipes section inline"
+  },
+  {
+    "eval_id": "skill-evals-infrastructure",
+    "skill": "agent-context-layout",
+    "trigger": "positive",
+    "prompt": "Start working on Engineering Mission #48: \"Pantheon has a small, reproducible evaluation layer for repository-local Agent Skills that distinguishes deterministic format/conformance checks from probabilistic agent-behavior evaluation, while AGENTS.md, canonical documentation and ./scripts/verify.sh remain authoritative.\" Produce a pre-edit plan: which canonical documents to read and in what order, which Pantheon skills to invoke, where the implementation belongs, what evidence the change must carry, and how to verify it when done.",
+    "expected_output": "Routes to the development-process documents (docs/development/README.md, agent-skills-and-hooks.md, skill-evals.md), plans a deterministic conformance check in scripts/ wired into verify.sh and a separate probabilistic harness kept out of the gate, invokes pantheon-mission-planning and pantheon-change-verification, and plans ./scripts/verify.sh. Does not propose a general benchmark framework.",
+    "assertions": [
+      "The plan retrieves docs/development/agent-skills-and-hooks.md and docs/development/skill-evals.md",
+      "The plan keeps deterministic conformance inside verify.sh and behavioral evaluation separate from it",
+      "The plan invokes pantheon-mission-planning and pantheon-change-verification",
+      "The plan names ./scripts/verify.sh as the completion gate",
+      "The plan does not broaden scope into a general-purpose evaluation framework"
+    ],
+    "condition": "candidate_a",
+    "layout": "b42af4f + candidate A edits: AGENTS.md 174 lines (recipe location named in start-here); docs/architecture/README.md 217 lines (map only, links recipes.md); docs/architecture/recipes.md 99 lines (conditional retrieval)"
+  }
+]
