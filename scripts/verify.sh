@@ -22,7 +22,9 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-# Structural checks. Both are POSIX shell and finish in about a second.
+# Structural checks. All POSIX shell, and together they finish in about a
+# second. The action pin check needs no toolchain at all, so it runs first.
+./scripts/check-action-pins.sh
 ./scripts/check-docs-links.sh
 ./scripts/check-crate-deps.sh
 

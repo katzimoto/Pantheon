@@ -21,7 +21,9 @@ jobs:
     name: Validate documentation structure
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      # Pinned to a full-length commit SHA, the only immutable way to
+      # reference an action, and enforced by scripts/check-action-pins.sh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # POSIX sh, no dependencies, so there is nothing to install or cache.
       # Verifies that every documentation reference resolves and that the

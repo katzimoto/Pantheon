@@ -430,3 +430,37 @@ exists and keeps its stable headings.
 It does not grade PR evidence, reviewer judgment, or handoff quality. Those are
 semantic judgments, and pretending a shell check can make them reliably would
 create false confidence.
+
+### Action references are immutable
+
+Repository validation is the evidence a candidate change is sound, so what runs
+it has to be exactly what was reviewed. A tag or a branch is a moving pointer
+owned by whoever controls the action's repository: the same reference can mean
+different code on two runs, and the reference does not say so. A full-length
+commit SHA is currently the only immutable way to name an action.
+
+Every `uses:` reference in a workflow, and in any composite action this
+repository later defines, therefore states a full-length commit SHA, and records
+the release that SHA corresponds to as a trailing comment:
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+The comment is not decoration. A bare SHA cannot be reviewed or updated without
+first decoding it, and a pin nobody can read is a pin nobody revisits. A
+reference beginning with `./` is a local action from this repository at this
+commit, and needs neither.
+
+`scripts/check-action-pins.sh` enforces the shape, so a mutable reference fails
+verification rather than reaching review. It cannot tell whether a recorded
+release name is true — that requires the network, and `scripts/verify.sh`
+deliberately needs nothing beyond the pinned toolchain and ordinary build
+prerequisites. Resolve a pin against the action's own repository when you write
+it; a SHA copied from documentation or another project is not evidence that it
+is the release it claims to be.
+
+Updating a pin is an ordinary change, made deliberately and reviewed like any
+other. Pantheon has no automatic dependency-update bot, and adding one is a
+separate decision — it reintroduces the question of who reviews an automated
+bump.
