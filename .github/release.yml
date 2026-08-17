@@ -1,29 +1,10 @@
-# Native GitHub generated release notes are a fallback/sanity-check projection.
-# Pantheon's authoritative release scope comes from the Version Milestone and
-# its Engineering Missions; scripts/version-automation.py generates that view.
+# Native GitHub generated release notes are a supplemental merged-PR view only.
+# Pantheon's authoritative release scope and changelog come from the Version
+# Milestone and its Engineering Mission labels; scripts/version-automation.py
+# generates that release projection. Do not duplicate Mission changelog labels
+# onto pull requests merely to influence this fallback view.
 changelog:
-  exclude:
-    labels:
-      - changelog:none
   categories:
-    - title: Added
-      labels:
-        - changelog:added
-    - title: Changed
-      labels:
-        - changelog:changed
-    - title: Deprecated
-      labels:
-        - changelog:deprecated
-    - title: Removed
-      labels:
-        - changelog:removed
-    - title: Fixed
-      labels:
-        - changelog:fixed
-    - title: Security
-      labels:
-        - changelog:security
-    - title: Other Changes
+    - title: Merged pull requests (supplemental)
       labels:
         - "*"
