@@ -336,9 +336,12 @@ Security-relevant Events may reference authorization records:
 data:
   authorization:
     decision: authz_712
-    policyHash: sha256:...
+    configRevision: cfgrev_43
+    authzPolicyDigest: sha256:...
     grant: grant_42
 ```
+
+`configRevision` identifies the active configuration snapshot used by the authorization decision; `authzPolicyDigest` identifies the exact immutable AuthorizationComponent content within that revision. Pantheon does not use an ambiguous generic `policyHash` for authorization audit evidence.
 
 Never place bearer capability tickets, secret values, credentials or API keys in the Event Journal.
 

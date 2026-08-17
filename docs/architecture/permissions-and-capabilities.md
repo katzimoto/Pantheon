@@ -113,7 +113,7 @@ Operator-controlled policy is compiled into immutable ConfigurationRevision comp
 
 ```text
 configRevision
-currentAuthzPolicyDigest
+authzPolicyDigest
 frozen Run authorization ceiling digest (for Run principals)
 Task/Goal restrictions
 Grant refs actually consumed
