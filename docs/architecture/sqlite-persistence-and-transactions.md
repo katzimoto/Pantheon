@@ -540,6 +540,27 @@ EvaluationRound pins Candidate/acceptance/evaluator versions. External determini
 
 A billable EvaluationOperation that accepts backend-authored factual usage carries immutable operation-intent fields equivalent to `usage_reporter_backend_id`, `usage_reporter_backend_revision`, and `metering_contract_digest`, frozen before external contact. These fields are nullable only as an all-or-none group for operations with no backend-authored metering and are never mutable lifecycle status.
 
+Each externally executing EvaluationAttempt carries its own durable launch-contact state:
+
+```text
+evaluation_attempts
+  id
+  operation_id
+  ordinal
+  state
+  launch_contact_state                 NOT_CONTACTED|CONTACT_MAY_HAVE_OCCURRED
+  launch_contact_initiated_at          nullable until contact transition
+  launch_contact_daemon_incarnation    nullable until contact transition
+```
+
+Creation initializes `launch_contact_state = NOT_CONTACTED`. Immediately before the first external evaluator/process/remote-check call for that EvaluationAttempt, T15 durably changes it to `CONTACT_MAY_HAVE_OCCURRED` and records timestamp/incarnation. The transition is monotonic and never resets.
+
+`EvaluationAttempt.id` is the stable provider-neutral reconciliation identity. External helpers/backends may bind that identity to native state/attachments where supported, but absence of native keyed idempotency leaves ambiguous contact UNKNOWN rather than authorizing a new attempt.
+
+At most one nonterminal EvaluationAttempt may exist per EvaluationOperation. Because attempt lifecycle state is relational on `evaluation_attempts`, v1 enforces this with a partial unique index/constraint over `operation_id` for the nonterminal state domain. A new EvaluationAttempt is permitted only after the prior one is definitively terminal/absent under bounded evaluation retry policy.
+
+For usage reconciliation, an EvaluationOperation whose every attempt is durably `NOT_CONTACTED` and has no independent external-contact evidence cannot justify backend-authored usage. `CONTACT_MAY_HAVE_OCCURRED` permits only factual reconciliation under the frozen H1 metering-source provenance; it does not prove that usage occurred.
+
 ## Secret metadata
 
 SQLite stores only SecretDescriptor/provider locator/non-secret random version IDs/status/intents/lease metadata/use records. It never stores long-lived secret bytes or hashes of secret bytes.
@@ -610,6 +631,8 @@ Finalizing Run -> terminal_target present
 Completed Run -> Candidate exists
 one nonterminal Attempt per Run
 one current AgentControlSession per Attempt
+one nonterminal EvaluationAttempt per EvaluationOperation
+EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
 one live Task-scoped reservation per singular (Task, ResourceKey)
 Reservation holder validity
 Budget aggregate == immutable ledger reconstruction
@@ -645,7 +668,10 @@ T11 WORKSPACE/SANDBOX DESIRED STATE
 T12 INTEGRATION STATE
 T13 CONFIGURATION ACTIVATION
 T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
+T15 EVALUATION LAUNCH CONTACT MARKER
 ```
+
+T15 is a short authoritative transaction that verifies the EvaluationAttempt is current/nonterminal and still `NOT_CONTACTED`, then atomically sets `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, records initiation time/daemon incarnation, and appends its Event. Only after T15 commits may Pantheon cross that attempt's external evaluator/process call boundary. No external process/backend/runtime call occurs inside T15.
 
 Never perform network/Git/process/backend/secret-store/container-runtime calls inside a SQLite transaction.
 
@@ -657,7 +683,7 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 4. JSON is never a substitute for ownership/revision/accounting columns.
 5. Task-scoped reservations are unique/reused across Runs.
 6. Run Finalizing always records terminalTarget; only Completed requires Candidate.
-7. Launch contact boundary is durable before external launch call.
+7. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
 8. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
 9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
 10. Disaster restore rotates a fresh unpredictable RestoreGeneration before any new authority-bearing mutation/effect; restored Grants/Tickets cannot redeem and restored broker operations cannot be reissued from stale state.

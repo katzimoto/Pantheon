@@ -452,21 +452,57 @@ Evaluation retry policy is bounded and applies only to infrastructure/observatio
 
 This small EvaluationAttempt relation is internal to evaluation and does not reuse Task Run/Attempt semantics.
 
+At most one EvaluationAttempt may be nonterminal for an EvaluationOperation. A replacement EvaluationAttempt is created only after the prior attempt is definitively terminal or definitively absent under the evaluation retry policy. `EvaluationAttempt.id` is the stable provider-neutral execution/reconciliation identity; an evaluator helper/backend may map it to opaque native attachment or keyed-launch state, but Pantheon does not fabricate keyed-idempotent semantics where the executor cannot provide them.
+
 ## 22. Crash reconciliation
 
-Externally executing EvaluationOperations follow the same global side-effect discipline as other Pantheon controllers:
+The external execution boundary is persisted **per EvaluationAttempt**, not merely per EvaluationOperation. The operation may have bounded sequential retries, so each attempt must independently record whether its launch path crossed the point where an external evaluator/process could have been contacted.
+
+Canonical flow:
 
 ```text
 durable EvaluationOperation intent
         ↓
-durable launch/contact marker
+verification Sandbox/materialization becomes ready as required
         ↓
-external sandbox/process execution
+durable EvaluationAttempt created
+  launch_contact_state = NOT_CONTACTED
+        ↓
+T15: durable launch-contact transition
+  CONTACT_MAY_HAVE_OCCURRED
+        ↓
+external evaluator/process execution
         ↓
 observation/reconciliation
 ```
 
-If execution may still exist after a daemon crash, Pantheon does not launch an overlapping replacement until the prior operation is reconciled or safely terminated.
+The marker is monotonic:
+
+```text
+NOT_CONTACTED
+    ↓
+CONTACT_MAY_HAVE_OCCURRED
+```
+
+It is never reset to `NOT_CONTACTED`.
+
+Crash semantics are:
+
+```text
+NOT_CONTACTED
++ no independent external evidence
+→ Pantheon knows its evaluator-launch path never crossed the external-call boundary
+→ launch/reconciliation may proceed as not applied
+
+CONTACT_MAY_HAVE_OCCURRED
+→ the external launch may have happened even if acknowledgement was lost
+→ execution outcome is UNKNOWN until the same EvaluationAttempt identity is reconciled or safely terminated
+→ no overlapping EvaluationAttempt may be created
+```
+
+Sandbox provisioning has its own durable SandboxKey/provisioning reconciliation contract. This EvaluationAttempt marker protects the evaluator/process/remote-check launch boundary and does not duplicate Sandbox lifecycle truth.
+
+Where backend-authored billable usage exists, a lineage durably proven `NOT_CONTACTED` with no independent external-contact evidence cannot justify backend-authored usage. Once any EvaluationAttempt reached `CONTACT_MAY_HAVE_OCCURRED`, delayed usage remains admissible subject to the immutable H1 metering-source provenance and normal idempotency checks; current terminal state is still not a usage-truth predicate.
 
 ## 23. Human evaluation
 
@@ -569,6 +605,9 @@ evaluation_attempts
   operation_id
   ordinal
   state
+  launch_contact_state
+  launch_contact_initiated_at nullable
+  launch_contact_daemon_incarnation nullable
 
 human_evaluation_requests
   id
@@ -576,6 +615,8 @@ human_evaluation_requests
   criterion_id
   state
 ```
+
+`evaluation_attempts.launch_contact_state` is created as `NOT_CONTACTED` and may transition only to `CONTACT_MAY_HAVE_OCCURRED`. The timestamp/incarnation are written with that transition and are provenance, not a separate evaluation ownership epoch. At most one nonterminal EvaluationAttempt exists per EvaluationOperation; the persistence layer enforces this with a partial unique constraint/index over the operation identity and nonterminal state domain.
 
 The metering-source columns are immutable operation intent and are either absent together for a non-backend-metered operation or complete together before external contact. They are not an ExecutionBinding.
 
@@ -665,3 +706,5 @@ Defer:
 11. **Registry changes never rewrite historical Evidence or existing Task acceptance semantics.**
 12. **Model-based authoritative evaluation is deferred from v1.**
 13. **Backend-authored EvaluationOperation usage is accepted only from the backend frozen in immutable operation-level metering provenance; that binding does not redefine EvaluationOperation lifecycle/execution ownership.**
+14. **Every externally executing EvaluationAttempt has a durable monotonic launch-contact marker committed before its external evaluator/process call.**
+15. **At most one EvaluationAttempt per EvaluationOperation is nonterminal; ambiguous contact remains on the same attempt identity and never authorizes an overlapping retry.**
