@@ -16,12 +16,12 @@ This document resolves the previously unspecified relationship between `Task Wai
 
 See also:
 
-- `docs/architecture/task-spawn-and-dynamic-graphs.md`
-- `docs/architecture/task-lifecycle.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/scheduler-resource-ledger-and-admission.md`
-- `docs/architecture/scheduler-reservations-ownership-and-leases.md`
-- `docs/architecture/agent-control-channel.md`
+- `docs/architecture/tasks/task-spawn-and-dynamic-graphs.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/scheduling/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/scheduling/scheduler-reservations-ownership-and-leases.md`
+- `docs/architecture/execution/agent-control-channel.md`
 
 ## 1. Pantheon does not suspend a live Run in v1
 

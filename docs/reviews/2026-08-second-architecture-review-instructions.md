@@ -1,5 +1,9 @@
 # Pantheon Second Architecture Review Instructions
 
+## Status
+
+Review process material from August 2026: the brief written for a second adversarial review. **Not canonical** — see `docs/reviews/README.md`. The decisions it summarizes were current when it was written; read the referenced subsystem contracts under `docs/architecture/` for the present rules.
+
 ## Mission
 
 Perform a **second adversarial architecture review** of Pantheon after the first-review correction sweep.

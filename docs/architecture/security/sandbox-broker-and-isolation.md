@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted architecture correction — physical execution containment and ambient-authority specification.
+Canonical Pantheon physical execution containment and ambient-authority specification, accepted as an architecture correction.
 
 ## Purpose
 
@@ -148,7 +148,7 @@ Where controller logic only needs logical file content, it uses controller-owned
 
 A deny-list of known Git execution surfaces is defense in depth only. The security property is the authority boundary: repository-controlled behavior can never inherit Pantheon daemon, operator, raw-CAS, secret, credential-agent, runtime-management or unrelated authoritative-repository authority.
 
-See `workspace-and-git-integration.md` for the canonical hostile-repository contract.
+See `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md` for the canonical hostile-repository contract.
 
 ## Credential isolation
 

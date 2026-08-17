@@ -14,12 +14,12 @@ The central rule is:
 
 See also:
 
-- `scheduler-resource-ledger-and-admission.md`
-- `execution-offer-routing-and-admission-handshake.md`
-- `run-and-attempt.md`
-- `global-recovery-and-crash-reconciliation.md`
-- `budget-usage-and-rate-limits.md`
-- `planner-and-task-decomposition.md`
+- `docs/architecture/scheduling/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/execution/execution-offer-routing-and-admission-handshake.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/goals-and-planning/planner-and-task-decomposition.md`
 
 ## Ownership primitives
 
@@ -242,7 +242,7 @@ Planner control-operation execution is separate from T3. A PlanningOperation can
 
 LaunchKey does not belong to the scheduler or Run-intent transaction. It belongs to an Attempt created after preparation is LaunchReady.
 
-The Run Controller creates Attempt + LaunchKey + AgentControlSession durably, then separately commits the pre-launch contact marker before crossing the backend launch-call boundary, as defined in `run-and-attempt.md`.
+The Run Controller creates Attempt + LaunchKey + AgentControlSession durably, then separately commits the pre-launch contact marker before crossing the backend launch-call boundary, as defined in `docs/architecture/execution/run-and-attempt.md`.
 
 PlanningAttempt is not a Run Attempt and does not receive a LaunchKey. It uses the provider-neutral PlanningAttempt identity/contact marker defined by the Planner architecture.
 

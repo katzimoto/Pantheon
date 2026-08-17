@@ -14,13 +14,13 @@ The central rule is:
 
 See also:
 
-- `docs/architecture/global-recovery-and-crash-reconciliation.md`
-- `docs/architecture/task-lifecycle.md`
-- `docs/architecture/run-and-attempt.md`
-- `docs/architecture/recovery-policy.md`
-- `docs/architecture/budget-usage-and-rate-limits.md`
-- `docs/architecture/artifact-model.md`
-- `docs/architecture/workspace-and-git-integration.md`
+- `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
 
 ## Signal model
 

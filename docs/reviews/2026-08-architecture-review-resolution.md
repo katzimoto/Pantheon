@@ -1,5 +1,9 @@
 # August 2026 Architecture Review Resolution
 
+## Status
+
+Historical review ledger from August 2026. **Not canonical** — see `docs/reviews/README.md`. The canonical subsystem documents it references under `docs/architecture/` are the source of truth for every decision recorded here.
+
 ## Purpose
 
 This document records how Pantheon resolved the Critical/High findings from Claude's adversarial architecture review (`claude/pantheon-architecture-review-kue3se`, review commit `5fd665bf8af707897b63aefa21f3e7ce72fee9b6`).
@@ -16,10 +20,10 @@ A second adversarial review is still required before implementation planning/iss
 
 | # | Original finding | Resolution | Canonical docs |
 |---|---|---|---|
-| 1 | No Agent-facing control channel / same-user Operator socket bypass | **Resolved.** Separate Attempt-authenticated Agent Control surface; credential authenticates identity only; Operator Control physically unreachable from untrusted Sandbox. | `agent-control-channel.md`, `sandbox-broker-and-isolation.md`, `permissions-and-capabilities.md`, `public-daemon-api-and-cli.md` |
-| 2 | Blocking spawn keeps parent Run/resources and can deadlock children | **Resolved.** Blocking spawn commits parent `terminalTarget=Yielded`; Run safely terminalizes/releases Run capacity; Task then Waiting with zero live Runs; join satisfaction returns Ready and a new Run resumes from ContinuationContext. Joined/detached spawn deferred from v1. | `blocking-spawn-and-run-yield.md`, `task-spawn-and-dynamic-graphs.md`, `task-lifecycle.md`, `run-and-attempt.md` |
-| 3 | Evaluator execution is unowned/unaccounted second execution path | **Resolved.** Operator-governed immutable EvaluatorVersions; EvaluationRound/Operation; control-operation reservations/budget; independent verification Sandbox. V1 evaluator kinds check/schema/human; model-based rubric/review deferred rather than creating an extra Agent-Run path. | `evaluation-and-evaluator-registry.md`, `task-acceptance-and-completion.md`, `scheduler-resource-ledger-and-admission.md` |
-| 4 | Undefined `policyHash`/reload semantics | **Resolved.** Atomic immutable ConfigurationRevision manifest with domain-specific component digests, compiled/validated before activation; no ambiguous generic policy hash. Live Run authority intersects frozen ceiling with current policy. | `configuration-and-policy-revisions.md`, `permissions-and-capabilities.md`, scheduler/routing/persistence docs |
+| 1 | No Agent-facing control channel / same-user Operator socket bypass | **Resolved.** Separate Attempt-authenticated Agent Control surface; credential authenticates identity only; Operator Control physically unreachable from untrusted Sandbox. | `docs/architecture/execution/agent-control-channel.md`, `docs/architecture/security/sandbox-broker-and-isolation.md`, `docs/architecture/security/permissions-and-capabilities.md`, `docs/architecture/operations/public-daemon-api-and-cli.md` |
+| 2 | Blocking spawn keeps parent Run/resources and can deadlock children | **Resolved.** Blocking spawn commits parent `terminalTarget=Yielded`; Run safely terminalizes/releases Run capacity; Task then Waiting with zero live Runs; join satisfaction returns Ready and a new Run resumes from ContinuationContext. Joined/detached spawn deferred from v1. | `docs/architecture/tasks/blocking-spawn-and-run-yield.md`, `docs/architecture/tasks/task-spawn-and-dynamic-graphs.md`, `docs/architecture/tasks/task-lifecycle.md`, `docs/architecture/execution/run-and-attempt.md` |
+| 3 | Evaluator execution is unowned/unaccounted second execution path | **Resolved.** Operator-governed immutable EvaluatorVersions; EvaluationRound/Operation; control-operation reservations/budget; independent verification Sandbox. V1 evaluator kinds check/schema/human; model-based rubric/review deferred rather than creating an extra Agent-Run path. | `docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`, `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md`, `docs/architecture/scheduling/scheduler-resource-ledger-and-admission.md` |
+| 4 | Undefined `policyHash`/reload semantics | **Resolved.** Atomic immutable ConfigurationRevision manifest with domain-specific component digests, compiled/validated before activation; no ambiguous generic policy hash. Live Run authority intersects frozen ceiling with current policy. | `docs/architecture/operations/configuration-and-policy-revisions.md`, `docs/architecture/security/permissions-and-capabilities.md`, scheduler/routing/persistence docs |
 
 ## High findings
 
@@ -29,10 +33,10 @@ A second adversarial review is still required before implementation planning/iss
 
 Canonical:
 
-- `scheduler-reservations-ownership-and-leases.md`
-- `scheduler-resource-ledger-and-admission.md`
-- `execution-offer-routing-and-admission-handshake.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/scheduling/scheduler-reservations-ownership-and-leases.md`
+- `docs/architecture/scheduling/scheduler-resource-ledger-and-admission.md`
+- `docs/architecture/execution/execution-offer-routing-and-admission-handshake.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 6. `ensureExecution` idempotency delegated to adapters where many backends cannot provide it
 
@@ -47,9 +51,9 @@ Pantheon may supply keyed semantics through an outer process/session supervisor.
 
 Canonical:
 
-- `execution-fabric.md`
-- `run-and-attempt.md`
-- `scheduler-dispatch-and-run-intent-reconciliation.md`
+- `docs/architecture/execution/execution-fabric.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/scheduling/scheduler-dispatch-and-run-intent-reconciliation.md`
 
 ### 7. No durable marker that backend launch may have been contacted
 
@@ -57,9 +61,9 @@ Canonical:
 
 Canonical:
 
-- `run-and-attempt.md`
-- `scheduler-dispatch-and-run-intent-reconciliation.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/scheduling/scheduler-dispatch-and-run-intent-reconciliation.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 8. Goal lifecycle/completion controller missing
 
@@ -73,9 +77,9 @@ Goal Completion Controller owns deliverable bindings/completion candidate/evalua
 
 Canonical:
 
-- `goal-resource.md`
-- `goal-lifecycle-and-completion-controller.md`
-- `goal-revision-reconciliation.md`
+- `docs/architecture/goals-and-planning/goal-resource.md`
+- `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+- `docs/architecture/goals-and-planning/goal-revision-reconciliation.md`
 
 ### 9. `Run Finalizing => Candidate` contradiction and no Run terminalTarget
 
@@ -89,8 +93,8 @@ Yielded/Failed/Cancelled may have no Candidate.
 
 Canonical:
 
-- `run-and-attempt.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 10. Candidate submission vs cancellation precedence unspecified
 
@@ -98,10 +102,10 @@ Canonical:
 
 Canonical:
 
-- `task-lifecycle.md`
-- `run-and-attempt.md`
-- `sqlite-persistence-and-transactions.md`
-- `public-daemon-api-and-cli.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
+- `docs/architecture/operations/public-daemon-api-and-cli.md`
 
 ### 11. REQUEUE_TASK could make Ready while old Run still nonterminal
 
@@ -109,9 +113,9 @@ Canonical:
 
 Canonical:
 
-- `recovery-policy.md`
-- `task-lifecycle.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 12. UNKNOWN obligations had no bounded/operator escape hatch
 
@@ -121,11 +125,11 @@ Canonical:
 
 Canonical:
 
-- `recovery-policy.md`
-- `budget-usage-and-rate-limits.md`
-- `scheduler-reservations-ownership-and-leases.md`
-- `sqlite-persistence-and-transactions.md`
-- `public-daemon-api-and-cli.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/scheduling/scheduler-reservations-ownership-and-leases.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
+- `docs/architecture/operations/public-daemon-api-and-cli.md`
 
 ### 13. `code.changeset` depended on prunable Git ODB / Git-rendered patch identity
 
@@ -133,9 +137,9 @@ Canonical:
 
 Canonical:
 
-- `artifact-model.md`
-- `workspace-and-git-integration.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 14. Usage source key unnamespaced; proposal to fence usage on control epoch
 
@@ -151,9 +155,9 @@ Attempt usage is accepted only for the backend named in the immutable Binding.
 
 Canonical:
 
-- `budget-usage-and-rate-limits.md`
-- `execution-fabric.md`
-- `sqlite-persistence-and-transactions.md`
+- `docs/architecture/operations/budget-usage-and-rate-limits.md`
+- `docs/architecture/execution/execution-fabric.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
 
 ### 15. Sandbox did not exclude Pantheon state/CAS/policy/peer Workspaces
 
@@ -161,9 +165,9 @@ Canonical:
 
 Canonical:
 
-- `sandbox-broker-and-isolation.md`
-- `permissions-and-capabilities.md`
-- `workspace-and-git-integration.md`
+- `docs/architecture/security/sandbox-broker-and-isolation.md`
+- `docs/architecture/security/permissions-and-capabilities.md`
+- `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
 
 ### 16. Grant use-count / ticket redemption not atomic under policy change
 
@@ -171,9 +175,9 @@ Canonical:
 
 Canonical:
 
-- `permissions-and-capabilities.md`
-- `sqlite-persistence-and-transactions.md`
-- `secret-store-and-credential-brokering.md`
+- `docs/architecture/security/permissions-and-capabilities.md`
+- `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`
+- `docs/architecture/security/secret-store-and-credential-brokering.md`
 
 ### 17. Goal reconciliation could terminalize Superseded Task around live Run
 
@@ -181,8 +185,8 @@ Canonical:
 
 Canonical:
 
-- `goal-revision-reconciliation.md`
-- `task-lifecycle.md`
+- `docs/architecture/goals-and-planning/goal-revision-reconciliation.md`
+- `docs/architecture/tasks/task-lifecycle.md`
 
 ### 18. Context Builder missing
 
@@ -190,8 +194,8 @@ Canonical:
 
 Canonical:
 
-- `context-builder.md`
-- `run-and-attempt.md`
+- `docs/architecture/agents-and-context/context-builder.md`
+- `docs/architecture/execution/run-and-attempt.md`
 
 ### 19. Operator API missing dispatch/resources/reservations/Workspaces/backends/recovery quarantine
 
@@ -199,7 +203,7 @@ Canonical:
 
 Canonical:
 
-- `public-daemon-api-and-cli.md`
+- `docs/architecture/operations/public-daemon-api-and-cli.md`
 
 ## Additional architecture corrections made during resolution
 

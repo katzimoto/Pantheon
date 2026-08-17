@@ -10,11 +10,11 @@ Canonical Pantheon Task lifecycle specification.
 
 See also:
 
-- `run-and-attempt.md`
-- `blocking-spawn-and-run-yield.md`
-- `task-acceptance-and-completion.md`
-- `recovery-policy.md`
-- `goal-revision-reconciliation.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/tasks/blocking-spawn-and-run-yield.md`
+- `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
+- `docs/architecture/goals-and-planning/goal-revision-reconciliation.md`
 
 ## Foundational invariants
 

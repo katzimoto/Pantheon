@@ -14,10 +14,10 @@ Authorization is binary: `PERMIT` or `DENY`. Approval is not a third authorizati
 
 See also:
 
-- `agent-control-channel.md`
-- `configuration-and-policy-revisions.md`
-- `sandbox-broker-and-isolation.md`
-- `secret-store-and-credential-brokering.md`
+- `docs/architecture/execution/agent-control-channel.md`
+- `docs/architecture/operations/configuration-and-policy-revisions.md`
+- `docs/architecture/security/sandbox-broker-and-isolation.md`
+- `docs/architecture/security/secret-store-and-credential-brokering.md`
 
 ## Foundational principles
 
@@ -135,7 +135,7 @@ A policy relaxation never silently broadens an existing Run. A tightening may de
 
 Pantheon embeds Cedar (or an equivalent deterministic PDP matching this contract) for `principal/action/resource/context` evaluation. User/project configuration compiles into validated policy; invalid policy never activates.
 
-Normal users need not author raw Cedar. Configuration composition/revision semantics are defined by `configuration-and-policy-revisions.md`.
+Normal users need not author raw Cedar. Configuration composition/revision semantics are defined by `docs/architecture/operations/configuration-and-policy-revisions.md`.
 
 ## Approval and Grants
 
@@ -169,7 +169,7 @@ and capability-ticket redemption requires the same generation match. A mismatch 
 
 Operators do not reactivate an old-generation Grant in place. If the same authority is still desired after restore, the operator explicitly re-affirms it, creating a new Grant under the current RestoreGeneration. This prevents one human approval or one-use Grant from becoming reusable because SQLite was rewound behind an already-applied external effect.
 
-Broker operations created by redemption also record the current RestoreGeneration. After restore, an old-generation broker operation may be inspected/reconciled under its original stable external identity, but its restored `PENDING`/incomplete state is never authority to issue the external effect again. `global-recovery-and-crash-reconciliation.md` defines the reconciliation-only restore rule.
+Broker operations created by redemption also record the current RestoreGeneration. After restore, an old-generation broker operation may be inspected/reconciled under its original stable external identity, but its restored `PENDING`/incomplete state is never authority to issue the external effect again. `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` defines the reconciliation-only restore rule.
 
 ## Atomic Grant use-count redemption
 
@@ -283,7 +283,7 @@ Same-user filesystem permissions alone are not a sufficient Agent/operator bound
 
 ## Sandbox classes
 
-Canonical security classes are defined by `sandbox-broker-and-isolation.md`:
+Canonical security classes are defined by `docs/architecture/security/sandbox-broker-and-isolation.md`:
 
 ```text
 TRUSTED_HOST

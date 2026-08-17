@@ -201,7 +201,7 @@ For untrusted model-driven shell coding, `isolated-clone` is the preferred v1 re
 
 `linked-worktree` may be valid for trusted/safely projected contexts but cannot by itself satisfy `isolation.control-plane`.
 
-Task-local Git metadata remains Agent-writable/untrusted even under `isolated-clone`. The Workspace strategy does not authorize a privileged Pantheon controller to execute Git against that repository state. Controller-side Git capture/recovery must satisfy the hostile-repository boundary in `workspace-and-git-integration.md`: use controller-owned sterile Git control state when logical content is sufficient, or an equally confined helper when Agent-owned Git metadata must be interpreted.
+Task-local Git metadata remains Agent-writable/untrusted even under `isolated-clone`. The Workspace strategy does not authorize a privileged Pantheon controller to execute Git against that repository state. Controller-side Git capture/recovery must satisfy the hostile-repository boundary in `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`: use controller-owned sterile Git control state when logical content is sufficient, or an equally confined helper when Agent-owned Git metadata must be interpreted.
 
 ## Sandbox
 

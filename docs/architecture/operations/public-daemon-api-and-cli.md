@@ -8,7 +8,7 @@ Canonical Pantheon operator-facing API/CLI specification.
 
 > **`pantheond` is the only control-plane authority. CLI/UI/automation never open SQLite, mutate Workspaces/Git refs, provision Sandboxes, read secret material or call ExecutorBackends directly.**
 
-This document defines the **Operator Control Surface**. Worker/Agent traffic uses the separate restricted Attempt-bound surface in `agent-control-channel.md`.
+This document defines the **Operator Control Surface**. Worker/Agent traffic uses the separate restricted Attempt-bound surface in `docs/architecture/execution/agent-control-channel.md`.
 
 ## Trust boundary
 

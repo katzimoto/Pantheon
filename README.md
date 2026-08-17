@@ -11,10 +11,19 @@ Pantheon is a local-first multi-agent orchestration system designed to coordinat
 - Isolate coding work with Git worktrees and risky execution with sandbox profiles.
 - Make agent self-improvement evidence-driven, versioned, testable, and reversible.
 
-## Design documents
+## Documentation
 
-- [Architecture overview](docs/architecture/overview.md)
-- [Agent Genome: identity, memory, skills, and self-improvement](docs/architecture/agent-genome.md)
+Start at [docs/README.md](docs/README.md). It is the documentation entry point:
+it states which material is canonical and routes you to the relevant subsystem
+contracts.
+
+- [Documentation entry point](docs/README.md) — where to start, source-of-truth rules
+- [Architecture overview](docs/architecture/overview.md) — the system model and cross-cutting invariants
+- [Architecture subsystem map](docs/architecture/README.md) — which documents to read for a given change
+- [Agent Genome: identity, memory, skills, and self-improvement](docs/architecture/agents-and-context/agent-genome.md)
+
+Material under [docs/reviews/](docs/reviews/README.md) is historical review
+analysis and is not canonical architecture.
 
 ## Status
 

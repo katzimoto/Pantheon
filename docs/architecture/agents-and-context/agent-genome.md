@@ -39,7 +39,7 @@ SOUL mutation requires human approval and is not automatic in v1.
 
 ### AGENT.yaml
 
-Machine-readable applicability/competencies/execution requirements/tool/action declarations/permission ceiling/delegation/limits and Genome references. See `agent-manifest.md`.
+Machine-readable applicability/competencies/execution requirements/tool/action declarations/permission ceiling/delegation/limits and Genome references. See `docs/architecture/agents-and-context/agent-manifest.md`.
 
 ### BEHAVIOR
 

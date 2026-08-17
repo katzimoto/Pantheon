@@ -12,11 +12,11 @@ A Goal revision changes desired user outcome state; it does not mutate running T
 
 See also:
 
-- `goal-resource.md`
-- `goal-lifecycle-and-completion-controller.md`
-- `task-lifecycle.md`
-- `planner-and-task-decomposition.md`
-- `evaluation-and-evaluator-registry.md`
+- `docs/architecture/goals-and-planning/goal-resource.md`
+- `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/goals-and-planning/planner-and-task-decomposition.md`
+- `docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`
 
 ## Immutable revisions
 

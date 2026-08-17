@@ -86,7 +86,7 @@ While UNKNOWN:
 - replacement Attempt/Run is prohibited merely for progress;
 - timeout alone never proves absence.
 
-The pre-launch contact marker in `run-and-attempt.md` separates definitely-never-contacted execution from may-have-crossed-the-call-boundary ambiguity.
+The pre-launch contact marker in `docs/architecture/execution/run-and-attempt.md` separates definitely-never-contacted execution from may-have-crossed-the-call-boundary ambiguity.
 
 ## RETRY_ATTEMPT
 

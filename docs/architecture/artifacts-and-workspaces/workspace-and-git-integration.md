@@ -12,10 +12,10 @@ Worktree isolation and security Sandbox isolation are distinct.
 
 See also:
 
-- `artifact-model.md`
-- `sandbox-broker-and-isolation.md`
-- `run-and-attempt.md`
-- `global-recovery-and-crash-reconciliation.md`
+- `docs/architecture/artifacts-and-workspaces/artifact-model.md`
+- `docs/architecture/security/sandbox-broker-and-isolation.md`
+- `docs/architecture/execution/run-and-attempt.md`
+- `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`
 
 ## Workspace ownership
 
@@ -268,7 +268,7 @@ optional controller-owned Git object pins for efficiency
 commit Artifact + Candidate + Task/Run lifecycle transition
 ```
 
-The authoritative changeset payload is CAS-complete as defined by `artifact-model.md`; it does not rely solely on Task Git ODB objects that later GC could prune.
+The authoritative changeset payload is CAS-complete as defined by `docs/architecture/artifacts-and-workspaces/artifact-model.md`; it does not rely solely on Task Git ODB objects that later GC could prune.
 
 ## Path/scope validation
 

@@ -1,5 +1,9 @@
 # Pantheon Architecture Overview
 
+## Status
+
+Canonical high-level Pantheon architecture. Establishes the system model, resource hierarchy and cross-cutting invariants. Detailed subsystem contracts under `docs/architecture/<domain>/` are authoritative on their own subjects; see `docs/architecture/README.md` for the subsystem map.
+
 ## Purpose
 
 Pantheon is a **local-first deterministic control plane for heterogeneous agent execution**. Models/agents provide reasoning and semantic work; Pantheon owns durable state, execution truth, scheduling, authorization, accounting, verification and external-effect reconciliation.
@@ -180,4 +184,4 @@ Defer machinery that mainly anticipates distributed scale or autonomous self-mod
 
 ## Source of truth
 
-Detailed contracts live under `docs/architecture/`. When older wording conflicts with newer canonical subsystem documents, the explicit canonical invariants in the current subsystem contracts take precedence; the final integration review should eliminate any remaining stale examples before implementation issues are generated.
+Detailed contracts live under `docs/architecture/<domain>/`; `docs/architecture/README.md` maps subsystems to their canonical documents. When older wording conflicts with newer canonical subsystem documents, the explicit canonical invariants in the current subsystem contracts take precedence; the final integration review should eliminate any remaining stale examples before implementation issues are generated.

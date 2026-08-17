@@ -41,12 +41,12 @@ new/superseding Tasks / graph mutation
 
 See also:
 
-- `task-lifecycle.md`
-- `blocking-spawn-and-run-yield.md`
-- `agent-control-channel.md`
-- `context-builder.md`
-- `sandbox-broker-and-isolation.md`
-- `recovery-policy.md`
+- `docs/architecture/tasks/task-lifecycle.md`
+- `docs/architecture/tasks/blocking-spawn-and-run-yield.md`
+- `docs/architecture/execution/agent-control-channel.md`
+- `docs/architecture/agents-and-context/context-builder.md`
+- `docs/architecture/security/sandbox-broker-and-isolation.md`
+- `docs/architecture/persistence-and-recovery/recovery-policy.md`
 
 ## Run identity
 
@@ -363,7 +363,7 @@ After safe yield finalization, Task becomes Waiting with zero nonterminal Runs. 
 
 ## Candidate submission
 
-A Run may submit at most one Candidate. `task.submit_result` must pass the Agent Control/current-authority preconditions defined in `task-lifecycle.md`.
+A Run may submit at most one Candidate. `task.submit_result` must pass the Agent Control/current-authority preconditions defined in `docs/architecture/tasks/task-lifecycle.md`.
 
 Atomic submission performs/rechecks at least:
 
@@ -416,7 +416,7 @@ A new Run normally creates a fresh SandboxInstance, ContextSourceSnapshot and Co
 
 Concrete execution usage originates at Attempt level and aggregates upward. Failed Attempts consume real usage. Reconciliation loops are not retries and do not erase/duplicate factual usage.
 
-Usage provenance/idempotency rules are defined by `budget-usage-and-rate-limits.md`; a late valid usage observation may remain factual even after controller ownership changes.
+Usage provenance/idempotency rules are defined by `docs/architecture/operations/budget-usage-and-rate-limits.md`; a late valid usage observation may remain factual even after controller ownership changes.
 
 ## Cancellation, supersession and current authority
 
