@@ -212,7 +212,23 @@ Task Active => exactly one nonterminal Run
 Task Ready|Waiting => zero nonterminal Runs
 ```
 
-Use a partial unique index on Runs equivalent to one nonterminal Run per Task, with controller transactions also checking Task phase/active_run_id.
+Row-local Task pointer consistency is enforced declaratively where SQLite can express it:
+
+```sql
+CHECK (
+  phase NOT IN ('Ready', 'Waiting')
+  OR active_run_id IS NULL
+)
+
+CHECK (
+  phase != 'Active'
+  OR active_run_id IS NOT NULL
+)
+```
+
+These `CHECK`s prove only that the Task row's responsibility pointer is locally consistent with its phase. They do **not** prove that another nonterminal Run row does or does not exist. The full cross-row ownership invariant remains enforced by a partial unique live-Run mechanism, authoritative controller transactions that re-read Task/Run state, and PersistenceInvariantChecker.
+
+Use a partial unique index/mechanism on Runs equivalent to one nonterminal Run per Task, with controller transactions also checking Task phase/active_run_id.
 
 ## Temporal TaskGraph
 
@@ -302,6 +318,22 @@ Run Completed => candidate_digest not null
 Run Yielded|Failed|Cancelled => candidate may be null
 Run Finalizing => terminal_target not null
 ```
+
+Because both required facts live on `run_status`, v1 encodes them as row-local schema constraints as well as controller invariants:
+
+```sql
+CHECK (
+  phase != 'Finalizing'
+  OR terminal_target IS NOT NULL
+)
+
+CHECK (
+  phase != 'Completed'
+  OR candidate_digest IS NOT NULL
+)
+```
+
+These constraints reject impossible Run status rows even if a controller bug or migration tries to persist them; normal lifecycle transactions still own when and why a Run transitions.
 
 The obsolete invariant `Run Finalizing => Candidate exists` is invalid.
 
@@ -663,6 +695,7 @@ Use `PRAGMA application_id` before declaring the DB format stable.
 A deterministic PersistenceInvariantChecker verifies at least:
 
 ```text
+Task phase/active_run_id row-local consistency
 Active Task -> exactly one nonterminal Run
 Ready/Waiting Task -> zero nonterminal Runs
 Finalizing Run -> terminal_target present
@@ -687,6 +720,8 @@ Workspace/Sandbox ownership consistency
 IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
+
+The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; the checker remains valuable for cross-row invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -725,7 +760,7 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 3. Safety-critical relationships are relationally constrained where SQLite can express them.
 4. JSON is never a substitute for ownership/revision/accounting columns.
 5. Task-scoped reservations are unique/reused across Runs.
-6. Run Finalizing always records terminalTarget; only Completed requires Candidate.
+6. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
 7. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
 8. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
 9. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
