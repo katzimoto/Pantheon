@@ -1,0 +1,33 @@
+name: Version Policy
+
+on:
+  milestone:
+    types: [created, opened, edited, closed]
+  issues:
+    types: [milestoned, demilestoned, closed, reopened, labeled, unlabeled]
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: version-policy-${{ github.event.pull_request.number || github.event.issue.number || github.event.milestone.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Validate Version and Mission policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Self-test automation logic
+        run: python3 scripts/version-automation.py self-test
+
+      - name: Validate event state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/version-automation.py policy

@@ -1,0 +1,23 @@
+name: Version Changelog Labels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  bootstrap:
+    name: Create or reconcile changelog labels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Self-test automation logic
+        run: python3 scripts/version-automation.py self-test
+
+      - name: Reconcile labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/version-automation.py bootstrap-labels
