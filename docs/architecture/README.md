@@ -38,6 +38,10 @@ The durable user-outcome contract and how it becomes work.
 | `docs/architecture/goals-and-planning/goal-revision-reconciliation.md` | What happens to existing work when a Goal revision changes desired state |
 | `docs/architecture/goals-and-planning/planner-and-task-decomposition.md` | How a Goal revision becomes a proposed TaskGraph/GraphPatch, and the limits on Planner authority |
 
+Goal completion is proved through the shared evaluation machinery in
+`docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`;
+this domain owns Goal lifecycle authority, not a separate evaluation path.
+
 Read when: changing what a Goal means, when Pantheon may believe a Goal is
 done, how replanning works, or what the Planner is allowed to decide.
 
@@ -111,8 +115,13 @@ Whether a result is good, and who may say the contract is met.
 | `docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md` | Evaluator versions, EvaluationRound/Operation, accounting and isolation for verification |
 | `docs/architecture/evaluation-and-acceptance/task-acceptance-and-completion.md` | CandidateResult submission and Pantheon's exclusive authority to accept and terminalize a Task |
 
-Goal-level acceptance is separate and lives in
-`docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`.
+Goal-level acceptance *authority* is owned elsewhere —
+`docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+— but it is not a separate mechanism. Goal acceptance reuses this domain's
+`EvaluationRound`/`Evidence` machinery with a different immutable subject:
+`GOAL_COMPLETION_CANDIDATE` is one of the two v1 EvaluationRound subject types,
+alongside `TASK_CANDIDATE`. Changing evaluator semantics therefore affects Goal
+acceptance as well as Task acceptance.
 
 Read when: changing how results are verified, what an evaluator may do, or how
 a Task becomes accepted.
@@ -247,6 +256,12 @@ boundary.
 
 1. `docs/architecture/goals-and-planning/goal-resource.md`
 2. `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+
+Also read
+`docs/architecture/evaluation-and-acceptance/evaluation-and-evaluator-registry.md`
+whenever Goal acceptance criteria, EvaluationRound/Evidence or evaluator
+execution are involved: Goal acceptance runs on the shared evaluation machinery
+under the `GOAL_COMPLETION_CANDIDATE` subject type, not on a Goal-private path.
 
 Consult `docs/architecture/goals-and-planning/goal-revision-reconciliation.md`
 if revisions are involved and

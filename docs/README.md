@@ -81,5 +81,7 @@ Rules for any new document:
   the only place the full inventory is maintained.
 - Do not restate another document's contract. Link to it.
 
-Run `scripts/check-docs-links.sh` after moving or adding documents. It
-verifies that every referenced path exists.
+Run `scripts/check-docs-links.sh` after moving or adding documents. It verifies
+that every referenced path exists, and that the architecture map lists every
+canonical contract on disk exactly once — so a new contract that is never added
+to the map fails the check rather than becoming invisible to navigation.
