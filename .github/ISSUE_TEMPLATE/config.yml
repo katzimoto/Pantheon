@@ -1,0 +1,6 @@
+# The Engineering Mission form is the intended path for every executable issue,
+# so the blank option is turned off for the template chooser. GitHub still shows
+# a "Blank issue" entry to accounts with write access or above, labelled
+# "Maintainers only", which keeps an escape hatch for genuinely unstructured
+# notes without making it the default way work arrives.
+blank_issues_enabled: false

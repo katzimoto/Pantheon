@@ -1,0 +1,110 @@
+name: Engineering Mission
+description: Bounded engineering work, stated as the outcome that must become true.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Pantheon has one issue form. It covers implementation, bugs,
+        architecture and documentation alike; those differ in what you write,
+        not in which template you pick.
+
+        State what must become true and how it will be judged, then stop.
+        `AGENTS.md` already tells the assigned agent how to navigate, validate
+        and finish, and `docs/architecture/` already states the contracts it
+        must keep — do not restate either here, and do not plan the
+        implementation. The repository is better placed than you are to decide
+        which files change.
+
+        Hierarchy and blockers belong in GitHub's own graph: use sub-issues for
+        decomposition and blocked-by/blocking for dependencies rather than
+        writing them into the body. `docs/development/missions.md` is the full
+        contract behind this form.
+
+        This repository is public. Keep secrets, credentials and unpublished
+        vulnerability details out of issues.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: >-
+        The observable state that must be true when this mission is complete.
+        Write the result, not the work, at the highest level that stays
+        testable and bounded.
+      placeholder: >-
+        After daemon restart, Pantheon reconstructs valid scheduler reservation
+        ownership without allowing duplicate capacity ownership.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >-
+        Why this mission exists: the problem today, why it matters, what
+        triggered it. For a defect, the observed failure and how to reproduce
+        it. Link canonical contracts instead of summarising them. Leave empty
+        when the outcome already says everything.
+      placeholder: >-
+        Reservation state is durable, but restart reconciliation has no
+        explicit recovery path, so ownership after a crash is undefined.
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: >-
+        What a reviewer checks to decide the mission succeeded. Each one
+        observable, independently understandable, and neutral about
+        implementation unless the artifact itself is the contract. Use `- [ ]`
+        checkboxes.
+      placeholder: |
+        - [ ] Valid unexpired reservations are reconstructed after restart.
+        - [ ] Expired reservations do not regain active ownership.
+        - [ ] Recovery cannot create two owners for the same reserved capacity.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope-and-constraints
+    attributes:
+      label: Scope and constraints
+      description: >-
+        Real boundaries only. Use this for work deliberately excluded,
+        invariants that must survive, protected areas, and any authority this
+        mission grants beyond `AGENTS.md` — for example permission to open
+        follow-up issues. Not a list of files to touch. Leave empty when the
+        outcome and acceptance criteria already bound the work.
+      placeholder: |
+        Out of scope: distributed scheduler coordination; new fairness policy.
+        Constraints: must preserve the v1 blocking-spawn invariant; no
+        provider-specific logic may enter Pantheon core.
+
+  - type: textarea
+    id: architecture-entry-points
+    attributes:
+      label: Architecture entry points
+      description: >-
+        Where to start reading, when you know a starting point or a second
+        domain that `docs/architecture/README.md` would not route to. One or
+        two paths, not a dependency list; the assigned agent expands context
+        from the architecture map itself.
+      placeholder: |
+        docs/architecture/scheduling/scheduler-reservations-ownership-and-leases.md
+        docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >-
+        How the acceptance criteria that matter most will be proven. `AGENTS.md`
+        already requires the repository's standard validation, so do not restate
+        it; if that validation genuinely proves this mission, one line saying so
+        is the right answer.
+      placeholder: >-
+        Restart/recovery regression coverage over both valid and expired
+        reservations.
+    validations:
+      required: true

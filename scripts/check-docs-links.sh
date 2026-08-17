@@ -1,5 +1,5 @@
 #!/bin/sh
-# Validate documentation structure and agent-contract wiring. Four independent
+# Validate documentation structure and agent-contract wiring. Five independent
 # checks, numbered as they appear below:
 #
 #   1. Inline-code references resolve. Pantheon docs reference each other with
@@ -20,6 +20,12 @@
 #      rather than a separate copy. This verifies only that the import line is
 #      still there; it does not inspect the rest of CLAUDE.md.
 #
+#   5. There is one issue form. GitHub Issues are Pantheon's mission contract
+#      (docs/development/missions.md), and the Engineering Mission form is the
+#      single creation path for executable work. A second form beside it
+#      reintroduces per-work-type templates, and a missing config.yml silently
+#      restores blank issues as the default path.
+#
 # Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
 #
@@ -37,11 +43,13 @@ report() {
 
 files=$(find . -path ./.git -prune -o -name '*.md' -print | sed 's|^\./||' | sort)
 
-# 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`
-#    or `scripts/check.sh`. Covering scripts/ means a validation command cited in
-#    documentation or in AGENTS.md fails the check once it stops existing.
+# 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`,
+#    `scripts/check.sh` or `.github/.../file.yml`. Covering scripts/ means a
+#    validation command cited in documentation or in AGENTS.md fails the check
+#    once it stops existing; covering .github/ does the same for a repository
+#    configuration file that documentation points at.
 for f in $files; do
-	grep -noE '`(docs|schemas|scripts)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
+	grep -noE '`(docs|schemas|scripts|\.github)/[A-Za-z0-9._/-]+`' "$f" 2>/dev/null | while IFS=: read -r line match; do
 		target=$(printf '%s' "$match" | tr -d '`')
 		case "$target" in
 		*/) [ -d "$target" ] || echo "MISS $f $line $target" ;;
@@ -141,6 +149,30 @@ elif [ ! -f CLAUDE.md ]; then
 elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md; then
 	echo "CLAUDE.md: no bare '@AGENTS.md' import line; the canonical import must remain present" >&2
 	status=1
+fi
+
+# 5. One issue form, plus the chooser configuration that keeps it the default
+# path. The form's own YAML is validated by GitHub against the repository, so
+# re-checking it here would mean carrying a YAML toolchain to duplicate what the
+# platform already does. What GitHub cannot report is whether Pantheon still has
+# exactly one mission path, so that is what this checks. The form's filename is
+# not asserted: documentation names it in inline code, and check 1 already fails
+# when it moves.
+chooser=.github/ISSUE_TEMPLATE
+if [ ! -d "$chooser" ]; then
+	echo "missing issue form directory: $chooser" >&2
+	status=1
+else
+	if [ ! -f "$chooser/config.yml" ] && [ ! -f "$chooser/config.yaml" ]; then
+		echo "$chooser: no config.yml; the template chooser is unconfigured" >&2
+		status=1
+	fi
+	forms=$(find "$chooser" -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) \
+		! -name 'config.yml' ! -name 'config.yaml' | wc -l | tr -d ' ')
+	if [ "$forms" -ne 1 ]; then
+		echo "$chooser: expected exactly one issue form beside config.yml, found $forms" >&2
+		status=1
+	fi
 fi
 
 if [ "$status" -eq 0 ]; then
