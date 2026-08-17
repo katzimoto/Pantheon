@@ -195,11 +195,12 @@ evaluationRound:
       ref: schema://project/result
       version: sha256:E2
 
-  policyRevision: ...
+  configRevision: cfgrev_43
+  evaluatorRegistryDigest: sha256:ER
   createdAt: ...
 ```
 
-The Round identity binds Candidate digest, acceptance contract, exact evaluator versions, and the relevant policy/configuration snapshot.
+The Round identity binds Candidate digest, acceptance contract, exact evaluator versions, the ConfigurationRevision that supplied evaluator-resolution semantics, and the exact evaluator-registry component digest from that revision. `configRevision` and `evaluatorRegistryDigest` are immutable decision provenance; they do not freeze old authorization/security policy for later execution. Every EvaluationOperation still rechecks current hard/current authorization policy at execution/admission time.
 
 ## 9. Candidate is the authoritative subject
 
@@ -585,7 +586,8 @@ evaluation_rounds
   task_id
   candidate_digest
   acceptance_hash
-  policy_revision
+  config_revision_id
+  evaluator_registry_digest
   state
   created_at
 
@@ -619,6 +621,8 @@ human_evaluation_requests
   criterion_id
   state
 ```
+
+`evaluation_rounds.config_revision_id` and `evaluation_rounds.evaluator_registry_digest` are immutable provenance matching the ConfigurationRevision/evaluator component used to resolve the pinned evaluator versions. They do not substitute for current hard-policy/current-authorization checks when an EvaluationOperation executes.
 
 `evaluation_attempts.launch_contact_state` is created as `NOT_CONTACTED` and may transition only to `CONTACT_MAY_HAVE_OCCURRED`. The timestamp/incarnation are written with that transition and are provenance, not a separate evaluation ownership epoch. At most one nonterminal EvaluationAttempt exists per EvaluationOperation; the persistence layer enforces this with a partial unique constraint/index over the operation identity and nonterminal state domain.
 
