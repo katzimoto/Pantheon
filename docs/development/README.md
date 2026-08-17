@@ -1,5 +1,9 @@
 # Development Process
 
+## Status
+
+Navigation only. The linked documents state their own authority.
+
 Pantheon keeps engineering process contracts under `docs/development/`.
 
 | Document | Purpose |
@@ -9,5 +13,3 @@ Pantheon keeps engineering process contracts under `docs/development/`.
 | `docs/development/implementation.md` | Maps Rust responsibilities, crate boundaries, dependencies, and verification. |
 | `docs/development/versions.md` | Defines release-level version planning and its relationship to GitHub Milestones and Engineering Missions. |
 | `docs/development/version-template.md` | Reusable template for defining an MVP or later Pantheon version. |
-
-This index is navigation only. Each linked document states its own authority.
