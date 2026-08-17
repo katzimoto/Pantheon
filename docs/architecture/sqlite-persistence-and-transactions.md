@@ -395,7 +395,7 @@ WHERE terminal = 0;
 
 Every Attempt is created with exactly one `attempt_status` row in the same T4/T8 transaction, initially nonterminal. That transaction also updates `run_status.current_attempt_id` when the new Attempt becomes current. A replacement Attempt cannot commit until the previous status row is terminal, so controller serialization and the partial unique index agree on the same safety boundary rather than relying on a cross-table predicate SQLite cannot express.
 
-Attempt creation + LaunchKey + AgentControlSession occurs before backend side effect. A second authoritative transaction marks `CONTACT_MAY_HAVE_OCCURRED` immediately before the first external launch call.
+Attempt creation + LaunchKey + AgentControlSession occurs before backend side effect. T4a may rotate only the AgentControlSession credential verifier/revision while launch contact remains definitively `NOT_CONTACTED`. T4b then marks `CONTACT_MAY_HAVE_OCCURRED` immediately before the first external launch call and freezes the session credential revision for that Attempt.
 
 Crash semantics on an ordinary uninterrupted database history are:
 
@@ -411,21 +411,25 @@ A restored snapshot is different. A restored `NOT_CONTACTED`, `ABSENT`, missing 
 
 ## Agent Control
 
-`agent_control_sessions` stores one Attempt-scoped identity verifier/session state plus immutable `restore_generation`; raw bearer material is not persisted.
+`agent_control_sessions` stores one Attempt-scoped identity/session plus immutable `restore_generation`; raw bearer material is not persisted.
 
-Conceptually the safety-relevant identity includes:
+Conceptually the safety-relevant fields include:
 
 ```text
 agent_control_sessions
   id
   attempt_id UNIQUE
-  restore_generation
+  restore_generation       immutable
+  credential_revision      integer >= 1
   credential_hash
+  credential_rekeyed_at    nullable
   state
-  ...
+  created_at
+  revoked_at
+  revocation_reason
 ```
 
-The session copies the current `system_state.restore_generation` when T4/T8 creates it. A consequential Agent Control request first authenticates the credential and then requires:
+The session copies the current `system_state.restore_generation` when T4/T8 creates it and starts with `credential_revision = 1`. A consequential Agent Control request first authenticates against the **current** `credential_hash` and then requires:
 
 ```text
 session.restore_generation == system_state.restore_generation
@@ -433,13 +437,56 @@ session.restore_generation == system_state.restore_generation
 
 before Pantheon looks up or creates the request-idempotency row or applies semantic worker authority. An old-generation restored session remains historical/fenced even if its persisted state says `ACTIVE`; it is never rewritten to current merely because the Attempt still exists externally.
 
+### T4a pre-contact Agent Control rekey
+
+The raw Agent Control bearer is intentionally not persisted. If Pantheon restarts after T4/T8 but before T4b, the same Attempt may remain durably `NOT_CONTACTED` while the original bearer has been lost with process memory.
+
+T4a permits recovery without creating a second Attempt or persisting bearer material. In one authoritative transaction it must re-read and require:
+
+```text
+AgentControlSession.state == ACTIVE
+AgentControlSession.restore_generation == current RestoreGeneration
+Attempt is current/nonterminal
+Attempt.launch_contact_state == NOT_CONTACTED
+no independent launch-capable external-contact evidence
+current Run/ControlLease authority valid
+expected credential_revision still current
+```
+
+Pantheon generates a fresh bearer outside durable storage, then T4a atomically:
+
+```text
+credential_revision += 1
+credential_hash = verifier(new bearer)
+credential_rekeyed_at = now
+append non-secret agent-control.session.rekeyed Event
+```
+
+The Event contains identity/revision/reason provenance, never the bearer or verifier. Any previously prepared sandbox-local credential file, adapter bootstrap object, inherited-descriptor plan, or equivalent credential projection is invalidated and must be rebuilt from the new bearer before T4b.
+
+The contact boundary freezes the credential:
+
+```text
+NOT_CONTACTED
+  -> T4a may replace verifier/revision under the stated preconditions
+
+CONTACT_MAY_HAVE_OCCURRED
+  -> credential_revision and credential_hash are immutable for that Attempt
+```
+
+This freeze is cross-row lifecycle logic and is not expressible as one row-local SQLite CHECK because `launch_contact_state` belongs to `attempt_status`. Controller serialization/CAS, the T4b precondition, invariant scanning/audit provenance, and crash/fault-injection tests enforce it.
+
+If contact may have occurred and the external lineage later proves absent/terminal, Recovery Policy creates a fresh Attempt/LaunchKey/AgentControlSession for fresh execution. It does not rekey the contacted Attempt merely because the old raw bearer is unavailable.
+
+T4a never changes `restore_generation`; an old-generation session after disaster restore cannot be promoted into current authority by rekeying.
+
 `agent_requests` enforces for current-generation sessions:
 
 ```text
 PRIMARY/UNIQUE (attempt_id, request_id)
 ```
 
-plus request hash/operation/state/result/problem refs. Same ID+same hash is idempotent; same ID+different hash fails closed. RestoreGeneration need not be duplicated into every request key because stale-generation sessions fail before request lookup/creation.
+plus request hash/operation/state/result/problem refs. Same ID+same hash is idempotent; same ID+different hash fails closed. RestoreGeneration need not be duplicated into every request key because stale-generation sessions fail before request lookup/creation. Credential revision likewise does not enter request identity because a legitimate worker request can occur only after T4b, when the session revision is frozen.
 
 ## Sandbox
 
@@ -812,6 +859,9 @@ attempt_status holder matches attempts.run_id
 run_status.current_attempt_id belongs to the same Run
 one nonterminal Attempt per Run
 one current AgentControlSession per Attempt
+AgentControlSession credential_revision >= 1
+AgentControlSession pre-contact rekey only while parent Attempt is current-generation NOT_CONTACTED
+AgentControlSession credential revision/verifier frozen after CONTACT_MAY_HAVE_OCCURRED
 accepted Agent Control request -> session.restore_generation == current RestoreGeneration
 one nonterminal EvaluationAttempt per EvaluationOperation
 EvaluationAttempt launch-contact state valid/monotonic; contact provenance present when CONTACT_MAY_HAVE_OCCURRED
@@ -833,7 +883,7 @@ IntegrationIntent/Git state consistency
 Event epoch/sequence sanity
 ```
 
-The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The Task pointer and Run status row-local facts above are also schema `CHECK` constraints; Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -845,6 +895,7 @@ T1  GOAL REVISION
 T2  GRAPH PATCH
 T3  SCHEDULER RUN-INTENT COMMIT
 T4  ATTEMPT + AGENT-CONTROL IDENTITY
+T4a PRE-CONTACT AGENT-CONTROL REKEY
 T4b LAUNCH CONTACT MARKER
 T5  USAGE INGESTION
 T6  CANDIDATE SUBMISSION
@@ -859,7 +910,11 @@ T14 UNKNOWN FORCE-RESOLUTION/TOMBSTONE
 T15 EVALUATION LAUNCH CONTACT MARKER
 ```
 
-T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
+T4/T8 create the immutable Attempt, its nonterminal `attempt_status` row with the same `run_id`, the Attempt-scoped AgentControlSession bound to the current RestoreGeneration with `credential_revision = 1`, and the matching `run_status.current_attempt_id` update in one authoritative transaction. T8 may commit only after the prior Attempt for that Run is definitively terminal; the partial unique index is the database backstop against overlapping nonterminal lineages.
+
+T4a is a short authoritative recovery transaction used only when the current-generation Attempt is still durably `NOT_CONTACTED` and the raw bearer needed for first launch was lost. It rechecks session/Attempt/Run/ControlLease state plus the expected current credential revision, increments `credential_revision`, replaces `credential_hash`, records non-secret rekey provenance/Event, and commits before rebuilding the launch credential projection. It never changes Attempt ID, LaunchKey, AgentControlSession ID, or RestoreGeneration.
+
+T4b verifies the same current Attempt/Run/control authority **and the exact current AgentControlSession credential revision** before atomically setting `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, recording initiation provenance, and appending its Event. After T4b commits, T4a is permanently forbidden for that Attempt. Only after T4b may Pantheon cross the external ensureExecution/create boundary using the launch package built for that verified credential revision.
 
 T11 creates/transitions Sandbox desired state only after re-reading the concrete holder and checking that no conflicting current Sandbox exists for that Run/EvaluationOperation. Creation commits the immutable holder FKs and SandboxKey before any runtime call. Release does not erase holder identity needed for audit/reconciliation.
 
@@ -877,15 +932,16 @@ Never perform network/Git/process/backend/secret-store/container-runtime calls i
 6. Task phase/current-Run pointer and Run Finalizing/Completed row-local consistency are schema-constrained; exact live-Run cardinality remains a cross-row relational/controller invariant.
 7. Normal Attempt holder identity/current pointer are FK-constrained and at most one Attempt per Run may be nonterminal through a real partial unique index over `attempt_status.run_id`; retries never overlap an unresolved prior lineage.
 8. Launch-contact boundaries are durable before external launch calls for both normal Attempts and EvaluationAttempts; ambiguous contact never authorizes an overlapping replacement lineage.
-9. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
-10. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
-11. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
-12. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
-13. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests.
-14. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
-15. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
-16. Cancellation/supersession can beat Candidate submission through Task revision CAS.
-17. Requeue occurs only after previous responsible Run terminal.
-18. Force-resolution tombstones stale lineages without fabricating factual Usage.
-19. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
-20. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.
+9. Agent Control bearer material is never persisted; a current-generation session may replace its verifier only under T4a while its Attempt is durably `NOT_CONTACTED`, and T4b freezes that credential revision before external launch contact.
+10. Usage identity is Pantheon-namespaced; a backend may report only for an Attempt ExecutionBinding or control-operation metering binding that immutably names it, and delayed factual usage is not rejected solely for stale controller epoch or current terminal state.
+11. Grant use/redemption and exact broker-operation creation are one CAS transaction under current policy and current RestoreGeneration.
+12. Disaster restore is entered through a crash-safe out-of-database restore latch; SQLite alone is never assumed capable of detecting that its own history was rewound.
+13. T0 rotates a fresh unpredictable RestoreGeneration exactly once per restore operation before any new authority-bearing mutation/effect; the matching durable RecoveryPass makes crash-after-T0 resume-safe.
+14. Restored Grants/Tickets cannot redeem, restored broker operations cannot be reissued from stale state, and old-generation AgentControlSessions cannot authorize worker semantic requests or use T4a to promote themselves.
+15. Operator command idempotency is scoped by `(RestoreGeneration, commandId)` and stale epochs fail before row absence can be interpreted as a new command.
+16. Restored negative observations are historical snapshot evidence; fresh domain reconciliation is required before they can authorize replacement/conflicting external work.
+17. Cancellation/supersession can beat Candidate submission through Task revision CAS.
+18. Requeue occurs only after previous responsible Run terminal.
+19. Force-resolution tombstones stale lineages without fabricating factual Usage.
+20. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
+21. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; ambiguous/non-released Sandbox existence blocks an overlapping replacement for the same holder.

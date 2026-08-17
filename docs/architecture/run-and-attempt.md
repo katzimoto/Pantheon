@@ -140,10 +140,15 @@ Correct ordering:
 T4 create Attempt + LaunchKey + AgentControlSession
 COMMIT
 
+if the original raw Agent Control bearer is unavailable after restart:
+  T4a pre-contact Agent Control rekey
+  rebuild exact credential delivery/projection
+
 prepare exact launch request
 
-BEGIN IMMEDIATE
+T4b BEGIN IMMEDIATE
 verify same current Attempt/Run/control authority
+verify AgentControlSession current generation/revision
 set CONTACT_MAY_HAVE_OCCURRED
 append Event
 COMMIT
@@ -154,6 +159,43 @@ external ensureExecution(...)
 A crash before the marker proves Pantheon never crossed the launch-call boundary for that Attempt. A crash after the marker is conservatively ambiguous: the backend may or may not have received the request. Pantheon reuses the same LaunchKey and reconciles; it does not create a replacement Attempt merely because no acknowledgement exists.
 
 The marker is deliberately conservative: it can produce UNKNOWN even when the call was never actually delivered, but it cannot falsely prove absence after a potentially delivered launch.
+
+## Pre-contact Agent Control credential rekey
+
+The raw Agent Control bearer is intentionally not durable. Therefore a daemon may restart after T4 committed but before T4b while the Attempt is still safely `NOT_CONTACTED` and the original bearer exists only in lost process memory.
+
+Pantheon may recover this exact pre-launch Attempt by rekeying the **existing** AgentControlSession, not by creating another Attempt/session.
+
+T4a is permitted only when all of the following are true in one authoritative transaction:
+
+```text
+same current RestoreGeneration
+AgentControlSession == ACTIVE
+AgentControlSession.restoreGeneration == current RestoreGeneration
+Attempt is current and nonterminal
+Attempt.launchContactState == NOT_CONTACTED
+no independent evidence that launch-capable external execution received the bearer
+current Run/ControlLease authority is valid
+```
+
+Pantheon generates a new high-entropy bearer, atomically replaces the persisted verifier, increments the session `credentialRevision`, and records non-secret rekey provenance. The raw new bearer exists only in protected transient launch state.
+
+A pre-contact rekey invalidates every previously prepared credential projection/package for that Attempt. Before T4b, Pantheon must rebuild or replace any sandbox-local credential file, inherited descriptor setup, adapter bootstrap object, or equivalent delivery material so the exact launch request carries only the current credential revision. Stale prepared credential material is never considered execution authority.
+
+The transition boundary is strict:
+
+```text
+NOT_CONTACTED
+  → current-generation pre-launch rekey is allowed
+
+CONTACT_MAY_HAVE_OCCURRED
+  → AgentControlSession credential verifier/revision freezes
+  → no same-Attempt rekey to recover lost bearer material
+```
+
+If contact may have occurred, Pantheon reconciles the existing external lineage. If that lineage is later proven absent/terminal and fresh execution is desired, Recovery Policy creates the normal new Attempt with a new LaunchKey and AgentControlSession; it does not rotate the old contacted Attempt's credential to relaunch it.
+
+Disaster restore does not use T4a to promote an old-generation session. A session whose `restoreGeneration` differs from the current installation generation remains fenced as defined by the restore architecture.
 
 ## Attempt creation
 
@@ -172,7 +214,9 @@ LaunchReady
 T4 create Attempt + ordinal + LaunchKey + AgentControlSession
 COMMIT
   ↓
-commit launch-contact marker
+optional T4a pre-contact rekey after crash/restart
+  ↓
+T4b commit launch-contact marker
   ↓
 ensure/reconcile external execution
 ```
@@ -181,7 +225,9 @@ Preparation failure may conclude/recover the Run without any Attempt.
 
 ## Agent Control identity
 
-Each Attempt owns one AgentControlSession. A new Attempt gets a new credential/session; reconciliation of the same Attempt across daemon/adapter restart retains the same identity.
+Each Attempt owns one AgentControlSession. A new Attempt gets a new session identity and initial credential revision. Ordinary reconciliation of the same Attempt across daemon/adapter restart retains the same session identity.
+
+Before external contact, loss of the raw bearer may rotate only the session credential verifier/revision under T4a; this is not a new execution lineage. After contact may have occurred, the credential revision is frozen and reconciliation preserves the credential verifier expected by any potentially running worker.
 
 When an Attempt terminalizes or authority is revoked, its AgentControlSession is revoked. Late requests from an old Attempt cannot mutate current Task/Run state.
 
@@ -360,10 +406,13 @@ Current Attempt is reconciled toward termination. UNKNOWN remains nonterminal/fe
 3. At most one Candidate per Run.
 4. `Run Completed => exactly one Candidate`.
 5. `Run Yielded => zero Candidate` and no retry charge.
-6. Every Attempt has one immutable LaunchKey and one Attempt-scoped AgentControlSession.
+6. Every Attempt has one immutable LaunchKey and one Attempt-scoped AgentControlSession identity.
 7. At most one nonterminal Attempt per Run.
 8. Launch-contact intent is durable before the first external launch call.
-9. UNKNOWN external execution never creates replacement execution.
-10. Fresh execution under the same Binding creates a new Attempt only after the prior Attempt is definitively terminal.
-11. Binding/semantic context change creates a new Run.
-12. Every Finalizing Run has a durable terminalTarget.
+9. A current-generation AgentControlSession may rekey only while its Attempt is durably `NOT_CONTACTED` and no independent launch-capable external contact evidence exists.
+10. T4a keeps the same Attempt/session identity, increments only the credential revision, and invalidates/rebuilds all prepared bearer delivery before T4b.
+11. After `CONTACT_MAY_HAVE_OCCURRED`, the Agent Control credential verifier/revision is frozen; lost bearer material never authorizes same-Attempt rekey/relaunch.
+12. UNKNOWN external execution never creates replacement execution.
+13. Fresh execution under the same Binding creates a new Attempt only after the prior Attempt is definitively terminal.
+14. Binding/semantic context change creates a new Run.
+15. Every Finalizing Run has a durable terminalTarget.

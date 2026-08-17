@@ -104,10 +104,13 @@ BEGIN
   assign LaunchKey
   create AgentControlSession
   bind current RestoreGeneration
+  set credentialRevision = 1
   persist credential verifier
 COMMIT
       ↓
-make Agent Control identity/channel available to execution
+make current credential delivery available to exact launch path
+      ↓
+T4b launch-contact marker
       ↓
 ensureExecution(...)
 ```
@@ -119,12 +122,15 @@ agentControlSession:
   id: acs_123
   attempt: attempt_456
   restoreGeneration: restoregen_...
+  credentialRevision: 1
   state: ACTIVE
   credentialVerifier: sha256:...
   createdAt: ...
 ```
 
 `restoreGeneration` is copied from the current installation RestoreGeneration when the session is created and is immutable for that session. A normal daemon restart preserves the generation; a disaster restore rotates it and therefore fences restored Agent Control sessions from the prior history.
+
+`credentialRevision` identifies the current verifier within the same AgentControlSession identity. It starts at 1 and may increase only under the tightly bounded pre-contact recovery protocol in §9. It is not a worker-visible authority counter and does not replace RestoreGeneration or Attempt identity.
 
 Run, Task, Goal, Agent, Binding, and policy context are derived from the Attempt relationship. They are not caller-controlled identity claims.
 
@@ -144,6 +150,8 @@ Requirements:
 The credential audience is only the Pantheon Agent Control gateway.
 
 Pantheon does not need JWT, certificates, SPIFFE, or a local PKI for the local-first v1.
+
+The raw bearer is deliberately recoverable by **replacement before external contact**, not by durable storage. Pantheon does not persist an encrypted bearer, derive it from a long-lived installation key, or make the SecretProvider responsible for ordinary Agent Control session bootstrap.
 
 ## 6. Credential delivery
 
@@ -167,6 +175,8 @@ Avoid exposing the credential through:
 
 A non-secret endpoint/tool description may be injected separately.
 
+Credential delivery is part of the exact launch package, not durable authority by itself. If a pre-contact rekey occurs, every previously prepared delivery projection for the old credential revision is invalid. Pantheon must rebuild/replace the delivery material before crossing T4b; an old sandbox-local file, bootstrap object, descriptor plan, or adapter cache may not be reused as though it carried the current bearer.
+
 ## 7. Authentication is not authorization
 
 A valid Agent Control credential proves only:
@@ -182,7 +192,7 @@ worker request
       ↓
 Agent Control gateway
       ↓
-authenticate AgentControlSession
+authenticate against current AgentControlSession credentialVerifier
       ↓
 verify session.restoreGeneration == current RestoreGeneration
       ↓
@@ -200,6 +210,8 @@ controller or privileged broker
 ```
 
 The RestoreGeneration check occurs before Pantheon looks up or creates an `agent_requests` idempotency row or applies any semantic worker mutation. Therefore restoring an older database cannot make a request whose row was rewound away become fresh authority for a worker credential minted in the pre-restore history.
+
+The credential verifier checked by the gateway is always the current persisted verifier for the session. A stale bearer from an older pre-contact credential revision simply fails authentication.
 
 The Agent cannot self-declare another Task, Run, Agent, Goal, or principal.
 
@@ -226,9 +238,9 @@ An `ACTIVE` row is not sufficient authority after disaster restore. If its immut
 
 Late requests from a revoked or old-generation session cannot mutate authoritative state.
 
-## 9. Recovery continuity
+## 9. Recovery continuity and pre-contact rekey
 
-Ordinary daemon restart or adapter restart does not rotate AgentControlSession identity when the same Attempt may still be alive.
+Ordinary daemon restart or adapter restart normally preserves AgentControlSession identity when the same Attempt may still be alive.
 
 ```text
 same RestoreGeneration
@@ -237,7 +249,50 @@ same LaunchKey
 same AgentControlSession
 ```
 
-This matches Pantheon's rule that reconciliation of one execution lineage is not a retry.
+The raw bearer is intentionally not persisted, which creates one safe special case before first external contact: T4 may have committed while the original bearer existed only in daemon memory, followed by a crash before T4b.
+
+Pantheon may rekey the **same** AgentControlSession only when it can prove that no launch-capable external execution received the old bearer. The authoritative T4a preconditions are:
+
+```text
+session.state == ACTIVE
+session.restoreGeneration == current RestoreGeneration
+Attempt is current and nonterminal
+Attempt.launchContactState == NOT_CONTACTED
+no independent external-contact evidence for this Attempt
+current Run/ControlLease authority is valid
+```
+
+T4a then:
+
+```text
+generate new high-entropy bearer
+BEGIN IMMEDIATE
+  re-read every precondition
+  credentialRevision += 1
+  replace credentialVerifier
+  record non-secret rekey provenance/timestamp
+  append Agent Control rekey Event
+COMMIT
+invalidate all previously prepared credential-delivery material
+rebuild exact launch package using new bearer/revision
+```
+
+The new raw bearer remains protected transient launch state and is never persisted. If Pantheon crashes again before T4b, it may repeat the same protocol and increment the revision again.
+
+The safety boundary is monotonic:
+
+```text
+Attempt.launchContactState == NOT_CONTACTED
+→ current-generation pre-launch rekey may be allowed
+
+Attempt.launchContactState == CONTACT_MAY_HAVE_OCCURRED
+→ credentialRevision + credentialVerifier freeze
+→ same-Attempt rekey is forbidden
+```
+
+After contact may have occurred, a worker may already possess the current bearer. Replacing its verifier could revoke a legitimate live worker while simultaneously losing the only credential capable of authenticating it. Pantheon therefore reconciles that existing lineage. If it is later definitively absent/terminal and another execution is desired, Recovery Policy creates a fresh Attempt/LaunchKey/AgentControlSession rather than rekeying the contacted Attempt.
+
+Pre-contact rekey is not general credential rotation. It is only recovery of an uncontacted launch bootstrap whose raw bearer was lost with process memory.
 
 Disaster restore is different:
 
@@ -251,7 +306,7 @@ semantic Agent Control authority fenced
 
 A physically running pre-restore worker may still exist and must be inspected/reconciled as external execution, but its restored Agent Control credential cannot submit a Candidate, spawn work, invoke broker effects, or create/replay `agent_requests`. Controllers may still use their own fenced recovery authority to inspect or terminate the external lineage.
 
-Pantheon does not rewrite an old-generation session to current or automatically mint a replacement Agent Control credential/session solely to make progress. Any future same-Attempt credential-rotation mechanism must be a separately defined recovery protocol; absent such a protocol, v1 keeps the worker's semantic authority fenced and converges the enclosing execution through normal recovery/finalization.
+T4a may never rewrite `restoreGeneration` or promote an old-generation session into the current generation. Disaster restore therefore does not use pre-contact rekey as an authority-renewal mechanism.
 
 A fresh Attempt gets:
 
@@ -259,6 +314,7 @@ A fresh Attempt gets:
 new Attempt ID
 new LaunchKey
 new AgentControlSession
+credentialRevision = 1
 new credential
 current RestoreGeneration
 ```
@@ -327,6 +383,8 @@ same requestId + different canonical request hash
 ```
 
 The enclosing session generation check happens first. RestoreGeneration therefore does not need to be smuggled into every Agent request key: an old-generation session cannot reach request lookup/creation at all.
+
+Credential revision is likewise not part of Agent request identity. A successful worker request can occur only after external contact, at which point the session credential revision is frozen for that Attempt.
 
 This generalizes the existing dynamic-spawn duplicate-prevention rule to every worker/control operation.
 
@@ -555,7 +613,9 @@ agent_control_sessions
 id
 attempt_id UNIQUE
 restore_generation
+credential_revision    integer >= 1
 credential_hash
+credential_rekeyed_at  nullable
 state
 created_at
 revoked_at
@@ -563,6 +623,8 @@ revocation_reason
 ```
 
 `restore_generation` is immutable session provenance/authority fencing. Authentication of an otherwise valid credential still fails for semantic Agent Control when this value does not equal the current installation RestoreGeneration.
+
+`credential_revision` and `credential_hash` are mutable only together under T4a while the parent Attempt is durably `NOT_CONTACTED` in the current RestoreGeneration. `credential_rekeyed_at` is non-secret audit provenance. No raw bearer is persisted.
 
 and:
 
@@ -584,9 +646,11 @@ PRIMARY KEY(attempt_id, request_id)
 
 Raw Agent Control credentials are never persisted.
 
-AgentControlSession creation belongs to the Attempt-creation transaction and copies the then-current RestoreGeneration.
+AgentControlSession creation belongs to the Attempt-creation transaction and copies the then-current RestoreGeneration with `credential_revision = 1`.
 
 Session revocation belongs to the transaction that conclusively removes worker authority from the Attempt. Disaster restore does not need to rewrite every old session to `REVOKED`; the generation mismatch is itself a fail-closed authority fence while preserving historical state.
+
+The persistence layer cannot express the T4a cross-table condition as a simple row-local `CHECK`, because launch-contact state belongs to the Attempt status. Controller serialization/CAS owns the transition and the PersistenceInvariantChecker/tests verify that no credential revision changes after contact may have occurred.
 
 ## 25. Events and audit
 
@@ -594,10 +658,13 @@ Useful authoritative events include:
 
 ```text
 pantheon.agent-control.session.created.v1
+pantheon.agent-control.session.rekeyed.v1
 pantheon.agent-control.session.revoked.v1
 pantheon.agent-request.accepted.v1
 pantheon.agent-request.denied.v1
 ```
+
+A rekey Event contains session/Attempt ID, old/new credential revision, daemon incarnation, reason and timestamp, but never either credential or verifier/hash.
 
 Do not duplicate every semantic operation with redundant high-volume Agent Control events when the underlying controller already records an authoritative domain event.
 
@@ -611,19 +678,22 @@ Credential material is never logged.
 4. **Agent Control identity is Attempt-scoped.**
 5. **AgentControlSession is durably created with the Attempt before backend execution and binds the current RestoreGeneration immutably.**
 6. **The raw credential is high entropy, scoped to Pantheon Agent Control, and never persisted/logged.**
-7. **Authentication establishes identity only; it grants no operation authority.**
-8. **A consequential Agent Control request requires `session.restoreGeneration == current RestoreGeneration` before request-idempotency lookup/creation or semantic mutation.**
-9. **Current Task/Run/Attempt/policy state is validated for every consequential operation.**
-10. **The Agent Control protocol is semantic/transport-neutral.**
-11. **The Agent surface exposes no operator verbs.**
-12. **Every consequential worker request is Attempt-scoped and idempotent after the session-generation fence passes.**
-13. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
-14. **Spawn/result/action identity is server-derived from the Attempt.**
-15. **Candidate submission is revision-bound and cancellation wins races.**
-16. **New Attempt means new AgentControlSession; ordinary restart reconciliation of the same Attempt preserves it, while disaster restore fences old-generation semantic Agent Control.**
-17. **Same-user native shell execution is not treated as strong isolation.**
-18. **Required control-plane isolation failures fail closed.**
-19. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
+7. **A current-generation session may replace its credential verifier only under T4a while the parent Attempt is durably `NOT_CONTACTED` and no independent external-contact evidence exists.**
+8. **Pre-contact rekey preserves AgentControlSession/Attempt/LaunchKey identity, increments `credentialRevision`, and invalidates/rebuilds every prepared credential-delivery projection before launch contact.**
+9. **After `CONTACT_MAY_HAVE_OCCURRED`, the session credential verifier/revision is frozen for that Attempt; lost bearer material never authorizes rekey/relaunch.**
+10. **Authentication establishes identity only; it grants no operation authority.**
+11. **A consequential Agent Control request requires `session.restoreGeneration == current RestoreGeneration` before request-idempotency lookup/creation or semantic mutation.**
+12. **Current Task/Run/Attempt/policy state is validated for every consequential operation.**
+13. **The Agent Control protocol is semantic/transport-neutral.**
+14. **The Agent surface exposes no operator verbs.**
+15. **Every consequential worker request is Attempt-scoped and idempotent after the session-generation fence passes.**
+16. **Ambiguous external side effects reconcile as UNKNOWN rather than being blindly re-executed.**
+17. **Spawn/result/action identity is server-derived from the Attempt.**
+18. **Candidate submission is revision-bound and cancellation wins races.**
+19. **New Attempt means new AgentControlSession; ordinary restart reconciliation preserves the same session identity and may use only the bounded pre-contact rekey protocol, while disaster restore fences old-generation semantic Agent Control.**
+20. **Same-user native shell execution is not treated as strong isolation.**
+21. **Required control-plane isolation failures fail closed.**
+22. **Agent Control credentials, Grants, exact-operation authorization, and external Secrets are distinct concepts.**
 
 ## v1 scope
 
@@ -633,6 +703,7 @@ Include:
 - Attempt-scoped AgentControlSession;
 - RestoreGeneration-bound Agent Control authority across disaster restore;
 - opaque high-entropy local credential/verifier;
+- bounded pre-contact Agent Control credential rekey after daemon/adapter loss;
 - transport-neutral worker-operation semantics;
 - `action.invoke`;
 - `artifact.seal`;
@@ -649,6 +720,6 @@ Defer:
 - remote public Agent Control listener;
 - mTLS/SPIFFE workload identity;
 - distributed Agent Control gateway;
-- credential rotation within one short-lived Attempt unless future runtimes require it;
+- arbitrary/live credential rotation after external contact;
 - generic worker access to operator resource APIs;
 - rich worker event/watch subscriptions.
