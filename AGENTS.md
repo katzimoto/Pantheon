@@ -31,6 +31,22 @@ pinned Rust toolchain and ordinary OS build prerequisites, and nothing else.
 deliberately excluded. A new check belongs in `scripts/verify.sh`, so that local
 and CI verification never drift into two different commands.
 
+## Agent skills and hooks
+
+Pantheon-specific procedural guidance lives once, at
+`.agents/skills/<name>/SKILL.md`; `docs/development/agent-skills-and-hooks.md`
+is canonical for that mechanism, the four MVP skills, and what a lifecycle
+hook may and may not do. A skill never outranks this file, canonical
+architecture, or `./scripts/verify.sh` — it only operationalizes them.
+
+A local hook may block a completion attempt when the working tree has
+changed since the last successful `./scripts/verify.sh` run; the fix is to
+verify again, or, for genuinely unfinished work, write a proper `## Handoff`
+(`docs/development/change-lifecycle.md`) instead of stopping as if the work
+were done. Independent review of a Pantheon change must come from a
+principal distinct from whoever authored it, in fresh context — never the
+authoring session, regardless of which GitHub credential records it.
+
 ## Start here
 
 1. Establish the task: the requested outcome and its acceptance criteria. When
