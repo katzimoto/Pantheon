@@ -72,8 +72,9 @@ then they are not implementation requirements. See `docs/reviews/README.md`.
 Rules for any new document:
 
 - Give it a `## Status` section saying what it is and how far it is binding.
-- Give it a filename that describes its subject, so its relevance can be
-  judged without opening it.
+- Name the file in lowercase kebab-case (`scheduler-ready-task-eligibility.md`),
+  and describe its subject, so its relevance can be judged without opening it.
+  Domain directory names follow the same convention. This is checked.
 - Reference other documents by repository-root-relative path in inline code,
   for example `docs/architecture/tasks/task-lifecycle.md`. Do not use bare
   filenames; they break when files move.

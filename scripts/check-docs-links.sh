@@ -72,6 +72,19 @@ if [ -f "$map" ]; then
 	find docs/architecture -mindepth 2 -name '*.md' ! -name 'README.md' |
 		sed 's|^\./||' | sort >/tmp/docs-map-ondisk.$$
 
+	# Contract paths are lowercase kebab-case (see docs/README.md). Report a
+	# violation as a naming error and hold it out of the inventory comparison
+	# below: the map parser cannot match a non-conforming row, so comparing it
+	# would claim the contract is unlisted even when a row exists.
+	naming='^docs/architecture/[a-z0-9-]*/[a-z0-9-]*\.md$'
+	grep -Ev "$naming" /tmp/docs-map-ondisk.$$ | while read -r odd; do
+		printf '%s: contract path is not lowercase kebab-case: %s\n' \
+			"$map" "$odd" >&2
+		echo fail >>/tmp/docs-map-status.$$
+	done
+	grep -E "$naming" /tmp/docs-map-ondisk.$$ >/tmp/docs-map-conform.$$ || true
+	mv /tmp/docs-map-conform.$$ /tmp/docs-map-ondisk.$$
+
 	# Compare against a deduplicated listing so a duplicate row is reported only
 	# as a duplicate, not also as a nonexistent contract.
 	sort -u /tmp/docs-map-listed.$$ >/tmp/docs-map-uniq.$$
