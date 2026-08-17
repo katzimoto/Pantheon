@@ -3,54 +3,59 @@ Pantheon pull request. `docs/development/change-lifecycle.md` is the contract;
 this file is the default way to author one, not the contract itself.
 
 Write only what the repository does not already know. The mission Issue owns the
-outcome, the acceptance criteria and the scope. Git owns the commits and the
-changed files. The checks own their own results. A copy of any of them here is a
-second version that decays.
+outcome, acceptance criteria and scope. Git owns commits and changed files.
+GitHub/checks own generic workflow state. Copies here decay.
 -->
 
 ## Mission
 
 <!--
-`Closes #123` only when merging this pull request completes the mission —
-GitHub then closes the Issue on merge into the default branch. Otherwise
-reference the mission without a keyword, for example `Part of #123`, so it
-stays open. Exactly one pull request per mission carries the keyword, and a
-pull request closes at most one mission.
+Use `Closes #123` only when merging this pull request completes that mission.
+GitHub then creates the closing relationship and closes the Issue when the PR
+merges to the default branch.
 
-A change with no mission says so, and says why it did not need one.
+For a supporting PR, use a non-closing cross-reference such as `Part of #123`.
+Do not manually link a supporting PR through GitHub's Development control,
+because that is also a closing relationship on merge to the default branch.
+
+Exactly one PR per mission is mission-closing, and one PR closes at most one
+Engineering Mission. Reconcile overlapping missions before merge rather than
+inventing a second manual completion path.
+
+A rare change with no mission says so and explains why no Engineering Mission
+was appropriate.
 -->
 
 ## Change
 
 <!--
-What this change does, and why it is this shape rather than a smaller or a
-larger one. Enough that a reviewer can judge the diff against the mission
-without reconstructing your reasoning first.
+What this change does, and why it is this shape rather than a smaller or larger
+one. Enough that a reviewer can judge the diff against the mission without
+reconstructing your reasoning first.
 -->
 
 ## Evidence
 
 <!--
-How the acceptance criteria that the diff does not already settle were actually
-proven. One line each, naming the criterion by a few words of its own text:
+Account for every acceptance criterion without copying it. Name each with a few
+stable words and state the actual proof, for example:
 
-  - expired reservations -> regression test reproducing the pre-fix failure
+  - expired reservations -> regression reproduces pre-fix failure and passes
   - ownership after restart -> integration run over both recovery branches
+  - broken reference -> directly shown by diff; docs validator confirms
 
-Proportionate to the claim. A claim about behaviour needs a result that was
-executed; an architecture change needs the reconciliation showing no
-conflicting authority is left. `AGENTS.md` already requires the repository's
-standard validation on every change and the checks report it themselves, so do
-not restate it here.
+Use evidence at the altitude of the claim. `AGENTS.md` already requires standard
+repository validation and GitHub shows generic check state, so do not repeat it
+unless that check's result is itself proof of a mission criterion.
 -->
 
 ## Impact and risk
 
 <!--
-Optional. What this change binds beyond its own diff — a canonical contract, a
-schema, a compatibility commitment — what it risks or leaves incomplete, and
-work you found but deliberately did not do, which `AGENTS.md` requires you to
-report.
+Optional. Meaningful architecture/schema/API/security/compatibility impact,
+risks, incomplete areas, and work discovered but deliberately left out of
+scope.
 
-Delete this heading when there is nothing to say. Do not write "None".
+Delete this heading when there is nothing meaningful to say. Do not write
+"None".
 -->
