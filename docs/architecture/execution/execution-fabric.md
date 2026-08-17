@@ -46,6 +46,9 @@ ACTION / TOOL
 AUTHORIZATION / GRANT
   whether a principal may perform an action
 
+CREDENTIAL BINDING
+  which logical credential authority may satisfy an already-authorized semantic action/resource
+
 RESOURCE
   reservable finite capacity
 ```
@@ -191,11 +194,16 @@ ConfigurationRevision
 routePolicyDigest
 executionProfileDigest
 frozen authorization ceiling digest
+credentialBindingRegistryDigest
 reservations/budget refs created by scheduling commit
 resolved backend-private model/runtime audit metadata where appropriate
 ```
 
+`credentialBindingRegistryDigest` identifies the immutable CredentialBindingRegistry from the ConfigurationRevision captured at T3. It freezes the Run's logical credential-mapping authority without freezing SecretVersionId or secret bytes.
+
 Changing Agent/backend/offer/material execution configuration creates a new Run/new Binding. Binding is never edited in place.
+
+A later credential-binding configuration change does not mutate the Binding. For an exact credential-bearing semantic operation, Pantheon resolves the action/resource against both the Run's frozen registry and the current active registry and requires equality of the exact resolved `credentialBindingAuthorityDigest`. Whole-registry equality is deliberately unnecessary: changing an unrelated binding must not invalidate this Run.
 
 ## ExecutorBackend operational interface
 
@@ -245,11 +253,25 @@ Registration/configuration publishes stable backend IDs and descriptor revisions
 
 Removing/disabling a backend from active configuration means no new offers. Existing Attempts/obligations retain enough adapter/recovery support until they are safely terminal; configuration removal never makes an external execution disappear.
 
-## Authorization
+## Authorization and credential authority
 
 ExecutionBackend is not authorization authority. It receives only what Pantheon has authorized/compiled. Backend-native permission controls are defense in depth and may tighten but never broaden the canonical policy.
 
 Agent Control authenticates Attempt identity; Broker/PDP controls semantic actions; Sandbox limits ambient physical authority.
+
+Credential binding is a separate gate after semantic authorization. For a credential-bearing Run operation, Pantheon requires:
+
+```text
+semantic action/resource authorized now
+AND frozen Run authorization ceiling permits it
+AND exact binding exists in Run's frozen CredentialBindingRegistry
+AND exact binding exists in current active CredentialBindingRegistry
+AND frozen credentialBindingAuthorityDigest == current credentialBindingAuthorityDigest
+AND secret.use is authorized
+AND the resolved SecretDescriptor is currently usable/reconciled
+```
+
+If the current exact binding is removed or changes logical SecretRef/mechanism/credential-use constraints, the operation fails closed for that existing Run. A new Run may later freeze the new mapping if otherwise authorized. Rotation of material behind the same logical SecretRef is not a Binding change and may use the current SecretVersion after SecretProvider reconciliation.
 
 ## Core review invariant
 
@@ -269,8 +291,10 @@ for semantic business logic is an architecture violation. Concrete-specific beha
 3. Offers are side-effect-free factual compatibility descriptions.
 4. Final candidate is Agent+Offer; backend does not choose Agent or self-award quality/authorization.
 5. Binding is immutable and provider-neutral at core boundary.
-6. Launch semantics are explicit `KEYED_IDEMPOTENT|OBSERVATIONAL`; unsafe observational offers are filtered before Run commitment.
-7. Attempt/LaunchKey/contact marker, not adapter memory, are durable launch truth.
-8. Sandbox guarantees are controller-validated, not backend self-authorization.
-9. Agent Control features are semantic execution features independent of transport/harness.
-10. Backend usage is validated/namespaced against immutable Attempt ExecutionBinding ownership or immutable control-operation metering-source ownership; metering provenance never reclassifies a control operation as a Run.
+6. ExecutionBinding freezes `credentialBindingRegistryDigest`; later credential-bearing actions require exact frozen/current `credentialBindingAuthorityDigest` equality rather than whole-registry equality.
+7. Credential material rotation behind the same logical SecretRef does not mutate ExecutionBinding or broaden credential authority.
+8. Launch semantics are explicit `KEYED_IDEMPOTENT|OBSERVATIONAL`; unsafe observational offers are filtered before Run commitment.
+9. Attempt/LaunchKey/contact marker, not adapter memory, are durable launch truth.
+10. Sandbox guarantees are controller-validated, not backend self-authorization.
+11. Agent Control features are semantic execution features independent of transport/harness.
+12. Backend usage is validated/namespaced against immutable Attempt ExecutionBinding ownership or immutable control-operation metering-source ownership; metering provenance never reclassifies a control operation as a Run.

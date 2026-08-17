@@ -29,6 +29,7 @@ See also:
 6. **Fail closed.** If Pantheon cannot enforce required authority, work does not start/continue.
 7. **Every consequential privileged operation is auditable.**
 8. **Authorization is checked at redemption/use time, not only when a request was first proposed.**
+9. **Credential mapping is not authorization.** A permitted semantic action that requires credentials must separately satisfy the Run's frozen credential-binding ceiling, the current exact binding and `secret.use` before material retrieval.
 
 ## Request path
 
@@ -48,6 +49,10 @@ Policy Decision Point
 DENY or PERMIT
   ↓
 transactional authority redemption
+  ↓
+for credential-bearing effects:
+  exact frozen/current CredentialBinding compatibility
+  + secret.use authorization
   ↓
 Execution/Credential/Integration/etc. Broker
   ↓
@@ -119,6 +124,8 @@ Task/Goal restrictions
 Grant refs actually consumed
 ```
 
+For credential-bearing broker operations, authority provenance additionally records the Run's frozen `credentialBindingRegistryDigest` and the exact resolved `credentialBindingAuthorityDigest` that matched current configuration. These are separate from `authzPolicyDigest` and contain no secret material.
+
 For a live Run, effective semantic authority is bounded by:
 
 ```text
@@ -130,6 +137,18 @@ built-in hard policy
 ```
 
 A policy relaxation never silently broadens an existing Run. A tightening may deny future operations immediately and may require Run termination if its Sandbox cannot physically enforce the new ceiling.
+
+Credential-bearing actions have an additional conjunctive ceiling:
+
+```text
+semantic authority above
+∩ exact binding from Run's frozen CredentialBindingRegistry
+∩ exact compatible binding from current CredentialBindingRegistry
+∩ current secret.use authorization
+∩ current usable/reconciled SecretDescriptor
+```
+
+The exact frozen/current binding is compatible in v1 only when its canonical `credentialBindingAuthorityDigest` matches. Current configuration may remove/tighten/change a binding and deny the old Run, but it cannot remap the old Run onto a different credential authority.
 
 ## Cedar policy engine
 
@@ -191,16 +210,29 @@ re-read:
 require Grant.restoreGeneration == current RestoreGeneration
 re-evaluate authorization under current policy
 
+if operation is credential-bearing:
+  load Run.ExecutionBinding.credentialBindingRegistryDigest
+  resolve exact normalized action/resource in frozen CredentialBindingRegistry
+  resolve same exact normalized action/resource in current CredentialBindingRegistry
+  require both bindings exist
+  require frozen credentialBindingAuthorityDigest == current credentialBindingAuthorityDigest
+  authorize secret.use for the resolved logical SecretRef/operation
+  require SecretDescriptor currently usable/reconciled
+
 CAS decrement/increment Grant use accounting exactly once
 create/transition exact broker-operation authority record under current RestoreGeneration
+for credential-bearing operation, persist non-secret binding provenance used for this authority decision
 append authorization/audit Event
 
 COMMIT
 
+only then retrieve transient secret material if required
 external effect
 ```
 
-Two concurrent requests cannot both consume the last remaining use. Retries of the same idempotent operation return/reconcile the already-created broker operation rather than consuming another use.
+The broker-operation provenance for a credential-bearing effect includes at least the Run's frozen registry digest, the exact `credentialBindingAuthorityDigest`, current configuration/registry identity used for the compatibility decision, and the logical SecretRef/SecretDescriptor identity. The factual `SecretVersionId` actually used is recorded after material resolution/effect observation; it is not part of the frozen authority digest.
+
+Two concurrent requests cannot both consume the last remaining use. Retries of the same idempotent operation return/reconcile the already-created broker operation rather than consuming another use or re-resolving it into a different credential authority.
 
 A broker operation from an older RestoreGeneration is not eligible for this normal retry path. It is reconciliation-only until its external outcome is established or explicitly force-resolved; Pantheon never changes its idempotency identity merely to make a restored operation executable again.
 
@@ -217,9 +249,9 @@ restoreGeneration
 expiry/single-use state
 ```
 
-But a ticket is **not durable bearer authority that bypasses current policy**.
+But a ticket is **not durable bearer authority that bypasses current policy or credential-binding compatibility**.
 
-Before redemption/external effect, the broker transaction must revalidate current authority, require the ticket's RestoreGeneration to equal the current generation, and atomically mark/consume the ticket. A ticket issued before security tightening or recovered from an older disaster-restore generation can therefore be denied at redemption.
+Before redemption/external effect, the broker transaction must revalidate current authority, require the ticket's RestoreGeneration to equal the current generation, re-run the exact frozen/current credential-binding check when the operation is credential-bearing, and atomically mark/consume the ticket. A ticket issued before security tightening, credential remapping, or recovered from an older disaster-restore generation can therefore be denied at redemption.
 
 No Agent may mint a ticket. Ticket IDs/bytes are never equivalent to Operator Control authority.
 
@@ -228,8 +260,14 @@ No Agent may mint a ticket. Ticket IDs/bytes are never equivalent to Operator Co
 Keep distinct:
 
 ```text
+semantic authorization
+  may this principal perform git.push on repo://... now?
+
+credential binding
+  which logical credential authority may satisfy that exact operation for this Run?
+
 secret.use
-  authorize a Pantheon-owned broker to use credential material on behalf of the principal
+  may Pantheon's broker use the resolved credential material for this exact authorized operation?
 
 secret.read
   disclose raw secret material to principal-controlled code/context
@@ -237,7 +275,11 @@ secret.read
 
 For Agent principals, v1 built-in hard policy denies `secret.read` non-approvably. Injecting a raw secret into an arbitrary Agent-controlled shell/environment/file is therefore not permitted as `secret.use`; it would be disclosure.
 
-Credential-requiring semantic actions normally trigger `secret.use` as an internal sub-authorization. Secret material remains in the SecretProvider/Credential Broker boundary.
+Credential-requiring semantic actions normally trigger `secret.use` as an internal sub-authorization. Before that sub-authorization/retrieval, an existing Run must resolve the exact action/resource through its frozen `credentialBindingRegistryDigest` and the current active CredentialBindingRegistry. V1 requires equality of the exact `credentialBindingAuthorityDigest`; whole-registry equality is not required.
+
+CredentialBinding authority covers the canonical action/resource scope, logical SecretRef, broker mechanism class and credential-use constraints. It excludes SecretVersionId and secret bytes. Therefore material rotation behind the same logical SecretRef may affect a still-authorized Run after SecretProvider reconciliation, while remapping to a different SecretRef or mechanism denies the old Run rather than broadening it.
+
+Secret material remains in the SecretProvider/Credential Broker boundary.
 
 ## Delegation and Task spawning
 
@@ -313,6 +355,9 @@ Audit/Event records identify, without sensitive material:
 - normalized action/resource/argument hash;
 - decision and reason;
 - exact ConfigurationRevision/authz digest;
+- Run `credentialBindingRegistryDigest` and exact `credentialBindingAuthorityDigest` for credential-bearing effects;
+- current credential-binding registry/config identity compared at redemption;
+- logical SecretRef/SecretDescriptor identity and factual SecretVersionId actually used, when applicable;
 - Grant/ticket/broker-operation refs actually involved;
 - RestoreGeneration involved in authority redemption;
 - redemption/use-count transition;
@@ -325,11 +370,13 @@ Secrets/tokens/raw bearer material never enter Events/logs.
 1. Pantheon, not model/backend, is authorization authority.
 2. Authorization is `PERMIT|DENY`; approval creates a Grant then re-evaluates.
 3. Hard forbid/default deny are mandatory.
-4. Existing Runs never gain broader authority from later policy relaxation.
-5. Grants/tickets are revalidated against current authority **and current RestoreGeneration** at redemption; restored old-generation authority cannot be redeemed until an operator creates new current-generation authority.
-6. Grant `uses` accounting and exact operation creation are one transactional CAS boundary, and the broker operation is bound to the same current RestoreGeneration.
-7. Old-generation broker operations are reconciliation evidence after restore, not authority to repeat an external effect.
-8. Agent `secret.read` is hard-denied in v1; `secret.use` is brokered use only.
-9. Sandbox ambient capability is no broader than semantic authority and excludes Pantheon/peer/host privileged state.
-10. Provider-native security is defense in depth, never the source of truth.
-11. Failure to enforce required policy fails closed.
+4. Existing Runs never gain broader authority from later policy relaxation or credential-binding remapping.
+5. Credential-bearing Run operations require exact frozen/current `credentialBindingAuthorityDigest` equality in addition to semantic authorization; unrelated registry changes do not invalidate the Run.
+6. CredentialBinding authority excludes SecretVersionId/secret bytes, so material rotation behind the same logical SecretRef is possible without broadening the Run.
+7. Grants/tickets are revalidated against current authority **and current RestoreGeneration** at redemption; restored old-generation authority cannot be redeemed until an operator creates new current-generation authority.
+8. Grant `uses` accounting and exact operation creation are one transactional CAS boundary, and credential-bearing broker operations persist the exact non-secret binding authority that was redeemed.
+9. Old-generation broker operations are reconciliation evidence after restore, not authority to repeat an external effect.
+10. Agent `secret.read` is hard-denied in v1; `secret.use` is brokered use only.
+11. Sandbox ambient capability is no broader than semantic authority and excludes Pantheon/peer/host privileged state.
+12. Provider-native security is defense in depth, never the source of truth.
+13. Failure to enforce required policy or credential-binding compatibility fails closed.

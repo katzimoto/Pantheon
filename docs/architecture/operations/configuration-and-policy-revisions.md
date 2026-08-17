@@ -6,7 +6,7 @@ Canonical Pantheon configuration publication and policy revision specification.
 
 ## Purpose
 
-Pantheon requires one coherent, immutable, auditable configuration snapshot for authorization, routing, evaluator publication, execution profiles, recovery policy, context construction, and other operator-controlled registries. Controllers must never observe partially applied configuration or infer security authority directly from mutable source files.
+Pantheon requires one coherent, immutable, auditable configuration snapshot for authorization, routing, evaluator publication, execution profiles, recovery policy, context construction, credential binding resolution, and other operator-controlled registries. Controllers must never observe partially applied configuration or infer security authority directly from mutable source files.
 
 The central rule is:
 
@@ -32,6 +32,7 @@ configurationRevision:
     recoveryPolicies: sha256:RECOVERY
     agents: sha256:AGENTS
     context: sha256:CONTEXT
+    credentialBindings: sha256:CREDENTIAL_BINDINGS
 
   sourceSetDigest: sha256:SOURCES
   compiler:
@@ -56,9 +57,12 @@ integrationPolicyDigest
 evaluatorRegistryDigest
 executionProfileDigest
 contextPolicyDigest
+credentialBindingRegistryDigest
 ```
 
 `contextPolicyDigest` is the digest of the immutable `context` ConfigurationRevision component used by Context Builder decisions. It is not an authorization digest.
+
+`credentialBindingRegistryDigest` is the digest of the immutable `credentialBindings` ConfigurationRevision component. It identifies compiled logical credential-mapping authority only; it never hashes or embeds SecretVersionId values or secret material.
 
 Decision records bind the exact configuration component that affected them.
 
@@ -75,7 +79,8 @@ Examples:
 - evaluator registry resolves logical refs to immutable versions;
 - execution profiles use explicitly defined inheritance/composition;
 - Agent configuration follows the Agent Manifest layering contract;
-- context configuration compiles deterministic mandatory/preload/drop/retrieval limits into one immutable ContextPolicy component.
+- context configuration compiles deterministic mandatory/preload/drop/retrieval limits into one immutable ContextPolicy component;
+- credential-binding configuration compiles canonical action/resource scope plus logical SecretRef, broker mechanism class and credential-use constraints into one immutable CredentialBindingRegistry component.
 
 Goal/Task restrictions and temporary Grants are runtime state, not ConfigurationRevision source configuration.
 
@@ -134,6 +139,8 @@ Its canonical decision digest is named `contextPolicyDigest`.
 
 The ContextComponent controls deterministic semantic selection/trimming only. It is not a frozen security-authority grant: current hard/current authorization policy remains independently enforceable while a Run is preparing/executing.
 
+CredentialBindingRegistry is likewise independently immutable ConfigurationRevision state. Each compiled binding has a canonical `credentialBindingAuthorityDigest` over the semantic action/resource scope, logical SecretRef, broker mechanism class and credential-use constraints. The digest deliberately excludes SecretVersionId and secret bytes so material rotation behind the same logical SecretRef does not change the binding authority identity.
+
 ## 7. Canonical hashing
 
 Pantheon hashes canonical compiled semantics, not only source bytes.
@@ -160,9 +167,9 @@ read source bytes
 → parse
 → schema validate
 → domain-specific composition
-→ compile Cedar/policies/context policy
+→ compile Cedar/policies/context policy/credential bindings
 → validate all cross-references
-→ resolve evaluator/route/profile/Agent refs
+→ resolve evaluator/route/profile/Agent/credential-binding refs
 → canonicalize
 → hash
 → candidate ConfigurationRevision
@@ -233,6 +240,8 @@ If active configuration changed, the operation aborts and is recomputed under th
 
 T3 binds the exact `ConfigurationRevision + contextPolicyDigest` into the Run's immutable ContextSourceSnapshot. Context Builder later uses that frozen source snapshot even if another ConfigurationRevision activates while preparation is in progress.
 
+T3 also freezes the exact `credentialBindingRegistryDigest` into the immutable ExecutionBinding. This freezes which logical credential-mapping authority may satisfy later brokered operations for that Run without freezing the SecretVersion/material that may be current when the operation actually executes.
+
 ## 12. Immutable decision binding
 
 ExecutionBindings and other immutable decisions record the exact configuration revision/components used.
@@ -245,6 +254,7 @@ ExecutionBinding:
   routePolicyDigest: sha256:R
   executionProfileDigest: sha256:E
   authzCeilingDigest: sha256:A
+  credentialBindingRegistryDigest: sha256:CBR
 ```
 
 ```yaml
@@ -264,6 +274,8 @@ EvaluationRound:
   configRevision: cfgrev_43
   evaluatorRegistryDigest: sha256:ER
 ```
+
+For credential-bearing actions, `credentialBindingRegistryDigest` is immutable decision provenance. At use time Pantheon resolves the exact action/resource binding from that frozen registry and separately from the current active registry. The exact resolved `credentialBindingAuthorityDigest` must still match before secret retrieval; an unrelated registry change does not invalidate the Run.
 
 ## 13. Existing Runs and authorization changes
 
@@ -288,6 +300,8 @@ Consequences:
 
 Pantheon does not need to prove whether an arbitrary policy change is semantically a pure tightening or relaxation.
 
+Credential mapping is an additional independent gate for credential-bearing operations. Current configuration may remove or change a binding and thereby deny an existing Run, but it may not remap that Run onto a different credential authority. Existing Runs compare the exact frozen/current resolved binding authority, not whole-registry equality.
+
 ## 14. Physical enforcement on policy tightening
 
 A policy update can only be considered enforced if the execution environment can physically enforce the new restriction.
@@ -298,17 +312,20 @@ If not, Pantheon must stop/finalize the affected Run and require future work to 
 
 Pantheon must never claim a security policy is active for an execution whose physical sandbox cannot enforce it.
 
-## 15. Routing, evaluator, execution-profile, Agent, and context changes
+## 15. Routing, evaluator, execution-profile, Agent, context, and credential-binding changes
 
-Normal preference/configuration changes affect future work only.
+Normal preference/configuration changes affect future work only unless current security/credential use rules deny an existing action.
 
 - route policy change: existing Binding unchanged; future Runs use new route policy;
 - evaluator registry logical ref change: existing Tasks retain their pinned EvaluatorVersion; future Tasks resolve the new version;
 - execution profile change: existing Run keeps frozen profile unless current hard security invalidates it;
 - Agent definition change: existing Run keeps frozen Agent snapshot; future Agent Resolution uses the active version;
-- context policy change: existing Run keeps the `contextPolicyDigest` frozen in its ContextSourceSnapshot; future Runs freeze the newly active ContextComponent.
+- context policy change: existing Run keeps the `contextPolicyDigest` frozen in its ContextSourceSnapshot; future Runs freeze the newly active ContextComponent;
+- credential binding change: existing Run keeps its frozen `credentialBindingRegistryDigest`; a credential-bearing action is permitted only if the exact current binding still resolves to the same `credentialBindingAuthorityDigest`; unrelated binding changes do not invalidate the Run, while a changed/removed exact binding denies the action.
 
 A context policy update never causes Context Builder to rebuild/replace the ContextPlan of an already committed Run. Material semantic context changes require a new Run.
+
+Credential material rotation behind the same logical SecretRef is not a CredentialBinding change and does not require a new Run solely because `SecretVersionId` changed.
 
 ## 16. Backend registration and draining
 
@@ -376,7 +393,7 @@ Every ConfigurationRevision records the logical source inputs and digests that p
 
 Filesystem path/location is provenance only, not semantic identity.
 
-Configuration may contain SecretRefs but never raw secret values.
+Configuration may contain SecretRefs but never raw secret values or SecretVersion material identity as part of CredentialBinding authority.
 
 ## 22. Rollback
 
@@ -402,6 +419,8 @@ The Scheduler may not commit a new Run until it has observed the active ConfigRe
 
 An existing Run whose T3 already committed does not switch ContextPolicy during preparation; Context Builder resolves policy through the Run's ContextSourceSnapshot rather than the current active pointer.
 
+A credential-bearing broker operation does not switch the Run's frozen credential authority either. It compares the exact binding resolved from the Run's frozen CredentialBindingRegistry with the exact binding under the current active registry before material retrieval.
+
 ## 24. Persistence model
 
 Likely persistence families:
@@ -415,7 +434,7 @@ config_load_attempts
 config_reconciliations
 ```
 
-`configuration_components` includes the immutable ContextComponent addressed by `contextPolicyDigest`; ContextSourceSnapshot/ContextPlan persistence belongs to the Run/context architecture rather than configuration publication state.
+`configuration_components` includes the immutable ContextComponent addressed by `contextPolicyDigest` and the immutable CredentialBindingRegistry addressed by `credentialBindingRegistryDigest`; neither component contains secret material. ContextSourceSnapshot/ContextPlan persistence belongs to the Run/context architecture rather than configuration publication state.
 
 Exact DDL is implementation work.
 
@@ -441,6 +460,7 @@ ConfigurationRevision is not a snapshot of the whole database. It excludes runti
 
 - Goals/Tasks/Runs/Attempts;
 - ContextSourceSnapshots/ContextPlans attached to Runs;
+- SecretVersionId/current secret material state;
 - ResourceReservations/BudgetHolds/Usage;
 - backend health/rate limits;
 - temporary Grants/Approvals;
@@ -458,9 +478,11 @@ ConfigurationRevision is not a snapshot of the whole database. It excludes runti
 6. Controllers bind one ConfigRevision per consequential operation and revalidate staleness before commit.
 7. Immutable decisions bind exact component digests rather than one ambiguous `policyHash`.
 8. Context construction has an explicit immutable `context` component named by `contextPolicyDigest`; it is never hidden behind a generic policy field.
-9. T3 freezes `configRevision + contextPolicyDigest` into the Run's ContextSourceSnapshot; later ContextPolicy activation affects future Runs only.
-10. Existing Runs cannot gain authority from a later policy relaxation.
-11. Current policy tightening applies to future actions and may force Run termination if physical enforcement cannot be tightened safely.
-12. Configuration history and hash-bearing historical documents are immutable.
-13. Explicit configuration activation is operator authority and unavailable to Agent Control.
-14. A single-daemon/single-database Pantheon uses atomic coherent configuration snapshots rather than eventually consistent component rollout.
+9. Credential mapping has an explicit immutable `credentialBindings` component named by `credentialBindingRegistryDigest`; compiled binding authority excludes SecretVersionId/secret material.
+10. T3 freezes `configRevision + contextPolicyDigest` into the Run's ContextSourceSnapshot and freezes `credentialBindingRegistryDigest` into ExecutionBinding.
+11. Existing Runs cannot gain authority from a later policy relaxation or credential-binding remap; exact credential use requires frozen/current resolved binding-authority equality.
+12. Current policy tightening applies to future actions and may force Run termination if physical enforcement cannot be tightened safely.
+13. Credential material may rotate behind the same logical SecretRef without broadening the Run or requiring a new Run solely for the new SecretVersionId.
+14. Configuration history and hash-bearing historical documents are immutable.
+15. Explicit configuration activation is operator authority and unavailable to Agent Control.
+16. A single-daemon/single-database Pantheon uses atomic coherent configuration snapshots rather than eventually consistent component rollout.

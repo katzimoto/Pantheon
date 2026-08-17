@@ -129,13 +129,57 @@ binding:
 
 The model normally requests the semantic action (`git.push`), not a SecretRef.
 
-`CredentialBindingRegistry` is versioned ConfigurationRevision state.
+`CredentialBindingRegistry` is an immutable `credentialBindings` component of ConfigurationRevision. Its canonical component identity is `credentialBindingRegistryDigest`.
+
+Each compiled exact binding additionally has a canonical `credentialBindingAuthorityDigest` over at least:
+
+```text
+normalized semantic action
+normalized resource scope
+logical SecretRef
+broker mechanism class
+credential-use constraints
+```
+
+The authority digest deliberately excludes:
+
+```text
+SecretVersionId
+secret bytes
+provider's current material value
+```
+
+because those facts describe rotatable material, not which credential authority the Run was allowed to use.
 
 ## 7. Frozen authority, rotatable material
 
-A Run freezes the logical credential binding/authority ceiling that existed when its Binding was formed.
+A Run's immutable ExecutionBinding freezes the `credentialBindingRegistryDigest` from the ConfigurationRevision captured at T3.
 
-A later change from one logical SecretRef to a different, broader SecretRef does not silently broaden an existing Run.
+That frozen registry is the Run's maximum logical credential-mapping universe. A later current configuration can remove/tighten/change an exact binding and thereby deny an operation, but it cannot remap the existing Run onto a different credential authority.
+
+For a credential-bearing action, Pantheon resolves the exact normalized action/resource against both:
+
+```text
+Run frozen CredentialBindingRegistry
+current active CredentialBindingRegistry
+```
+
+V1 compatibility is deliberately conservative:
+
+```text
+frozen exact binding exists
+AND current exact binding exists
+AND frozen credentialBindingAuthorityDigest
+    == current credentialBindingAuthorityDigest
+→ credential mapping may proceed to secret.use/current SecretDescriptor checks
+
+otherwise
+→ DENY / credential-binding-stale
+```
+
+Whole-registry digest equality is **not** required. Changing an unrelated credential mapping must not invalidate an existing Run.
+
+A later change from one logical SecretRef to a different, broader SecretRef therefore does not silently broaden an existing Run.
 
 However, rotation of the material behind the same logical SecretRef may apply to existing authorized Runs:
 
@@ -143,11 +187,11 @@ However, rotation of the material behind the same logical SecretRef may apply to
 same SecretRef + new SecretVersionId
 = rotation
 
-different SecretRef
+different SecretRef / mechanism / credential-use constraint
 = authority/configuration change
 ```
 
-Effective credential authority for a live operation is constrained by the Run's frozen binding/ceiling and current policy/configuration.
+Effective credential authority for a live operation is constrained by the Run's frozen exact binding, the current compatible exact binding, current semantic authorization, `secret.use` authorization and current SecretDescriptor/provider state.
 
 ## 8. Action-first credential resolution
 
@@ -158,14 +202,26 @@ Agent requests semantic action
         ↓
 authenticate Attempt
         ↓
-authorize action/resource
+authorize action/resource under current policy + frozen Run authorization ceiling
         ↓
-resolve frozen/current CredentialBinding
+resolve exact binding from Run frozen CredentialBindingRegistry
+        ↓
+resolve exact binding from current CredentialBindingRegistry
+        ↓
+require exact credentialBindingAuthorityDigest equality
+        ↓
+atomic Grant/ticket redemption + exact broker-operation creation
         ↓
 authorize secret.use as required
         ↓
+require usable/reconciled SecretDescriptor
+        ↓
+retrieve current permitted SecretVersion/material
+        ↓
 perform exact broker operation
 ```
+
+The exact broker-operation authority, including non-secret binding provenance, is committed before secret material retrieval or external effect. A retry/reconciliation follows that same broker operation; it does not re-resolve into another credential mapping merely because configuration later changed.
 
 `secret.use` is primarily an internal sub-authorization rather than a generic Agent tool.
 
@@ -265,6 +321,8 @@ A backend configuration may contain SecretRefs which its adapter resolves throug
 The model never receives those credentials.
 
 Secret Broker therefore serves control-plane/broker/backend principals as well as Agent-triggered operations, with principal-specific authorization.
+
+Run-frozen CredentialBindingRegistry semantics apply to Run/Agent-triggered credential authority. Control-plane backend credentials follow their own immutable backend/configuration provenance rather than pretending to be Run CredentialBindings.
 
 ## 15. Secret material path
 
@@ -469,6 +527,10 @@ Secret-related audit records contain only metadata such as:
 
 ```yaml
 operation: git.push
+credentialBinding:
+  frozenRegistry: sha256:CBR1
+  currentRegistry: sha256:CBR2
+  authority: sha256:CBA
 credential:
   secretId: secret_123
   version: secretver_9
@@ -476,7 +538,9 @@ brokerOperation: brokerop_77
 result: succeeded
 ```
 
-They never contain:
+The binding registry/authority digests explain **why this logical credential authority was permitted**. `SecretVersionId` explains **which rotatable material version was factually used**. The latter is not part of the authority digest.
+
+Audit records never contain:
 
 - secret material;
 - authorization headers;
@@ -495,24 +559,31 @@ current Attempt/principal identity
   ↓
 current Task/Run state
   ↓
-current policy
+current semantic policy
+  ↓
+load Run frozen credentialBindingRegistryDigest
+  ↓
+resolve exact normalized action/resource in frozen + current registries
+  ↓
+require exact credentialBindingAuthorityDigest equality
   ↓
 atomic scoped Grant-use redemption/CAS if needed
-  ↓
-exact broker operation authority established
-  ↓
-resolve CredentialBinding
++ exact broker-operation creation with binding provenance
   ↓
 secret.use authorization
   ↓
-retrieve secret material
+require usable/reconciled SecretDescriptor
   ↓
-execute
+retrieve current permitted secret material
+  ↓
+execute exact broker effect
 ```
 
-Secret retrieval never occurs optimistically before authorization.
+Secret retrieval never occurs optimistically before authorization or before the broker operation has durably captured the exact credential authority being redeemed.
 
-A stale bearer capability may not bypass current policy/state. Any internal capability ticket is short-lived/exact and revalidated at redemption.
+A stale bearer capability may not bypass current policy/state or current credential-binding compatibility. Any internal capability ticket is short-lived/exact and revalidated at redemption.
+
+A retry of an already-created broker operation uses/reconciles that operation's original binding authority and external idempotency identity. It does not re-run current credential resolution to transform the old operation into a different logical credential authority.
 
 ## 26. Availability is operation-scoped
 
@@ -527,13 +598,14 @@ secret.unavailable
 secret.locked
 secret.missing
 secret.drifted
+credential-binding-stale
 ```
 
 ## 27. Child Task inheritance
 
 Child Tasks inherit authority ceilings, not secret material and not an implicit credential inventory.
 
-A child can use a credential only if its effective Task/Goal/Agent/current policy plus frozen credential binding permits the semantic operation requiring it.
+A child can use a credential only if its effective Task/Goal/Agent/current policy plus its own Run's frozen/current-compatible credential binding permits the semantic operation requiring it.
 
 Spawn requests contain no raw secret propagation mechanism.
 
@@ -562,6 +634,8 @@ Secret Reconciler compares expected `SecretVersionId`/identity metadata with pro
 Mismatch becomes `DRIFTED` and credential use fails closed until operator reconciliation.
 
 Pantheon never silently assumes that whichever current secure-store value exists belongs to the restored database history.
+
+Frozen CredentialBindingRegistry/authority provenance is non-secret configuration/audit history and may survive restore. It still cannot make an old-generation broker operation executable: RestoreGeneration fencing and normal restore reconciliation apply first.
 
 ## 30. Global Recovery integration
 
@@ -649,15 +723,17 @@ RecoveryFindings/audit contain only non-secret item/version/intent/lease identit
 When the material behind the same logical SecretRef rotates:
 
 ```text
-new broker operations
-→ current SecretVersionId
+same logical SecretRef
+same exact credentialBindingAuthorityDigest
+new SecretVersionId
+→ existing otherwise-authorized Run may use current version
 ```
 
-Existing Runs may continue using the logical credential if still permitted by their frozen authority/current policy.
+The broker first rechecks current policy, exact frozen/current binding compatibility and current SecretDescriptor/provider state. Rotation is not a bypass around a removed/changed CredentialBinding.
 
 Audit records which material version each operation used.
 
-Rotation does not require a new Run solely because bytes changed.
+Rotation does not require a new Run solely because bytes/SecretVersionId changed.
 
 ## 32. Secrets are not Artifacts
 
@@ -677,6 +753,8 @@ secret_mutation_intents
 credential_leases
 credential_use_records
 ```
+
+CredentialBindingRegistry itself is immutable ConfigurationRevision component data rather than SecretProvider material. Credential-bearing `broker_operations` persist the non-secret frozen/current binding provenance and exact `credentialBindingAuthorityDigest` that authorized the operation; credential-use metadata may record the factual SecretVersionId actually used.
 
 None contain secret bytes.
 
@@ -701,23 +779,27 @@ Agent Control can only cause an already-authorized semantic broker operation to 
 3. Long-lived storage is delegated to a secure pluggable SecretProvider.
 4. V1 has no insecure file fallback.
 5. SecretRefs remain stable across material rotation; versions use random non-secret IDs.
-6. Runs freeze logical CredentialBinding authority, not secret material versions.
-7. Rotation may affect existing Runs; changing logical credential authority may not silently broaden them.
-8. Agents request semantic operations; credential resolution is normally internal.
-9. `secret.use` means brokered use, not credential disclosure.
-10. `secret.read` is hard-denied for Agent principals in v1.
-11. Worker environments and command-line arguments are not generic secret injection channels.
-12. Compatibility credential injection is restricted to broker-owned processes.
-13. Backend credentials remain control-plane credentials and are never exposed to models.
-14. Secret bytes never enter ContextPlan, Events, Artifacts, Evidence, Run snapshots, backend attachments, SQLite or ordinary logs.
-15. Secret mutation uses durable intent, external mutation, reconciliation and durable completion.
-16. Secret mutation command idempotency never persists secret bytes.
-17. Global Recovery inventories/reconciles incomplete SecretMutationIntents and nonterminal CredentialLeases and fences only their affected SecretRef/provider scope where possible.
-18. A pending `set`/`rotate` intent never authorizes automatic replay of secret material after crash; provider observation establishes CONFIRMED, NOT_APPLIED, DRIFTED or UNKNOWN first.
-19. CredentialLease revocation is a durable recovery obligation; UNKNOWN/timeout never becomes fabricated REVOKED state.
-20. Disaster restore treats restored secret metadata/intent absence as snapshot evidence and requires fresh provider identity/version reconciliation before credential use.
-21. Secret retrieval happens only after current authorization/grant redemption and a usable reconciled SecretDescriptor.
-22. Secret availability only blocks operations that require that credential.
-23. Child Tasks inherit authority ceilings, not credential material.
-24. Secret material is never treated as an Artifact.
-25. Only Operator Control manages secret descriptors/material/bindings.
+6. ConfigurationRevision has an immutable CredentialBindingRegistry addressed by `credentialBindingRegistryDigest`; each exact binding has a `credentialBindingAuthorityDigest` over logical authority only.
+7. ExecutionBinding freezes the Run's CredentialBindingRegistry digest, not secret material versions.
+8. Credential-bearing Run operations require exact frozen/current binding-authority equality; current configuration may deny an old Run but may never remap it onto broader credential authority.
+9. Whole-registry equality is not required; unrelated credential-binding changes do not invalidate an existing Run.
+10. SecretVersionId/secret bytes are excluded from credential-binding authority; rotation behind the same logical SecretRef may affect existing otherwise-authorized Runs after current checks.
+11. Agents request semantic operations; credential resolution is normally internal.
+12. `secret.use` means brokered use, not credential disclosure.
+13. `secret.read` is hard-denied for Agent principals in v1.
+14. Worker environments and command-line arguments are not generic secret injection channels.
+15. Compatibility credential injection is restricted to broker-owned processes.
+16. Backend credentials remain control-plane credentials and are never exposed to models.
+17. Secret bytes never enter ContextPlan, Events, Artifacts, Evidence, Run snapshots, backend attachments, SQLite or ordinary logs.
+18. Credential-bearing broker-operation authority is durably committed with exact non-secret binding provenance before secret retrieval/external effect; retries cannot re-resolve into a different credential authority.
+19. Secret mutation uses durable intent, external mutation, reconciliation and durable completion.
+20. Secret mutation command idempotency never persists secret bytes.
+21. Global Recovery inventories/reconciles incomplete SecretMutationIntents and nonterminal CredentialLeases and fences only their affected SecretRef/provider scope where possible.
+22. A pending `set`/`rotate` intent never authorizes automatic replay of secret material after crash; provider observation establishes CONFIRMED, NOT_APPLIED, DRIFTED or UNKNOWN first.
+23. CredentialLease revocation is a durable recovery obligation; UNKNOWN/timeout never becomes fabricated REVOKED state.
+24. Disaster restore treats restored secret metadata/intent absence as snapshot evidence and requires fresh provider identity/version reconciliation before credential use.
+25. Secret retrieval happens only after current authorization/grant redemption, exact frozen/current CredentialBinding compatibility and a usable reconciled SecretDescriptor.
+26. Secret availability only blocks operations that require that credential.
+27. Child Tasks inherit authority ceilings, not credential material.
+28. Secret material is never treated as an Artifact.
+29. Only Operator Control manages secret descriptors/material/bindings.

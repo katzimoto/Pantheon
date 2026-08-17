@@ -448,13 +448,18 @@ ConfigurationRevision
 routePolicyDigest
 executionProfileDigest
 frozen authz ceiling digest
+credentialBindingRegistryDigest
 SandboxPlan digest
 binding hash/canonical JSON
 ```
 
 Do not use one ambiguous `policy_hash` field.
 
+`credentialBindingRegistryDigest` must resolve to the immutable CredentialBindingRegistry component of the same `ConfigurationRevision` captured at T3. That registry contains logical credential-mapping authority only; it excludes SecretVersionId and secret material.
+
 ContextPolicy is not hidden inside a generic ExecutionBinding policy field. Its canonical identity is `contextPolicyDigest` on the Run's ContextSourceSnapshot, because Context Builder semantics are frozen through that explicit source snapshot.
+
+A later credential-bearing broker operation resolves its normalized action/resource against both the Run's frozen registry and the current active registry. V1 requires exact `credentialBindingAuthorityDigest` equality for the resolved binding, not equality of the whole registry digest. Therefore unrelated credential-binding changes do not invalidate the Run, while remapping/removing the exact binding fails closed.
 
 ## Context source snapshot and ContextPlan attachment
 
@@ -874,11 +879,31 @@ broker_operations
 
 A consequential broker redemption transaction rechecks current Attempt/Task/Run authority, current ConfigRevision/authz digest, current RestoreGeneration, Grant scope/expiry/remaining uses and exact operation idempotency. It requires `grant.restore_generation == current restore_generation`, then CAS-consumes one Grant use and creates/transitions the exact broker operation under that same generation in the **same transaction**.
 
-Capability tickets, if represented, are single-use/short-lived references and are revalidated at redemption, including `ticket.restore_generation == current restore_generation`; issuance alone is not durable bearer authority.
+For a credential-bearing Run operation, the same transaction additionally resolves the normalized action/resource through the Run's immutable `ExecutionBinding.credentialBindingRegistryDigest` and through the current active CredentialBindingRegistry, requires both exact bindings to exist, and requires equality of their canonical `credentialBindingAuthorityDigest` before any secret material is retrieved.
+
+The durable broker operation carries non-secret provenance equivalent to:
+
+```text
+broker_operations
+  ...
+  run_id                                  nullable where operation is Run-owned/triggered
+  frozen_credential_binding_registry_digest  nullable
+  current_config_revision_id              nullable
+  current_credential_binding_registry_digest nullable
+  credential_binding_authority_digest     nullable
+  secret_descriptor_id / logical SecretRef nullable
+  secret_version_id_used                  nullable factual result/provenance
+```
+
+The credential-binding fields are required together for a credential-bearing Run operation and absent together when the operation does not use CredentialBinding authority. `credential_binding_authority_digest` covers logical action/resource scope, SecretRef, broker mechanism class and credential-use constraints; it excludes `secret_version_id_used` and secret bytes. `secret_version_id_used` may be populated only as factual material-use provenance after the broker resolves the current usable SecretDescriptor/version; changing it never broadens the broker operation's authority.
+
+The broker operation is the durable redemption result. A retry/reconciliation of that operation follows its original exact binding authority and external idempotency identity; it never re-resolves the operation into a different credential authority merely because current configuration changed later.
+
+Capability tickets, if represented, are single-use/short-lived references and are revalidated at redemption, including `ticket.restore_generation == current restore_generation`; issuance alone is not durable bearer authority. Credential-bearing ticket redemption performs the same frozen/current exact-binding compatibility check before broker-operation creation.
 
 After disaster restore, rows whose generation differs from current are not deleted or rewritten to current. Old-generation Grants/Tickets are non-redeemable historical authority. If an operator re-affirms the permission, a new Grant is created under the current generation.
 
-Old-generation `broker_operations` are **reconciliation-only**. Their restored state may be compared with external reality using the original operation/idempotency identity, but no controller may issue/reissue the external effect from that row merely because it appears `PENDING`, incomplete, or absent from later history. If the outcome cannot be established, the operation/domain remains UNKNOWN/fenced until explicit recovery resolution.
+Old-generation `broker_operations` are **reconciliation-only**. Their restored state may be compared with external reality using the original operation/idempotency identity and frozen credential-binding provenance, but no controller may issue/reissue the external effect from that row merely because it appears `PENDING`, incomplete, or absent from later history. If the outcome cannot be established, the operation/domain remains UNKNOWN/fenced until explicit recovery resolution.
 
 ## Explicit finalization obligations
 
@@ -1034,7 +1059,7 @@ Task-scoped Workspace reservation remains live.
 
 Immutable ConfigurationRevision/components are compiled/validated before touching active state. Activation changes one `active_configuration` pointer and Event in an authoritative transaction, with a short publication barrier between DB/current in-memory snapshot as defined by the configuration architecture.
 
-Historical hash-bearing config rows are never rewritten in place by migration.
+Historical hash-bearing config rows are never rewritten in place by migration. The immutable `credentialBindings` ConfigurationRevision component is stored in `configuration_components` like other compiled components and is addressed by `credentialBindingRegistryDigest`; it contains no SecretVersion/material state.
 
 ## Planning
 
@@ -1210,6 +1235,8 @@ The EvaluationOperation, not an EvaluationAttempt, owns the verification Sandbox
 
 SQLite stores only SecretDescriptor/provider locator/non-secret random version IDs/status/intents/lease metadata/use records. It never stores long-lived secret bytes or hashes of secret bytes.
 
+CredentialBindingRegistry/component content is configuration authority, not secret material state. Broker/credential-use provenance may reference a logical SecretRef/SecretDescriptor and factual `SecretVersionId` used, but SecretVersionId never participates in `credentialBindingAuthorityDigest` or expands a Run's frozen authority.
+
 ## Event Journal
 
 The Event Journal is append-only durable history/outbox, not primary state. Events for authoritative mutations are inserted in the same transaction as the state change.
@@ -1339,6 +1366,7 @@ goal_scheduling_state Goal FK/priority valid; last_served_sequence < next_servic
 task_scheduling_state Task FK valid; SchedulingEligible true iff current eligible interval has eligible_since
 temporary scheduler backoff does not reset eligible_since or mutate Task lifecycle
 committed Run/T3 fairness charge exists atomically for its selected Goal service sequence
+ExecutionBinding credentialBindingRegistryDigest resolves to the credentialBindings component of the same ConfigurationRevision
 Run.context_source_snapshot_digest resolves to immutable ContextSourceSnapshot
 ContextSourceSnapshot config_revision/context_policy binding is complete and component digest matches that ConfigurationRevision
 at most one run_context_plans row per Run
@@ -1378,6 +1406,8 @@ SandboxVerification holder/SandboxKey identity matches SandboxInstance
 Budget aggregate == immutable ledger reconstruction
 Usage provenance/backend ownership for Attempt and concrete control-operation subjects
 Grant/CapabilityTicket redemption generation == current RestoreGeneration
+credential-bearing executable broker operation binds Run frozen registry + exact authority digest + current compatible registry provenance
+credential-bearing broker operation SecretVersionId, when present, is factual provenance and never binding authority
 new/executable broker operation generation == current RestoreGeneration
 old-generation broker operations are reconciliation-only
 current Operator command epoch == current RestoreGeneration before command creation
@@ -1392,7 +1422,7 @@ Scheduler durable state is authoritative rather than Event-reconstructed. `sched
 
 ContextSourceSnapshot identity is immutable on `runs`; ContextPlan attachment is a separate one-time row. The composite Run/source and Plan/source FKs relationally enforce exact-source attachment, while source availability/reconstructability remains a controller/recovery predicate. An Attempt cannot become current without a valid attachment.
 
-The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task terminal intent and local pointer facts are schema `CHECK` constraints; finalization completion remains cross-row controller/invariant-checker logic over the authoritative owning-domain rows plus any explicit residual obligation records. Explicit finalization-obligation ownership is concrete-FK/XOR constrained rather than opaque. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
+The EvaluationRound typed-subject XOR is row-local and FK-enforced; semantic currentness and acceptance-contract matching remain controller/invariant-checker responsibilities across the owning TaskSpec/GoalRevision. Task terminal intent and local pointer facts are schema `CHECK` constraints; finalization completion remains cross-row controller/invariant-checker logic over the authoritative owning-domain rows plus any explicit residual obligation records. Explicit finalization-obligation ownership is concrete-FK/XOR constrained rather than opaque. RunStatus holder identity and Task current-Run holder identity are composite-FK constrained, while one nonterminal Run per Task is partial-unique constrained on `run_status.task_id` for `Active|Finalizing`. Exact phase/cardinality semantics (`Active => exactly one`, `Ready|Waiting => zero`) remain controller/invariant-checker responsibilities. Attempt holder/current-pointer consistency is FK-constrained and live-Attempt cardinality is partial-unique constrained. PlanningAttempt/EvaluationAttempt live-cardinality is relationally constrained on their concrete operation IDs. Sandbox lifecycle and external existence are separate status columns; ordinary RELEASED requires observed absence, while a RELEASED+UNKNOWN force-resolution is valid only with a durable tombstone/fence that preserves factual uncertainty. The Agent Control pre-contact rekey freeze remains a cross-row lifecycle invariant because `attempt_status.launch_contact_state` and the session verifier live on different rows; controller transactions and audit/invariant tests enforce it. Credential-binding compatibility is likewise cross-row/immutable-component logic: ExecutionBinding freezes one registry digest, broker redemption resolves exact frozen/current component entries and persists the matching authority digest on the broker operation. The checker remains valuable for cross-row semantic invariants and corruption/drift detection.
 
 Violations create RecoveryFindings/quarantine rather than silent unsafe repair.
 
@@ -1423,11 +1453,11 @@ T16 PLANNING EXTERNAL-CONTACT MARKER
 
 T1 resolves any Goal acceptance logical evaluator refs against the expected active trusted evaluator registry/ConfigurationRevision before commit, then atomically inserts the immutable GoalRevision with exact EvaluatorVersion/evaluator-resolution provenance, advances the current Goal revision through expected-revision CAS, creates reconciliation work and appends Events. No evaluator external call occurs inside T1.
 
-Before T3, the Scheduler/control path resolves and canonicalizes the exact immutable/versioned source identities required for the ContextSourceSnapshot under the captured ConfigurationRevision. T3 revalidates `scheduler_state.dispatch_mode=RUNNING`, the open recovery/configuration dispatch gates, Task Ready/current SchedulingEligible/expected scheduler state revisions, current Goal/Graph/config/admission authority and the captured ConfigurationRevision. It inserts/reuses the immutable ContextSourceSnapshot, creates the immutable Run with `task_id + context_source_snapshot_digest`, inserts the matching `run_status` row with the same immutable `task_id` and `phase=Active`, atomically moves the Task to `Active` with `active_run_id` pointing at that Run, consumes the SchedulingClaim, charges the selected Goal's `last_served_sequence = scheduler_state.next_service_sequence`, increments `next_service_sequence`, clears/normalizes the Task's temporary scheduler failure/backoff state, and appends Events.
+Before T3, the Scheduler/control path resolves and canonicalizes the exact immutable/versioned source identities required for the ContextSourceSnapshot under the captured ConfigurationRevision. T3 revalidates `scheduler_state.dispatch_mode=RUNNING`, the open recovery/configuration dispatch gates, Task Ready/current SchedulingEligible/expected scheduler state revisions, current Goal/Graph/config/admission authority and the captured ConfigurationRevision. It verifies the selected ExecutionBinding's `credentialBindingRegistryDigest` is the immutable `credentialBindings` component of that same captured ConfigurationRevision, inserts/reuses the immutable ContextSourceSnapshot, creates the immutable ExecutionBinding/Run with `task_id + context_source_snapshot_digest`, inserts the matching `run_status` row with the same immutable `task_id` and `phase=Active`, atomically moves the Task to `Active` with `active_run_id` pointing at that Run, consumes the SchedulingClaim, charges the selected Goal's `last_served_sequence = scheduler_state.next_service_sequence`, increments `next_service_sequence`, clears/normalizes the Task's temporary scheduler failure/backoff state, and appends Events.
 
 The Run and fairness charge therefore commit or roll back together. A concurrent pause/priority/fairness-state mutation that invalidates the captured scheduler revisions causes T3 to abort/recompute; a pre-T3 routing/admission failure never consumes fairness service. The composite FKs prove Run holder relationships and the `one_nonterminal_run_per_task` partial unique index rejects a second `Active|Finalizing` Run for the Task.
 
-T3 performs no Memory retrieval, model/prompt rendering, arbitrary repository traversal, backend call, Sandbox call, or other external context construction. Stable source-generation identities may be prepared as immutable data before T3, but the exact snapshot bound to the Run becomes authoritative only with T3.
+T3 performs no Memory retrieval, model/prompt rendering, arbitrary repository traversal, backend call, Sandbox call, SecretProvider call or other external context construction. Stable source-generation identities and immutable configuration component identities may be prepared as data before T3, but the exact snapshot/Binding bound to the Run becomes authoritative only with T3.
 
 T3a is the one-time ContextPlan attachment transaction after deterministic Context Builder preparation. It re-reads the Run/source identity, verifies no existing `run_context_plans` row, verifies the immutable ContextPlan's `source_snapshot_digest` equals the Run's frozen snapshot, inserts the attachment and appends its Event/condition update. The composite FKs enforce the same source relationship. Same Run + same attachment is idempotent; a different plan for an already-attached Run fails closed. No external source/backend call occurs inside T3a.
 
@@ -1438,6 +1468,8 @@ T4a is a short authoritative recovery transaction used only when the current-gen
 T4b verifies the same current Attempt/Run/control authority **and the exact current AgentControlSession credential revision** before atomically setting `launch_contact_state = CONTACT_MAY_HAVE_OCCURRED`, recording initiation provenance, and appending its Event. After T4b commits, T4a is permanently forbidden for that Attempt. Only after T4b may Pantheon cross the external ensureExecution/create boundary using the launch package built for that verified credential revision.
 
 T7 loads the EvaluationRound's concrete typed subject and exact pinned criterion/EvaluatorVersion, rechecks the owning lifecycle object's currentness, creates immutable Evidence, updates criterion/Aggregate AcceptanceResult state and settles applicable control-operation accounting in one authoritative transaction. For `TASK_CANDIDATE`, Task must still be Evaluating with that exact current Candidate. For `GOAL_COMPLETION_CANDIDATE`, Goal must still be Evaluating with that exact current completion candidate and represented GoalRevision current for completion. T7 never lets the evaluator itself transition Task or Goal lifecycle; owning controllers apply current aggregate results through their lifecycle transitions.
+
+T10 re-reads current Attempt/Run/Task authority, current ConfigurationRevision/authz policy, current RestoreGeneration and Grant/ticket state, then atomically consumes bounded Grant/ticket authority and creates/transitions the exact broker operation. For credential-bearing Run operations T10 additionally loads the Run's frozen `credentialBindingRegistryDigest`, resolves the exact normalized action/resource from that immutable registry and the current active registry, requires exact `credentialBindingAuthorityDigest` equality, rechecks `secret.use`/SecretDescriptor usability, and persists the non-secret binding provenance on the broker operation. Secret material is retrieved only after T10 commits. A later retry follows the same broker-operation identity/provenance rather than resolving a new credential mapping.
 
 A Task lifecycle transaction that first enters `Finalizing` must set the selected `terminal_target` in that same authoritative commit. Explicit residual finalization obligations known at that point may be inserted in the same commit. No external finalization action may run before either its owning domain intent/state or its explicit `finalization_obligation` identity has been durably established. The later terminal transition re-reads the same `terminal_target`, all required authoritative domain predicates and any explicit obligation states; it never infers completion from Events.
 
@@ -1489,3 +1521,5 @@ Never perform network/Git/process/backend/secret-store/container-runtime/model/e
 32. Event rows are committed with their authoritative mutation, but state tables remain source of truth.
 33. Sandbox lifecycle phase and external existence certainty are distinct durable fields. Ordinary `RELEASED` requires observed `ABSENT`; `RELEASED+UNKNOWN` is valid only with an explicit durable force-resolution tombstone/fence, and `UNKNOWN` never authorizes blind replacement.
 34. SandboxInstance ownership is relational and immutable: exactly one Run or v1 EvaluationOperation owns each Sandbox; PlanningOperation has no implicit Sandbox ownership in v1, and ambiguous/unreleased Sandbox existence blocks an overlapping replacement for the same holder unless the old lineage is explicitly tombstoned/fenced.
+35. ExecutionBinding freezes `credentialBindingRegistryDigest` from its ConfigurationRevision; existing Runs never silently switch to a later credential-mapping registry.
+36. Credential-bearing broker redemption requires exact frozen/current `credentialBindingAuthorityDigest` equality and persists that non-secret authority provenance before secret retrieval; SecretVersionId is factual material-use metadata, not authority.

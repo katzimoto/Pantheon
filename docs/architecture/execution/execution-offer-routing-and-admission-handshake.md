@@ -66,6 +66,8 @@ configuration component digests
 
 It never contains core branches/allowlists for concrete provider/model/harness names.
 
+Credential material is not an ExecutionRequest input. The captured ConfigurationRevision may contain the immutable `credentialBindingRegistryDigest` used later to freeze Run credential-mapping authority, but routing does not retrieve SecretProvider material or choose a SecretVersion.
+
 ## ExecutionOffer
 
 Offer creation is side-effect-free. It states factual compatibility and required resources/availability for one specific Request.
@@ -157,7 +159,9 @@ Immediately before T3:
 active ConfigurationRevision still captured revision?
 ```
 
-If not, abort/re-run selection. Pantheon never commits Agent eligibility under one config and routing/Sandbox policy under another.
+If not, abort/re-run selection. Pantheon never commits Agent eligibility under one config and routing/Sandbox/credential-binding authority under another.
+
+The captured revision includes an immutable CredentialBindingRegistry component addressed by `credentialBindingRegistryDigest`. T3 freezes that digest into ExecutionBinding. No credential bytes or SecretVersionId are fetched/frozen during routing.
 
 ## Atomic T3 commit
 
@@ -172,17 +176,18 @@ Resource descriptor revisions
 existing Task reservations + incremental resource fit
 Budget headroom
 hard policy/dispatch fences
+credentialBindingRegistryDigest belongs to the captured ConfigurationRevision
 
 create only required incremental Reservations
 create initial BudgetHolds
-create immutable ExecutionBinding
+create immutable ExecutionBinding including credentialBindingRegistryDigest
 create Run
 Task Ready -> Active
 consume SchedulingClaim
 append Events/fairness service point
 ```
 
-External backend/Sandbox/process calls happen later under Run Controller.
+External backend/Sandbox/process/SecretProvider calls happen later under the responsible controllers/brokers.
 
 ## Binding
 
@@ -198,15 +203,20 @@ ConfigurationRevision
 routePolicyDigest
 executionProfileDigest
 frozen authorization ceiling digest
+credentialBindingRegistryDigest
 reservation/initial Hold refs
 resolved backend-private execution metadata for audit where appropriate
 ```
 
-Changing selected Agent/Offer/backend/Sandbox strategy/material context means another Run/new Binding.
+`credentialBindingRegistryDigest` freezes the Run's logical credential-mapping universe. It does not freeze SecretVersion/material. When a later credential-bearing operation is requested, Pantheon resolves the exact action/resource binding from both this frozen registry and the current active registry and requires exact `credentialBindingAuthorityDigest` equality before secret retrieval.
+
+Changing selected Agent/Offer/backend/Sandbox strategy/material context means another Run/new Binding. A credential binding remap does not mutate an existing Binding; it may instead make the affected exact action unavailable to that Run. Unrelated credential-binding changes do not invalidate the Run.
 
 ## No side effects before commit
 
 Agent Resolution, offer generation, Sandbox feasibility planning, Resource assessment, Budget feasibility and scoring are pure/side-effect-free with respect to external execution. T3 is the durable Run-intent boundary.
+
+Credential binding compilation/resolution at this stage is configuration inspection only. Secret material retrieval and credential-bearing external effects are always later broker operations after current authorization and exact frozen/current binding compatibility checks.
 
 ## Core invariants
 
@@ -216,5 +226,6 @@ Agent Resolution, offer generation, Sandbox feasibility planning, Resource asses
 4. Desired Resource claims are reduced by compatible existing Task-scoped reservations before incremental admission.
 5. Budget/Resource/Rate Limit remain distinct feasibility dimensions.
 6. One captured ConfigurationRevision covers the whole routing/T3 decision; stale config aborts commit.
-7. Binding stores domain-specific config digests, not generic `policyHash`.
-8. T3 atomically freezes selected strategy and ownership before any external execution side effect.
+7. Binding stores domain-specific config digests, including `credentialBindingRegistryDigest`, not generic `policyHash`.
+8. T3 atomically freezes selected strategy and logical credential-binding authority before any external execution side effect; it never freezes secret material/version.
+9. A later credential-binding remap cannot broaden an existing Run; exact credential use requires frozen/current resolved binding-authority equality.
