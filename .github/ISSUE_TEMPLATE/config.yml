@@ -1,0 +1,6 @@
+# Executable work is authored as an Engineering Mission, so the blank option is
+# off in the template chooser. GitHub still shows a "Blank issue" entry to
+# accounts with write access or above, labelled "Maintainers only"; that is
+# GitHub's own escape hatch, not a supported place to record Pantheon work.
+# See docs/development/missions.md.
+blank_issues_enabled: false
