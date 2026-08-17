@@ -25,10 +25,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Self-test automation logic
-        run: python3 scripts/version-automation.py self-test
+        run: |
+          python3 scripts/version-automation.py self-test
+          python3 scripts/repository-labels.py self-test
 
       - name: Run canonical repository verification
         run: ./scripts/verify.sh
+
+      - name: Validate Mission area labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/repository-labels.py validate-milestone
+          --milestone "${{ inputs.milestone }}"
 
       - name: Evaluate Version Milestone
         env:

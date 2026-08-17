@@ -98,6 +98,43 @@ branch names, estimates, model choice and agent instructions are all either
 owned by another layer or discoverable from the repository, and each one is
 wrong the moment the repository moves.
 
+## Labels
+
+Labels are orthogonal query/release metadata, not another work-state model.
+GitHub-native state remains authoritative for completion, Version membership,
+dependencies, hierarchy, assignees, and review/check status. Pantheon does not
+use `status:*`, `priority:*`, `version:*`, `kind:*`, blocker, parent/epic, or
+readiness labels to mirror those facts.
+
+Every Engineering Mission has one primary `area:*` label. A mission whose
+observable outcome genuinely spans two domains may carry one additional
+secondary area; more than two is a sign that the mission is too broad or the
+labels are being used as a dependency list. Area labels are broad discovery
+facets, not a replacement for Architecture entry points:
+
+```text
+area:goals-planning
+area:tasks
+area:scheduling
+area:execution
+area:agents-context
+area:evaluation-acceptance
+area:artifacts-workspaces
+area:security
+area:persistence-recovery
+area:operations
+area:repository
+```
+
+`area:repository` is for repository tooling, CI, documentation process, and
+development infrastructure rather than a Pantheon runtime subsystem.
+
+A Mission assigned to a Version Milestone additionally carries exactly one
+`changelog:*` label under `docs/development/versions.md`. Changelog
+classification belongs to the Mission outcome and is not copied onto its pull
+requests. `good first issue` and `help wanted` are optional contributor-discovery
+signals; they do not change mission semantics.
+
 ## Relationships
 
 Hierarchy and dependency are represented in GitHub's issue graph, never in
