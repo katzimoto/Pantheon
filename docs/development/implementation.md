@@ -18,11 +18,16 @@ SQLite store kernel described in
 together with that contract's state-dependent authoritative write mechanism:
 one serialized authoritative writer connection, `BEGIN IMMEDIATE`
 transactions, the revision/CAS primitive for mutable authoritative rows, and
-read access separated onto a read-only connection.
-There is no scheduler, no backend, no endpoint and no command yet, and the
-store's own schema is deliberately limited to migration bookkeeping and
-installation identity; the future conceptual production schema is not
-implemented ahead of the behaviour that needs it. Revisioned mutation is
+read access separated onto a read-only connection. On top of that it owns the
+durable command mutation kernel — restore-generation-scoped command identity,
+idempotent replay, deterministic conflict on a reused identity, and the Event
+Journal append and its sequence allocation committing in the same
+authoritative transaction.
+There is no scheduler, no backend and no endpoint yet, and the store's own
+schema is limited to migration bookkeeping, installation identity, and the
+command ledger, Event Journal and journal epoch/sequence state that kernel
+requires; the future conceptual production schema is not implemented ahead of
+the behaviour that needs it. Revisioned mutation and the command envelope are
 exercised against test-only fixture tables for that reason.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite); every other crate

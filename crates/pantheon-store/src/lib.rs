@@ -35,12 +35,22 @@
 //! a caller to reach; excluding other *processes* is the daemon's
 //! operating-system installation lock and is not this crate's concern.
 //!
+//! On top of that it owns the durable command mutation kernel: an
+//! authoritative mutation executed under `(commandEpoch, commandId)`
+//! identity, where the epoch is the installation RestoreGeneration, with
+//! restore-aware idempotent replay, deterministic conflict on a reused
+//! identity, and the Event Journal append and its journal sequence
+//! allocation committing in that same transaction. See
+//! [`Store::execute_command`].
+//!
 //! The canonical contract also names a small bounded read pool; there are no
 //! concurrent readers to pool yet, so read access is one read-only
-//! connection. Durable command identity, idempotent replay and the Event
-//! Journal are a later mission's scope and are not implemented here. See
+//! connection. The disaster-restore authority fence that rotates the
+//! RestoreGeneration and the JournalEpoch, Event streaming, export and
+//! pruning are later missions' scope and are not implemented here. See
 //! `docs/development/implementation.md`.
 
+mod command;
 mod error;
 mod migrations;
 mod policy;
@@ -50,6 +60,7 @@ mod transaction;
 #[cfg(test)]
 mod test_support;
 
+pub use command::{Command, Committed, JournalCursor};
 pub use error::StoreError;
 pub use store::{RestoreGeneration, Store};
 pub use transaction::{Revision, Value, Writer};

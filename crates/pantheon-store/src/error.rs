@@ -68,6 +68,21 @@ pub enum StoreError {
     /// *processes* is the daemon's operating-system installation lock, per
     /// `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`.
     AlreadyOpen { path: PathBuf },
+    /// The command carried an epoch that is not the installation's current
+    /// RestoreGeneration.
+    ///
+    /// Fails closed as stale command authority. This is decided *before* the
+    /// command ledger is consulted: a restored snapshot may have lost the row
+    /// for a command that already produced an effect, so the absence of a
+    /// row can never make an old-epoch request new.
+    StaleCommandEpoch { supplied: String, current: String },
+    /// This command identity was already used in this epoch with a different
+    /// non-sensitive request hash.
+    ///
+    /// A command ID is single-use within its epoch. Reusing one for a
+    /// different request is a caller defect, not a retry, so it fails closed
+    /// rather than executing or overwriting the durable identity.
+    CommandConflict { command_id: String },
     /// A connection Pantheon needs could not be used: the authoritative
     /// writer is poisoned by an earlier panic, or a caller attempted to
     /// re-enter the serialized authoritative writer it already holds.
@@ -118,6 +133,16 @@ impl fmt::Display for StoreError {
                 "this process already has an open store for {}",
                 path.display()
             ),
+            Self::StaleCommandEpoch { supplied, current } => write!(
+                f,
+                "stale command epoch {supplied}: the current restore generation \
+                 is {current}"
+            ),
+            Self::CommandConflict { command_id } => write!(
+                f,
+                "command {command_id} was already used in this epoch with a \
+                 different request hash"
+            ),
             Self::InvariantViolated(detail) => {
                 write!(f, "store invariant violated: {detail}")
             }
@@ -138,6 +163,8 @@ impl std::error::Error for StoreError {
             | Self::PolicyVerificationFailed(_)
             | Self::RevisionConflict { .. }
             | Self::AlreadyOpen { .. }
+            | Self::StaleCommandEpoch { .. }
+            | Self::CommandConflict { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

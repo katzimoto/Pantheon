@@ -137,7 +137,7 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn fail<T>(&self, err: StoreError) -> Result<T, StoreError> {
+    pub(crate) fn fail<T>(&self, err: StoreError) -> Result<T, StoreError> {
         self.failed.set(true);
         Err(err)
     }
@@ -265,6 +265,50 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Runs a compiled-in statement inside the same authoritative
+    /// transaction, returning the number of rows it affected.
+    ///
+    /// Crate-private on purpose. Issue #17 defines exactly one *public*
+    /// authoritative mutation — the revisioned CAS above. A public
+    /// arbitrary-SQL escape hatch would reopen the writer boundary this
+    /// module exists to close. The command kernel in [`crate::command`] is
+    /// inside that boundary and reaches the transaction only through this
+    /// and [`Writer::query_optional`], never through a `Connection`.
+    ///
+    /// A failure marks the transaction uncommittable, so a kernel statement
+    /// whose error is discarded still cannot be committed.
+    pub(crate) fn execute(&self, sql: &'static str, params: &[Value]) -> Result<usize, StoreError> {
+        let bound: Vec<rusqlite::types::Value> = params.iter().map(bind).collect();
+        match self.tx.execute(sql, rusqlite::params_from_iter(bound)) {
+            Ok(affected) => Ok(affected),
+            Err(err) => self.fail(StoreError::Sqlite(err)),
+        }
+    }
+
+    /// Reads at most one row inside the same authoritative transaction.
+    ///
+    /// This exists so the command kernel can consult `system_state` and the
+    /// command ledger on the *transaction's* snapshot. Reading either through
+    /// [`crate::Store`]'s read-only connection would consult the
+    /// pre-transaction snapshot and put the epoch fence outside the
+    /// transaction that acts on it.
+    pub(crate) fn query_optional<T>(
+        &self,
+        sql: &'static str,
+        params: &[Value],
+        map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Option<T>, StoreError> {
+        let bound: Vec<rusqlite::types::Value> = params.iter().map(bind).collect();
+        match self
+            .tx
+            .query_row(sql, rusqlite::params_from_iter(bound), map)
+        {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => self.fail(StoreError::Sqlite(err)),
+        }
+    }
+
     fn current_revision(&self, table: &str, id: &str) -> Result<Option<i64>, StoreError> {
         let sql = format!("SELECT {REVISION_COLUMN} FROM {table} WHERE {ID_COLUMN} = ?1");
         self.tx
@@ -279,22 +323,6 @@ impl<'a> Writer<'a> {
 
 #[cfg(test)]
 impl Writer<'_> {
-    /// Runs a compiled-in statement inside the same authoritative
-    /// transaction, returning the number of rows it affected.
-    ///
-    /// Test-only. Issue #17 defines exactly one authoritative mutation for
-    /// callers — the revisioned CAS above. A public arbitrary-SQL escape
-    /// hatch would reopen the writer boundary this module exists to close,
-    /// and no caller outside this crate needs one yet. The rollback
-    /// evidence needs a non-CAS write in the same transaction, which is
-    /// what this provides.
-    pub(crate) fn execute(&self, sql: &'static str, params: &[Value]) -> Result<usize, StoreError> {
-        let bound: Vec<rusqlite::types::Value> = params.iter().map(bind).collect();
-        self.tx
-            .execute(sql, rusqlite::params_from_iter(bound))
-            .map_err(StoreError::Sqlite)
-    }
-
     /// Creates and seeds test fixture schema inside the authoritative
     /// transaction. Test-only, so no fixture DDL path exists in a release
     /// build and none of it can reach `migrations::MIGRATIONS`.
