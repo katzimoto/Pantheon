@@ -14,11 +14,16 @@ Most of the workspace is still scaffolding: every crate exists, compiles,
 documents its own boundary and is covered by the dependency checker, but only
 `pantheon-store` implements Pantheon behaviour so far — the authoritative
 SQLite store kernel described in
-`docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`.
+`docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`,
+together with that contract's state-dependent authoritative write mechanism:
+one serialized authoritative writer connection, `BEGIN IMMEDIATE`
+transactions, the revision/CAS primitive for mutable authoritative rows, and
+read access separated onto a read-only connection.
 There is no scheduler, no backend, no endpoint and no command yet, and the
 store's own schema is deliberately limited to migration bookkeeping and
 installation identity; the future conceptual production schema is not
-implemented ahead of the behaviour that needs it.
+implemented ahead of the behaviour that needs it. Revisioned mutation is
+exercised against test-only fixture tables for that reason.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite); every other crate
 still has no third-party dependencies. That remains a deliberate default for
