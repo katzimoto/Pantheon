@@ -142,6 +142,31 @@ fn a_second_store_for_the_same_database_is_refused() {
     Store::open(&path).expect("claim released on drop");
 }
 
+/// A symlinked database file is the same database. Canonicalizing only the
+/// parent directory would miss this, because the differing final component
+/// would produce two different keys for one file.
+#[cfg(unix)]
+#[test]
+fn a_second_store_reaching_the_same_file_through_a_symlink_is_refused() {
+    let dir = crate::test_support::TempDir::new("symlink-alias");
+    let real = dir.path().join("pantheon.db");
+    let alias = dir.path().join("alias.db");
+
+    let first = Store::open(&real).expect("first store opens");
+    std::os::unix::fs::symlink(&real, &alias).expect("create symlink");
+
+    let err =
+        Store::open(&alias).expect_err("the same file reached through a symlink must be refused");
+    assert!(
+        matches!(err, StoreError::AlreadyOpen { .. }),
+        "unexpected error: {err}"
+    );
+
+    // And the claim still releases, so the alias is usable afterwards.
+    first.close().expect("close");
+    Store::open(&alias).expect("opening through the symlink after close succeeds");
+}
+
 #[test]
 fn holding_one_store_does_not_block_writing_to_a_different_one() {
     let dir_a = crate::test_support::TempDir::new("two-stores-a");

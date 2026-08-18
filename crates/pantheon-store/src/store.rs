@@ -53,30 +53,22 @@ fn open_stores() -> &'static Mutex<HashSet<PathBuf>> {
 struct PathClaim(PathBuf);
 
 impl PathClaim {
+    /// Claims `path` for this process, keyed by its fully canonical form.
+    ///
+    /// The *whole* path is canonicalized, not just its parent, so a
+    /// symlinked database file resolves to the same key as its target and
+    /// the two spellings collide as they should. That requires the file to
+    /// already exist, which is why [`Store::open`] claims only after
+    /// opening the connection: opening creates the database file but
+    /// applies no connection policy, runs no migration and performs no
+    /// authoritative write, so a refused second open has mutated nothing.
     fn acquire(path: &Path) -> Result<Self, StoreError> {
-        // Canonicalize the parent rather than the file: the file may not
-        // exist yet, and `Store::open` is what creates it. This resolves
-        // `..` and symlinked directories, so two spellings of the same
-        // database collide as they should.
-        let parent = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        let file_name = path.file_name().ok_or_else(|| StoreError::AlreadyOpen {
-            path: path.to_path_buf(),
+        let key = path.canonicalize().map_err(|err| {
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                Some(format!("cannot resolve {}: {err}", path.display())),
+            ))
         })?;
-        let key = parent
-            .canonicalize()
-            .map_err(|err| {
-                StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
-                    Some(format!(
-                        "cannot resolve the directory of {}: {err}",
-                        path.display()
-                    )),
-                ))
-            })?
-            .join(file_name);
 
         let mut open = open_stores()
             .lock()
@@ -214,10 +206,11 @@ impl Store {
     /// unsupported or inconsistent.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        // Claimed before any connection is opened, so a rejected second
-        // open never creates a competing writer connection at all.
-        let claim = PathClaim::acquire(path)?;
         let mut writer = Connection::open_with_flags(path, WRITER_FLAGS)?;
+        // Claimed as soon as the file exists — which opening guarantees —
+        // and before any policy, migration or statement runs, so a refused
+        // second open closes its connection having written nothing.
+        let claim = PathClaim::acquire(path)?;
         policy::apply_and_verify_writer(&writer)?;
         migrations::run(&mut writer)?;
 
