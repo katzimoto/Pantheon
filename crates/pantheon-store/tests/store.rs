@@ -2,11 +2,18 @@
 //! connection policy, ordered migrations, stable RestoreGeneration across
 //! close/reopen, and fail-closed behavior on unsupported/inconsistent
 //! migration state.
+//!
+//! And for Issue #17: the serialized authoritative writer, `BEGIN
+//! IMMEDIATE` write intent, revision/CAS semantics under genuine
+//! contention, and read/write separation — all exercised through the
+//! public API a controller will use.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
+use std::time::Duration;
 
-use pantheon_store::{Store, StoreError};
+use pantheon_store::{Revision, Store, StoreError, Value};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -146,5 +153,337 @@ fn opening_a_database_with_tampered_migration_bookkeeping_fails_closed() {
     assert!(
         matches!(err, StoreError::InconsistentMigrationState(_)),
         "unexpected error: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #17 evidence
+// ---------------------------------------------------------------------------
+
+/// The revisioned fixture table the CAS evidence uses.
+///
+/// It is created here, by the test, through an ordinary SQLite connection —
+/// never by `migrations::MIGRATIONS`. No production database can grow it,
+/// and `production_schema_contains_only_the_tables_this_behaviour_needs`
+/// below is the standing guard that it never leaks in.
+const FIXTURE_DDL: &str = "CREATE TABLE cas_fixture (
+        id       TEXT    PRIMARY KEY,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        value    TEXT    NOT NULL
+    ) STRICT;
+    INSERT INTO cas_fixture (id, revision, value) VALUES ('row-a', 7, 'original');";
+
+fn seed_fixture(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("open fixture connection");
+    conn.execute_batch(FIXTURE_DDL).expect("create fixture");
+}
+
+fn fixture_row(path: &Path) -> (i64, String) {
+    let conn = rusqlite::Connection::open(path).expect("open verification connection");
+    conn.query_row(
+        "SELECT revision, value FROM cas_fixture WHERE id = 'row-a'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("read fixture row")
+}
+
+/// A probe connection that never waits for a lock, so a contended
+/// `BEGIN IMMEDIATE` fails immediately instead of blocking for the store's
+/// five-second `busy_timeout`.
+fn impatient_probe(path: &Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).expect("open probe connection");
+    conn.busy_timeout(Duration::from_millis(0))
+        .expect("disable probe busy timeout");
+    conn
+}
+
+fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
+#[test]
+fn two_mutations_from_the_same_observed_revision_cannot_both_commit() {
+    let dir = TempDir::new("cas-race");
+    let store = Store::open(dir.db_path()).expect("open store");
+    seed_fixture(&dir.db_path());
+
+    let store = Arc::new(store);
+    // Exactly the two contenders. Each waits once, so neither can begin
+    // writing until both have already observed the revision.
+    let barrier = Arc::new(Barrier::new(2));
+
+    let contenders: Vec<_> = ["A", "B"]
+        .into_iter()
+        .map(|label| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // Observe first. This read is deliberately outside any
+                // transaction: that is what optimistic concurrency means,
+                // and it is what makes the race real.
+                let observed = store
+                    .revision_of("cas_fixture", "row-a")
+                    .expect("read revision")
+                    .expect("row exists");
+
+                // Released only once BOTH contenders hold revision 7, so
+                // neither could have derived it from the other's commit.
+                barrier.wait();
+
+                let outcome = store.write(|w| {
+                    w.update_revisioned(
+                        "cas_fixture",
+                        "row-a",
+                        observed,
+                        &[("value", Value::from(label))],
+                    )
+                });
+                (label, observed, outcome)
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = contenders
+        .into_iter()
+        .map(|handle| handle.join().expect("contender thread"))
+        .collect();
+
+    // Both genuinely started from the same observed revision.
+    for (label, observed, _) in &results {
+        assert_eq!(
+            *observed,
+            Revision::new(7),
+            "contender {label} did not observe revision 7"
+        );
+    }
+
+    let winners: Vec<_> = results
+        .iter()
+        .filter_map(|(label, _, outcome)| outcome.as_ref().ok().map(|rev| (*label, *rev)))
+        .collect();
+    let losers: Vec<_> = results
+        .iter()
+        .filter_map(|(label, _, outcome)| outcome.as_ref().err().map(|err| (*label, err)))
+        .collect();
+
+    // The outcome is asserted as a multiset. Which thread wins is decided by
+    // the OS scheduler and is none of this test's business; that exactly one
+    // wins is the invariant.
+    assert_eq!(winners.len(), 1, "exactly one mutation must commit");
+    assert_eq!(losers.len(), 1, "exactly one mutation must be rejected");
+
+    let (winner_label, winner_revision) = winners[0];
+    assert_eq!(winner_revision, Revision::new(8));
+
+    let (_, loser_error) = losers[0];
+    assert!(
+        matches!(
+            loser_error,
+            StoreError::RevisionConflict {
+                table: "cas_fixture",
+                expected: 7,
+                actual: Some(8),
+                ..
+            }
+        ),
+        "the loser must receive a typed stale-revision conflict, got: {loser_error}"
+    );
+    assert!(
+        !is_busy_store_error(loser_error),
+        "a semantic CAS conflict must never surface as a transient lock failure"
+    );
+
+    // Exactly one increment reached the database, and the surviving payload
+    // is the winner's rather than a blend of both.
+    let (revision, value) = fixture_row(&dir.db_path());
+    assert_eq!(revision, 8, "the revision must advance exactly once");
+    assert_eq!(value, winner_label);
+}
+
+fn is_busy_store_error(err: &StoreError) -> bool {
+    matches!(err, StoreError::Sqlite(inner) if is_busy(inner))
+}
+
+#[test]
+fn revision_cas_is_enforced_by_the_database_not_by_one_process_lock() {
+    let dir = TempDir::new("cas-cross-connection");
+    let store = Store::open(dir.db_path()).expect("open store");
+    seed_fixture(&dir.db_path());
+
+    // Observed through the store, before anything writes.
+    let observed = store.revision_of("cas_fixture", "row-a").unwrap().unwrap();
+    assert_eq!(observed, Revision::new(7));
+
+    // A competing writer that is NOT this store's serialized writer — a
+    // plain SQLite connection, standing in for anything outside Pantheon's
+    // boundary — advances the row first.
+    {
+        let other = rusqlite::Connection::open(dir.db_path()).expect("open competing connection");
+        let changed = other
+            .execute(
+                "UPDATE cas_fixture SET value = 'outside', revision = revision + 1
+                 WHERE id = 'row-a' AND revision = 7",
+                [],
+            )
+            .expect("competing update");
+        assert_eq!(changed, 1);
+    }
+
+    // The store's CAS now fails on the revision predicate itself. Nothing
+    // in this process's mutex could have detected that, which is what makes
+    // this evidence that the check lives in the database.
+    let err = store
+        .write(|w| {
+            w.update_revisioned(
+                "cas_fixture",
+                "row-a",
+                observed,
+                &[("value", Value::from("mine"))],
+            )
+        })
+        .expect_err("the store must lose to the earlier committed write");
+    assert!(
+        matches!(
+            err,
+            StoreError::RevisionConflict {
+                expected: 7,
+                actual: Some(8),
+                ..
+            }
+        ),
+        "unexpected error: {err}"
+    );
+    assert_eq!(fixture_row(&dir.db_path()), (8, "outside".to_string()));
+}
+
+#[test]
+fn a_second_store_cannot_open_the_same_database() {
+    let dir = TempDir::new("no-second-writer");
+    let first = Store::open(dir.db_path()).expect("first store opens");
+
+    // The bypass AC-1 forbids: a caller cannot obtain a second authoritative
+    // writer connection by simply opening the store again.
+    let err = Store::open(dir.db_path()).expect_err("a competing writer must be refused");
+    assert!(
+        matches!(err, StoreError::AlreadyOpen { .. }),
+        "unexpected error: {err}"
+    );
+
+    first.close().expect("close");
+    Store::open(dir.db_path()).expect("an ordinary restart still works");
+}
+
+#[test]
+fn the_authoritative_transaction_holds_the_write_lock_before_it_writes_anything() {
+    let dir = TempDir::new("immediate-lock");
+    let store = Store::open(dir.db_path()).expect("open store");
+    seed_fixture(&dir.db_path());
+    let path = dir.db_path();
+
+    // Positive control: with no authoritative transaction open, the probe
+    // can take the write lock. Without this, an unopenable database would
+    // make the real assertion below pass for the wrong reason.
+    {
+        let probe = impatient_probe(&path);
+        probe
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("probe can take the write lock when the store is idle");
+        probe.execute_batch("ROLLBACK").expect("release probe");
+    }
+
+    let (inside_tx, inside_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let writer = {
+        let store = Arc::new(store);
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            store.write(|_| {
+                // Signal without having executed a single statement. A
+                // DEFERRED transaction would hold no lock at this point.
+                inside_tx.send(()).expect("signal inside transaction");
+                release_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("wait for the probe");
+                Ok(())
+            })
+        })
+    };
+
+    inside_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("writer entered the transaction");
+
+    // The assertion: the store's transaction already owns write authority.
+    let probe = impatient_probe(&path);
+    let err = probe
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect_err("the authoritative transaction must already hold the write lock");
+    assert!(
+        is_busy(&err),
+        "expected SQLITE_BUSY from the contended write lock, got: {err}"
+    );
+
+    release_tx.send(()).expect("release the writer");
+    writer
+        .join()
+        .expect("writer thread")
+        .expect("write commits");
+}
+
+#[test]
+fn a_deferred_transaction_would_not_hold_that_lock() {
+    // The differential control for the test above. It proves the probe can
+    // tell the two transaction modes apart, so the SQLITE_BUSY observed
+    // there is evidence of IMMEDIATE rather than of an always-busy probe.
+    let dir = TempDir::new("deferred-control");
+    Store::open(dir.db_path())
+        .expect("open store")
+        .close()
+        .expect("close");
+    let path = dir.db_path();
+
+    let mut owner = rusqlite::Connection::open(&path).expect("open owner connection");
+    let tx = owner
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+        .expect("begin deferred");
+
+    let probe = impatient_probe(&path);
+    probe
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("a deferred transaction that has not written holds no write lock");
+    probe.execute_batch("ROLLBACK").expect("release probe");
+
+    tx.rollback().expect("release owner");
+}
+
+#[test]
+fn production_schema_contains_only_the_tables_this_behaviour_needs() {
+    let dir = TempDir::new("schema-purity");
+    Store::open(dir.db_path()).expect("open store");
+
+    let conn = rusqlite::Connection::open(dir.db_path()).expect("raw connection");
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .unwrap();
+    let tables: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    // No revisioned fixture table, and none of the future domain schema
+    // (Goal, Task, Run, commands, the Event Journal) that later missions own.
+    assert_eq!(
+        tables,
+        vec!["schema_migrations".to_string(), "system_state".to_string()],
     );
 }

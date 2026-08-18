@@ -2,6 +2,7 @@
 //! store.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// A store-level failure, typed distinctly from an ordinary SQLite error so
 /// callers can react to a fail-closed condition rather than a transient one.
@@ -29,6 +30,48 @@ pub enum StoreError {
     /// A connection policy setting did not read back as the value Pantheon
     /// requires after being applied.
     PolicyVerificationFailed(String),
+    /// A revisioned mutation did not apply because the row's authoritative
+    /// revision is not the one the caller expected.
+    ///
+    /// This is an ordinary optimistic-concurrency outcome, not a storage
+    /// failure: the caller observed a revision, someone else advanced it
+    /// first, and the caller must re-read and decide again. It is a
+    /// distinct variant precisely so a caller can tell it apart from
+    /// [`StoreError::Sqlite`] and from [`StoreError::InvariantViolated`]
+    /// without inspecting message text.
+    ///
+    /// `actual` distinguishes the two ways the expectation can fail:
+    /// `Some(revision)` means the row exists at a different revision
+    /// (stale), and `None` means no such row exists (missing).
+    RevisionConflict {
+        table: &'static str,
+        id: String,
+        expected: i64,
+        actual: Option<i64>,
+    },
+    /// The store observed a condition that must be impossible, and refused
+    /// to continue rather than commit through it.
+    ///
+    /// Distinct from [`StoreError::RevisionConflict`]: a conflict is an
+    /// expected concurrent outcome, whereas this means an invariant the
+    /// store enforces has already been violated. Any authoritative
+    /// transaction in progress is rolled back.
+    InvariantViolated(String),
+    /// This process already has an open [`crate::Store`] for this database
+    /// file.
+    ///
+    /// Two `Store` values on one path would be two independent
+    /// authoritative writer connections, which is exactly what the
+    /// serialized-writer boundary exists to prevent. Opening the second one
+    /// fails closed rather than silently degrading write serialization to
+    /// SQLite's file lock. This is an in-process guard; excluding other
+    /// *processes* is the daemon's operating-system installation lock, per
+    /// `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`.
+    AlreadyOpen { path: PathBuf },
+    /// A connection Pantheon needs could not be used: the authoritative
+    /// writer is poisoned by an earlier panic, or a caller attempted to
+    /// re-enter the serialized authoritative writer it already holds.
+    ConnectionUnavailable(String),
 }
 
 impl fmt::Display for StoreError {
@@ -54,6 +97,33 @@ impl fmt::Display for StoreError {
             Self::PolicyVerificationFailed(detail) => {
                 write!(f, "connection policy verification failed: {detail}")
             }
+            Self::RevisionConflict {
+                table,
+                id,
+                expected,
+                actual,
+            } => match actual {
+                Some(actual) => write!(
+                    f,
+                    "stale revision for {table} row {id}: expected {expected}, \
+                     found {actual}"
+                ),
+                None => write!(
+                    f,
+                    "no {table} row {id} to mutate at expected revision {expected}"
+                ),
+            },
+            Self::AlreadyOpen { path } => write!(
+                f,
+                "this process already has an open store for {}",
+                path.display()
+            ),
+            Self::InvariantViolated(detail) => {
+                write!(f, "store invariant violated: {detail}")
+            }
+            Self::ConnectionUnavailable(detail) => {
+                write!(f, "store connection unavailable: {detail}")
+            }
         }
     }
 }
@@ -65,7 +135,11 @@ impl std::error::Error for StoreError {
             Self::MigrationFailed { source, .. } => Some(source),
             Self::UnsupportedSchemaVersion { .. }
             | Self::InconsistentMigrationState(_)
-            | Self::PolicyVerificationFailed(_) => None,
+            | Self::PolicyVerificationFailed(_)
+            | Self::RevisionConflict { .. }
+            | Self::AlreadyOpen { .. }
+            | Self::InvariantViolated(_)
+            | Self::ConnectionUnavailable(_) => None,
         }
     }
 }

@@ -23,21 +23,33 @@
 //! Pantheon's authoritative local SQLite database (see [`Store`]), using a
 //! vetted bundled SQLite rather than an arbitrary host library. It applies
 //! and verifies the v1 connection policy, runs the ordered migration set
-//! that creates only the schema this mission requires, and establishes the
+//! that creates only the schema this behaviour requires, and establishes the
 //! installation's stable [`RestoreGeneration`] identity.
 //!
-//! It does not yet implement the reusable state-dependent authoritative
-//! write/CAS transaction mechanism (serialized writer, bounded read pool,
-//! revision/CAS primitives) — that is a later mission's scope. See
+//! It also owns the reusable state-dependent authoritative write mechanism:
+//! one serialized authoritative writer connection reached only through
+//! [`Store::write`], `BEGIN IMMEDIATE` transactions, the revision/CAS
+//! primitive [`Writer::update_revisioned`], and read access separated onto a
+//! connection SQLite itself treats as read-only. A process may hold only one
+//! [`Store`] per database file, so there is no second writer connection for
+//! a caller to reach; excluding other *processes* is the daemon's
+//! operating-system installation lock and is not this crate's concern.
+//!
+//! The canonical contract also names a small bounded read pool; there are no
+//! concurrent readers to pool yet, so read access is one read-only
+//! connection. Durable command identity, idempotent replay and the Event
+//! Journal are a later mission's scope and are not implemented here. See
 //! `docs/development/implementation.md`.
 
 mod error;
 mod migrations;
 mod policy;
 mod store;
+mod transaction;
 
 #[cfg(test)]
 mod test_support;
 
 pub use error::StoreError;
 pub use store::{RestoreGeneration, Store};
+pub use transaction::{Revision, Value, Writer};
