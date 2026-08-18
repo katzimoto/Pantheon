@@ -17,5 +17,27 @@
 //! `pantheon-engine`; this crate decides how it is persisted durably and
 //! correctly.
 //!
-//! Nothing is implemented yet, and no database driver is a dependency yet. See
+//! # Current state
+//!
+//! `pantheon-store` exclusively owns opening, migrating, and closing
+//! Pantheon's authoritative local SQLite database (see [`Store`]), using a
+//! vetted bundled SQLite rather than an arbitrary host library. It applies
+//! and verifies the v1 connection policy, runs the ordered migration set
+//! that creates only the schema this mission requires, and establishes the
+//! installation's stable [`RestoreGeneration`] identity.
+//!
+//! It does not yet implement the reusable state-dependent authoritative
+//! write/CAS transaction mechanism (serialized writer, bounded read pool,
+//! revision/CAS primitives) — that is a later mission's scope. See
 //! `docs/development/implementation.md`.
+
+mod error;
+mod migrations;
+mod policy;
+mod store;
+
+#[cfg(test)]
+mod test_support;
+
+pub use error::StoreError;
+pub use store::{RestoreGeneration, Store};

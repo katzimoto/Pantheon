@@ -10,13 +10,19 @@ the architecture contract wins and the disagreement is a defect to report.
 
 ## Current state
 
-The workspace is scaffolding. Every crate exists, compiles, documents its own
-boundary and is covered by the dependency checker; none implements Pantheon
-behaviour yet. There is no schema, no scheduler, no backend, no endpoint and no
-command.
+Most of the workspace is still scaffolding: every crate exists, compiles,
+documents its own boundary and is covered by the dependency checker, but only
+`pantheon-store` implements Pantheon behaviour so far — the authoritative
+SQLite store kernel described in
+`docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`.
+There is no scheduler, no backend, no endpoint and no command yet, and the
+store's own schema is deliberately limited to migration bookkeeping and
+installation identity; the future conceptual production schema is not
+implemented ahead of the behaviour that needs it.
 
-The foundation has no third-party dependencies at all. That is a deliberate
-starting point, not an oversight.
+`pantheon-store` depends on `rusqlite` (bundled SQLite); every other crate
+still has no third-party dependencies. That remains a deliberate default for
+a crate until real code needs one, not an oversight.
 
 ## Crate map
 
@@ -59,7 +65,9 @@ pantheon-cli                  -> pantheon-operator-protocol
 
 These are ceilings, not requirements. An allowed edge is declared in a manifest
 when real code needs it and not before, which is why no crate currently declares
-any dependency. The graph above is enforced by `scripts/check-crate-deps.sh`,
+an internal edge to another workspace crate — `pantheon-store`'s dependency on
+`rusqlite` (see "Current state") is a third-party edge this graph does not
+govern. The graph above is enforced by `scripts/check-crate-deps.sh`,
 which reads Cargo's own resolved dependencies rather than grepping manifests, and
 covers dev and build dependencies and every target platform. Adding a forbidden
 edge fails verification; so does adding a crate the allowlist does not mention.
