@@ -65,7 +65,9 @@ pantheon-cli                  -> pantheon-operator-protocol
 
 These are ceilings, not requirements. An allowed edge is declared in a manifest
 when real code needs it and not before, which is why no crate currently declares
-any dependency. The graph above is enforced by `scripts/check-crate-deps.sh`,
+an internal edge to another workspace crate — `pantheon-store`'s dependency on
+`rusqlite` (see "Current state") is a third-party edge this graph does not
+govern. The graph above is enforced by `scripts/check-crate-deps.sh`,
 which reads Cargo's own resolved dependencies rather than grepping manifests, and
 covers dev and build dependencies and every target platform. Adding a forbidden
 edge fails verification; so does adding a crate the allowlist does not mention.

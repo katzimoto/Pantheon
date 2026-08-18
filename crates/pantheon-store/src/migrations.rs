@@ -58,15 +58,10 @@ pub(crate) fn run(conn: &mut Connection) -> Result<(), StoreError> {
 /// can exercise ordering and fail-closed behavior against a fixture
 /// migration set without touching the production schema.
 pub(crate) fn run_with(conn: &mut Connection, migrations: &[Migration]) -> Result<(), StoreError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            checksum TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        ) STRICT;",
-    )?;
-
+    // Reject an unsupported newer schema before writing anything at all —
+    // including the bookkeeping table below — so the fail-closed path stays
+    // purely read-only rather than performing a (harmless but needless)
+    // write against a database this build should not touch further.
     let max_known = migrations.last().map_or(0, |m| m.version);
     let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -76,6 +71,15 @@ pub(crate) fn run_with(conn: &mut Connection, migrations: &[Migration]) -> Resul
             max_known,
         });
     }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at INTEGER NOT NULL
+        ) STRICT;",
+    )?;
 
     verify_recorded_state(conn, migrations, current_version)?;
 
@@ -150,8 +154,11 @@ fn apply_one(conn: &mut Connection, migration: &Migration) -> Result<(), StoreEr
 
     tx.pragma_update(None, "user_version", migration.version)?;
     tx.execute(
+        // unixepoch() keeps applied_at an integral base unit (whole seconds
+        // since the epoch), per the contract's "integral base units for
+        // ... timestamps" operating rule, rather than an ISO-8601 string.
         "INSERT INTO schema_migrations (version, name, checksum, applied_at)
-         VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+         VALUES (?1, ?2, ?3, unixepoch())",
         rusqlite::params![migration.version, migration.name, checksum(migration.sql)],
     )?;
 
