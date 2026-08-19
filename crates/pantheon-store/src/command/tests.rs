@@ -404,3 +404,49 @@ fn a_mutation_that_discards_a_failed_write_still_cannot_commit_the_command() {
         vec![0]
     );
 }
+
+#[test]
+fn an_unrelated_constraint_failure_is_not_reported_as_an_occupied_journal_slot() {
+    // Kills the mutant of matching the primary `ConstraintViolation` code
+    // instead of the extended one: every constraint on `event_journal`
+    // reports `ConstraintViolation`, so a caller's over-long `event_type`
+    // would be misreported as the journal disagreeing with its allocator.
+    let (_dir, store) = store_with_fixture("cmd-check-violation");
+    let epoch = store.restore_generation().unwrap();
+    let too_long = "e".repeat(129);
+
+    let err = store
+        .execute_command(
+            &Command {
+                epoch: epoch.as_str(),
+                id: "cmd-1",
+                request_hash: &hash(1),
+                event_type: &too_long,
+            },
+            |w| advance(w, "applied"),
+        )
+        .expect_err("an event type over the length limit must fail");
+
+    assert!(
+        matches!(err, StoreError::Sqlite(_)),
+        "a CHECK violation is an ordinary storage error, got: {err}"
+    );
+    assert!(
+        !format!("{err}").contains("already occupied"),
+        "an unrelated constraint failure must not claim the slot is occupied: {err}"
+    );
+
+    // And it still fails closed: nothing committed.
+    assert_eq!(
+        store
+            .read_all_for_test("SELECT COUNT(*) FROM event_journal")
+            .expect("count events"),
+        vec![0]
+    );
+    assert_eq!(
+        store
+            .read_all_for_test("SELECT next_sequence FROM journal_epochs WHERE is_current = 1")
+            .expect("read allocator"),
+        vec![1]
+    );
+}

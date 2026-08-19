@@ -307,8 +307,15 @@ fn append_event(
         // means the journal disagrees with its own allocator. That is a
         // violated invariant, not an ordinary storage failure, and saying so
         // keeps it distinguishable from a disk error.
+        //
+        // Matched on the *extended* code, not the primary one. Every
+        // constraint on this table reports `ConstraintViolation`, so keying
+        // on that alone would report a caller's over-long `event_type` — a
+        // CHECK failure — as an occupied journal slot. Only the
+        // `UNIQUE (journal_epoch, sequence)` violation means what this arm
+        // claims; anything else stays an ordinary storage error.
         Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(inner, _)))
-            if inner.code == rusqlite::ErrorCode::ConstraintViolation =>
+            if inner.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
         {
             return writer.fail(StoreError::InvariantViolated(format!(
                 "journal slot ({}, {}) is already occupied",
