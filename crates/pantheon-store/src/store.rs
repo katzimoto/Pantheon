@@ -9,9 +9,10 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, OpenFlags};
 
+use crate::command::{Command, Committed};
 use crate::error::StoreError;
 use crate::transaction::{Revision, Writer};
-use crate::{migrations, policy, transaction};
+use crate::{command, migrations, policy, transaction};
 
 /// The `OpenFlags` the authoritative writer connection uses. Extracted as a
 /// constant so a unit test can assert `SQLITE_OPEN_PRIVATE_CACHE` is set and
@@ -270,6 +271,36 @@ impl Store {
             )
         })?;
         transaction::run(&mut conn, f)
+    }
+
+    /// Runs `mutation` under durable command identity.
+    ///
+    /// The whole envelope — the epoch fence, the command-ledger decision,
+    /// `mutation` itself, the journal sequence allocation, the Event append
+    /// and the durable command outcome — runs inside one call to
+    /// [`Store::write`], and therefore inside one authoritative
+    /// `BEGIN IMMEDIATE` transaction. They commit together or not at all.
+    ///
+    /// `mutation` runs only when the command is genuinely new for its epoch.
+    /// A replay does not invoke it, and neither does a conflict or a stale
+    /// epoch.
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::StaleCommandEpoch`] when `command.epoch` is not the
+    ///   installation's current RestoreGeneration. Decided before the
+    ///   command ledger is consulted, so a missing row can never make a
+    ///   stale request look new.
+    /// - [`StoreError::CommandConflict`] when this identity was already used
+    ///   in this epoch with a different request hash.
+    /// - whatever `mutation` returns on failure, with the transaction rolled
+    ///   back in full.
+    pub fn execute_command<T>(
+        &self,
+        command: &Command<'_>,
+        mutation: impl FnOnce(&Writer<'_>) -> Result<T, StoreError>,
+    ) -> Result<Committed<T>, StoreError> {
+        self.write(|writer| command::execute(writer, command, mutation))
     }
 
     /// Returns the current revision of a revisioned authoritative row, or

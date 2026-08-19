@@ -8,10 +8,15 @@
 //! failure rolls back all three: no partial schema and no falsely advanced
 //! version.
 //!
-//! This mission's initial schema is deliberately minimal: migration
-//! bookkeeping plus the `system_state` singleton needed for installation
-//! identity / RestoreGeneration. It does not implement any future
-//! production table family.
+//! The schema is deliberately minimal: migration bookkeeping and the
+//! `system_state` singleton for installation identity / RestoreGeneration,
+//! plus the durable command ledger, Event Journal and journal epoch/sequence
+//! state the command mutation kernel requires. It does not implement any
+//! future production table family.
+//!
+//! Migrations are append-only. An applied migration's SQL is checksummed and
+//! verified on every open, so editing an existing entry would make every
+//! already-migrated database fail closed.
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -46,6 +51,80 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: "INSERT INTO system_state (id, restore_generation)
             SELECT 1, lower(hex(randomblob(16)))
             WHERE NOT EXISTS (SELECT 1 FROM system_state WHERE id = 1);",
+    },
+    Migration {
+        version: 3,
+        name: "create_command_and_journal_state",
+        // Table names follow the canonical "Table families" section of
+        // docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md
+        // (`commands` and `journal_epochs` in SYSTEM / CONFIGURATION,
+        // `event_journal` in EVENTS); they are not invented here.
+        sql: "CREATE TABLE journal_epochs (
+            epoch         TEXT    PRIMARY KEY CHECK (length(epoch) = 32),
+            -- The singleton next-sequence allocator the Event Journal
+            -- contract requires. Advanced inside the same write transaction
+            -- that appends the Event, never from MAX()+1, AUTOINCREMENT or
+            -- an in-process counter.
+            next_sequence INTEGER NOT NULL CHECK (next_sequence >= 1),
+            is_current    INTEGER NOT NULL CHECK (is_current IN (0, 1))
+        ) STRICT;
+
+        -- At most one current journal history, enforced by the database
+        -- rather than by controller discipline.
+        CREATE UNIQUE INDEX journal_epochs_one_current
+            ON journal_epochs (is_current) WHERE is_current = 1;
+
+        CREATE TABLE event_journal (
+            event_id      TEXT    NOT NULL PRIMARY KEY CHECK (length(event_id) = 32),
+            journal_epoch TEXT    NOT NULL REFERENCES journal_epochs(epoch),
+            -- Ordering metadata within a journal history, not Event identity.
+            sequence      INTEGER NOT NULL CHECK (sequence >= 1),
+            event_type    TEXT    NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
+            recorded_at   INTEGER NOT NULL,
+            -- Command causality provenance. `command_epoch` is the command's
+            -- RestoreGeneration, never this row's journal epoch, and the pair
+            -- is all-or-none. Deliberately not a foreign key: this immutable
+            -- historical identity must not acquire a retention dependency on
+            -- the mutable idempotency ledger.
+            command_epoch TEXT,
+            command_id    TEXT,
+            CHECK ((command_epoch IS NULL) = (command_id IS NULL)),
+            UNIQUE (journal_epoch, sequence)
+        ) STRICT;
+
+        CREATE TABLE commands (
+            -- The commandEpoch is the installation RestoreGeneration in
+            -- force when the command was accepted.
+            command_epoch TEXT    NOT NULL CHECK (length(command_epoch) = 32),
+            command_id    TEXT    NOT NULL CHECK (length(command_id) BETWEEN 1 AND 128),
+            -- Non-sensitive request digest, supplied by the caller. This
+            -- crate never hashes anything and never sees a request body.
+            request_hash  BLOB    NOT NULL CHECK (length(request_hash) = 32),
+            -- The durable result reference: where this command's Event
+            -- landed in the journal. Deliberately not a foreign key. The
+            -- Event Journal is retained and pruned on its own schedule, and
+            -- a referential dependency in either direction would make
+            -- pruning a journal row fail while a command still names it.
+            -- The Event contract states the same rule for the opposite
+            -- direction, and the reasoning is symmetric.
+            journal_epoch TEXT    NOT NULL,
+            sequence      INTEGER NOT NULL,
+            recorded_at   INTEGER NOT NULL,
+            PRIMARY KEY (command_epoch, command_id)
+        ) STRICT;",
+    },
+    Migration {
+        version: 4,
+        name: "bootstrap_journal_epoch",
+        // Same idempotent shape as `bootstrap_installation_identity`. The
+        // epoch is drawn independently of `system_state.restore_generation`:
+        // JournalEpoch fences Event-stream continuity while RestoreGeneration
+        // fences authority/idempotency continuity, and one must never be
+        // derived from the other. Rotating it belongs to the disaster-restore
+        // authority fence (T0), which this mission does not implement.
+        sql: "INSERT INTO journal_epochs (epoch, next_sequence, is_current)
+            SELECT lower(hex(randomblob(16))), 1, 1
+            WHERE NOT EXISTS (SELECT 1 FROM journal_epochs WHERE is_current = 1);",
     },
 ];
 
@@ -204,7 +283,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 2);
+        assert_eq!(user_version, 4);
 
         let mut stmt = conn
             .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
@@ -219,6 +298,8 @@ mod tests {
             vec![
                 (1, "create_system_state".to_string()),
                 (2, "bootstrap_installation_identity".to_string()),
+                (3, "create_command_and_journal_state".to_string()),
+                (4, "bootstrap_journal_epoch".to_string()),
             ]
         );
 
@@ -333,7 +414,7 @@ mod tests {
             err,
             StoreError::UnsupportedSchemaVersion {
                 found: 999,
-                max_known: 2
+                max_known: 4
             }
         ));
     }

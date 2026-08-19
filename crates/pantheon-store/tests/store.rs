@@ -8,45 +8,14 @@
 //! contention, and read/write separation — all exercised through the
 //! public API a controller will use.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
+
+use std::path::Path;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
+use common::{TempDir, columns, fixture_row, seed_fixture};
 use pantheon_store::{Revision, Store, StoreError, Value};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A minimal, dependency-free isolated directory per test. Mirrors
-/// `pantheon-store`'s internal `test_support::TempDir`, which unit tests use
-/// but which integration tests (a separate compilation unit) cannot reach.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "pantheon-store-it-{label}-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create isolated test directory");
-        Self(dir)
-    }
-
-    fn db_path(&self) -> PathBuf {
-        self.0.join("pantheon.db")
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 #[test]
 fn fresh_install_creates_an_unpredictable_restore_generation() {
@@ -123,7 +92,7 @@ fn opening_a_database_with_an_unsupported_newer_schema_version_fails_closed() {
             err,
             StoreError::UnsupportedSchemaVersion {
                 found: 999,
-                max_known: 2
+                max_known: 4
             }
         ),
         "unexpected error: {err}"
@@ -159,34 +128,6 @@ fn opening_a_database_with_tampered_migration_bookkeeping_fails_closed() {
 // ---------------------------------------------------------------------------
 // Issue #17 evidence
 // ---------------------------------------------------------------------------
-
-/// The revisioned fixture table the CAS evidence uses.
-///
-/// It is created here, by the test, through an ordinary SQLite connection —
-/// never by `migrations::MIGRATIONS`. No production database can grow it,
-/// and `production_schema_contains_only_the_tables_this_behaviour_needs`
-/// below is the standing guard that it never leaks in.
-const FIXTURE_DDL: &str = "CREATE TABLE cas_fixture (
-        id       TEXT    PRIMARY KEY,
-        revision INTEGER NOT NULL CHECK (revision > 0),
-        value    TEXT    NOT NULL
-    ) STRICT;
-    INSERT INTO cas_fixture (id, revision, value) VALUES ('row-a', 7, 'original');";
-
-fn seed_fixture(path: &Path) {
-    let conn = rusqlite::Connection::open(path).expect("open fixture connection");
-    conn.execute_batch(FIXTURE_DDL).expect("create fixture");
-}
-
-fn fixture_row(path: &Path) -> (i64, String) {
-    let conn = rusqlite::Connection::open(path).expect("open verification connection");
-    conn.query_row(
-        "SELECT revision, value FROM cas_fixture WHERE id = 'row-a'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .expect("read fixture row")
-}
 
 /// A probe connection that never waits for a lock, so a contended
 /// `BEGIN IMMEDIATE` fails immediately instead of blocking for the store's
@@ -480,10 +421,68 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         .map(Result::unwrap)
         .collect();
 
-    // No revisioned fixture table, and none of the future domain schema
-    // (Goal, Task, Run, commands, the Event Journal) that later missions own.
+    // The durable command ledger, Event Journal and journal epoch/sequence
+    // state this behaviour needs — and nothing else. No revisioned fixture
+    // table, and none of the future domain schema (Goal, Task, Run,
+    // scheduler) that later missions own.
     assert_eq!(
         tables,
-        vec!["schema_migrations".to_string(), "system_state".to_string()],
+        vec![
+            "commands".to_string(),
+            "event_journal".to_string(),
+            "journal_epochs".to_string(),
+            "schema_migrations".to_string(),
+            "system_state".to_string(),
+        ],
+        "unexpected production table set"
+    );
+
+    // The exact column set of every table this mission adds. A table-level
+    // guard cannot see a speculative column, and it cannot see a request-body
+    // or payload column being added to the command ledger — which is the
+    // mission's "persist only non-sensitive request identity and hash data"
+    // constraint expressed as something mechanical rather than as prose.
+    assert_eq!(
+        columns(&dir.db_path(), "commands"),
+        [
+            "command_epoch",
+            "command_id",
+            "journal_epoch",
+            "recorded_at",
+            "request_hash",
+            "sequence"
+        ],
+        "the command ledger must carry identity and hash only, never a request body"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "event_journal"),
+        [
+            "command_epoch",
+            "command_id",
+            "event_id",
+            "event_type",
+            "journal_epoch",
+            "recorded_at",
+            "sequence"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "journal_epochs"),
+        ["epoch", "is_current", "next_sequence"]
+    );
+
+    // AUTOINCREMENT would create `sqlite_sequence` and would be a plausible
+    // shortcut that contradicts the contract's singleton next-sequence
+    // allocator and its epoch-scoped ordering.
+    let autoincrement: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !autoincrement,
+        "journal sequencing must not use SQLite AUTOINCREMENT"
     );
 }
