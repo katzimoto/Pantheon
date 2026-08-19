@@ -51,6 +51,7 @@
 //! `docs/development/implementation.md`.
 
 mod command;
+mod configuration;
 mod error;
 mod migrations;
 mod policy;
@@ -61,6 +62,7 @@ mod transaction;
 mod test_support;
 
 pub use command::{Command, Committed, JournalCursor};
+pub use configuration::{ActiveConfiguration, ConfigurationPointer};
 pub use error::StoreError;
 pub use store::{RestoreGeneration, Store};
 pub use transaction::{Revision, Value, Writer};

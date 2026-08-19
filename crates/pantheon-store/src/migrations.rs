@@ -126,6 +126,66 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             SELECT lower(hex(randomblob(16))), 1, 1
             WHERE NOT EXISTS (SELECT 1 FROM journal_epochs WHERE is_current = 1);",
     },
+    Migration {
+        version: 5,
+        name: "create_configuration_authority",
+        // Table names follow the canonical "Persistence model" section of
+        // docs/architecture/operations/configuration-and-policy-revisions.md.
+        // Only the three families this mission's behaviour needs are created:
+        // `configuration_sources`, `config_load_attempts` and
+        // `config_reconciliations` arrive with the behaviour that reads them.
+        sql: "CREATE TABLE configuration_components (
+            -- Components are content-addressed and immutable: the same
+            -- compiled component reached twice is the same row.
+            digest         BLOB NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            domain         TEXT NOT NULL CHECK (domain IN (
+                'agents', 'routing', 'executionProfiles',
+                'evaluators', 'context', 'authorization')),
+            canonical_json TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE configuration_revisions (
+            -- Revision identity is historical activation identity, which is
+            -- why the sequence is the key and the content digest is not:
+            -- re-activating identical content is a new revision with a later
+            -- sequence.
+            activation_sequence       INTEGER NOT NULL PRIMARY KEY CHECK (activation_sequence >= 1),
+            content_digest            BLOB NOT NULL CHECK (length(content_digest) = 32),
+            compiler_version          TEXT NOT NULL,
+            -- Provenance, never semantic identity.
+            source_set_digest         BLOB NOT NULL CHECK (length(source_set_digest) = 32),
+            agents_digest             BLOB NOT NULL REFERENCES configuration_components(digest),
+            routing_digest            BLOB NOT NULL REFERENCES configuration_components(digest),
+            execution_profile_digest  BLOB NOT NULL REFERENCES configuration_components(digest),
+            evaluator_registry_digest BLOB NOT NULL REFERENCES configuration_components(digest),
+            context_policy_digest     BLOB NOT NULL REFERENCES configuration_components(digest),
+            authorization_digest      BLOB NOT NULL REFERENCES configuration_components(digest),
+            recorded_at               INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE active_configuration (
+            -- One small pointer, as the contract requires. Singleton by
+            -- constraint rather than by convention.
+            id                  TEXT    NOT NULL PRIMARY KEY CHECK (id = 'singleton'),
+            -- Carries a revision so activation is an ordinary revisioned CAS
+            -- through the #17 primitive rather than a bespoke compare.
+            revision            INTEGER NOT NULL CHECK (revision > 0),
+            -- NULL until a fresh installation activates its first revision:
+            -- that state is exactly \"not yet ready for authority-bearing
+            -- work\", and is why it is nullable.
+            activation_sequence INTEGER REFERENCES configuration_revisions(activation_sequence)
+        ) STRICT;",
+    },
+    Migration {
+        version: 6,
+        name: "bootstrap_active_configuration_pointer",
+        // The pointer row exists from installation with no revision, so
+        // activation is always a revisioned update of an existing row and a
+        // fresh install has an inspectable \"no active configuration\" state.
+        sql: "INSERT INTO active_configuration (id, revision, activation_sequence)
+            SELECT 'singleton', 1, NULL
+            WHERE NOT EXISTS (SELECT 1 FROM active_configuration WHERE id = 'singleton');",
+    },
 ];
 
 /// Runs the production migration set against `conn`.
@@ -265,182 +325,4 @@ fn checksum(sql: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn open_conn() -> (crate::test_support::TempDir, Connection) {
-        let dir = crate::test_support::TempDir::new("migrations");
-        let conn = Connection::open(dir.path().join("pantheon.db")).expect("open connection");
-        (dir, conn)
-    }
-
-    #[test]
-    fn applies_migrations_in_order_and_records_bookkeeping() {
-        let (_dir, mut conn) = open_conn();
-
-        run_with(&mut conn, MIGRATIONS).expect("migrations apply");
-
-        let user_version: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(user_version, 4);
-
-        let mut stmt = conn
-            .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
-            .unwrap();
-        let applied: Vec<(i64, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(
-            applied,
-            vec![
-                (1, "create_system_state".to_string()),
-                (2, "bootstrap_installation_identity".to_string()),
-                (3, "create_command_and_journal_state".to_string()),
-                (4, "bootstrap_journal_epoch".to_string()),
-            ]
-        );
-
-        // Migration 2 could only have succeeded after migration 1's table
-        // existed, which is the ordering guarantee under test.
-        let generation: String = conn
-            .query_row(
-                "SELECT restore_generation FROM system_state WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(generation.len(), 32);
-    }
-
-    #[test]
-    fn reopening_an_already_migrated_database_is_a_no_op() {
-        let (_dir, mut conn) = open_conn();
-        run_with(&mut conn, MIGRATIONS).expect("first run applies migrations");
-        let generation_before: String = conn
-            .query_row(
-                "SELECT restore_generation FROM system_state WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-
-        run_with(&mut conn, MIGRATIONS).expect("second run is a no-op");
-        let generation_after: String = conn
-            .query_row(
-                "SELECT restore_generation FROM system_state WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(generation_before, generation_after);
-    }
-
-    #[test]
-    fn failing_migration_leaves_no_partial_schema_and_does_not_advance_version() {
-        let (_dir, mut conn) = open_conn();
-
-        let migrations = [
-            Migration {
-                version: 1,
-                name: "create_marker",
-                sql: "CREATE TABLE marker (id INTEGER PRIMARY KEY) STRICT;",
-            },
-            Migration {
-                version: 2,
-                name: "deliberately_broken",
-                // References a table that does not exist: this must fail
-                // and roll back rather than partially apply.
-                sql: "CREATE TABLE also_marker (id INTEGER PRIMARY KEY) STRICT;
-                      INSERT INTO does_not_exist (id) VALUES (1);",
-            },
-        ];
-
-        let err = run_with(&mut conn, &migrations).expect_err("migration 2 must fail");
-        assert!(matches!(
-            err,
-            StoreError::MigrationFailed {
-                version: 2,
-                name: "deliberately_broken",
-                ..
-            }
-        ));
-
-        let user_version: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            user_version, 1,
-            "version must not advance past the last successful migration"
-        );
-
-        let recorded: Vec<i64> = conn
-            .prepare("SELECT version FROM schema_migrations ORDER BY version")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(
-            recorded,
-            vec![1],
-            "only the successful migration is recorded"
-        );
-
-        let also_marker_exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'also_marker')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            !also_marker_exists,
-            "the failed migration's own DDL must not partially commit"
-        );
-    }
-
-    #[test]
-    fn unsupported_newer_schema_version_fails_closed() {
-        let (_dir, mut conn) = open_conn();
-        run_with(&mut conn, MIGRATIONS).expect("migrations apply");
-        conn.pragma_update(None, "user_version", 999i64).unwrap();
-
-        let err = run_with(&mut conn, MIGRATIONS).expect_err("must reject unknown newer schema");
-        assert!(matches!(
-            err,
-            StoreError::UnsupportedSchemaVersion {
-                found: 999,
-                max_known: 4
-            }
-        ));
-    }
-
-    #[test]
-    fn tampered_checksum_fails_closed() {
-        let (_dir, mut conn) = open_conn();
-        run_with(&mut conn, MIGRATIONS).expect("migrations apply");
-        conn.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 1",
-            [],
-        )
-        .unwrap();
-
-        let err = run_with(&mut conn, MIGRATIONS).expect_err("must reject checksum mismatch");
-        assert!(matches!(err, StoreError::InconsistentMigrationState(_)));
-    }
-
-    #[test]
-    fn gap_in_bookkeeping_fails_closed() {
-        let (_dir, mut conn) = open_conn();
-        run_with(&mut conn, MIGRATIONS).expect("migrations apply");
-        conn.execute("DELETE FROM schema_migrations WHERE version = 1", [])
-            .unwrap();
-
-        let err = run_with(&mut conn, MIGRATIONS).expect_err("must reject a bookkeeping gap");
-        assert!(matches!(err, StoreError::InconsistentMigrationState(_)));
-    }
-}
+mod tests;

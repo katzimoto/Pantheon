@@ -356,7 +356,7 @@ impl Store {
     /// Separate from the writer's lock, so a read never waits on an
     /// authoritative transaction and can never be the reason one is held
     /// open.
-    fn read<T>(
+    pub(crate) fn read<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {

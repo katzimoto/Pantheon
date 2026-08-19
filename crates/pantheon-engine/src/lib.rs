@@ -15,3 +15,5 @@
 //! and wire formats belong to `pantheon-operator-api`.
 //!
 //! Nothing is implemented yet. See `docs/development/implementation.md`.
+
+pub mod configuration;
