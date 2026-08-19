@@ -233,20 +233,81 @@ fn read_revision_row(
         Err(err) => return Err(StoreError::Sqlite(err)),
     };
 
+    let components = ComponentDigests {
+        agents: digest(&row.2, "agents_digest")?,
+        routing: digest(&row.3, "routing_digest")?,
+        execution_profile: digest(&row.4, "execution_profile_digest")?,
+        evaluator_registry: digest(&row.5, "evaluator_registry_digest")?,
+        context_policy: digest(&row.6, "context_policy_digest")?,
+        authorization: digest(&row.7, "authorization_digest")?,
+    };
+
+    // The configuration contract requires startup to verify the component
+    // hashes, not merely to read them. Each stored component is re-digested
+    // from its canonical bytes and checked against the digest the revision
+    // names, so a damaged or swapped payload fails closed instead of being
+    // served as authority.
+    for (domain, expected) in [
+        ("agents", components.agents),
+        ("routing", components.routing),
+        ("executionProfiles", components.execution_profile),
+        ("evaluators", components.evaluator_registry),
+        ("context", components.context_policy),
+        ("authorization", components.authorization),
+    ] {
+        verify_component(conn, domain, expected)?;
+    }
+
     Ok(ActiveConfiguration {
         activation_sequence: sequence,
         content_digest: digest(&row.0, "content_digest")?,
         source_set_digest: digest(&row.1, "source_set_digest")?,
-        components: ComponentDigests {
-            agents: digest(&row.2, "agents_digest")?,
-            routing: digest(&row.3, "routing_digest")?,
-            execution_profile: digest(&row.4, "execution_profile_digest")?,
-            evaluator_registry: digest(&row.5, "evaluator_registry_digest")?,
-            context_policy: digest(&row.6, "context_policy_digest")?,
-            authorization: digest(&row.7, "authorization_digest")?,
-        },
+        components,
         pointer_revision,
     })
+}
+
+/// Re-digests one stored component and checks it against what the revision
+/// names, including that it is stored under the domain it is used as.
+fn verify_component(
+    conn: &rusqlite::Connection,
+    domain: &str,
+    expected: Digest,
+) -> Result<(), StoreError> {
+    let found: Option<(String, String)> = conn
+        .query_row(
+            "SELECT domain, canonical_json FROM configuration_components WHERE digest = ?1",
+            rusqlite::params![expected.as_bytes().to_vec()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(StoreError::Sqlite(other)),
+        })?;
+
+    let Some((stored_domain, canonical_json)) = found else {
+        return Err(StoreError::InvariantViolated(format!(
+            "active configuration names {domain} component {expected}, which is not stored"
+        )));
+    };
+
+    if stored_domain != domain {
+        return Err(StoreError::InvariantViolated(format!(
+            "component {expected} is stored as {stored_domain}, but the revision uses it as {domain}"
+        )));
+    }
+
+    // The check that actually catches a tampered or corrupted payload: the
+    // bytes must still hash to the identity the revision was built on.
+    let recomputed = Digest::of(canonical_json.as_bytes());
+    if recomputed != expected {
+        return Err(StoreError::InvariantViolated(format!(
+            "{domain} component content hashes to {recomputed}, not the {expected} the active revision names"
+        )));
+    }
+
+    Ok(())
 }
 
 fn digest(bytes: &[u8], column: &str) -> Result<Digest, StoreError> {

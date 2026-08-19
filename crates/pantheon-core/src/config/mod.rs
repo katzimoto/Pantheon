@@ -19,6 +19,7 @@ pub mod digest;
 pub mod error;
 pub mod model;
 pub mod parse;
+pub mod reader;
 pub mod revision;
 pub mod validate;
 

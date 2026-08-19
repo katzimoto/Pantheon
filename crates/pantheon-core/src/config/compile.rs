@@ -22,6 +22,9 @@ use crate::config::model::{
     SandboxProfile,
 };
 use crate::config::parse;
+use crate::config::reader::{
+    as_array, as_bool, as_i64, as_str, field, non_empty, path, positive, string_list, unique,
+};
 use crate::config::revision::CompiledConfiguration;
 use crate::config::validate;
 
@@ -34,18 +37,34 @@ pub const SHELL_ACTION: &str = "shell.execute";
 /// The guarantee that names control-plane isolation.
 pub const CONTROL_PLANE_GUARANTEE: &str = "isolation.control-plane";
 
-/// The canonical action vocabulary an authorization rule may name.
+/// The canonical action vocabulary.
 ///
-/// Small on purpose: it is the surface the MVP slice actually uses. A rule
-/// naming anything else is rejected rather than compiled into a policy whose
-/// meaning Pantheon cannot check.
+/// These names are the ones `permissions-and-capabilities.md` ("Canonical
+/// actions and resources") defines — not a local invention. The subset is the
+/// surface the MVP slice uses; anything outside it is rejected rather than
+/// compiled into a policy whose meaning Pantheon cannot check, and the same
+/// vocabulary governs Agent action declarations and authorization rules so the
+/// two cannot describe different worlds.
 pub const ACTIONS: &[&str] = &[
+    "filesystem.read",
+    "filesystem.write",
+    "filesystem.delete",
     "shell.execute",
-    "workspace.read",
-    "workspace.write",
-    "artifact.write",
+    "process.spawn",
+    "artifact.read",
+    "artifact.seal",
     "secret.read",
+    "secret.use",
 ];
+
+/// The action v1 built-in hard policy denies to Agent principals
+/// non-approvably.
+///
+/// `agent-manifest.md`: "Agent `secret.read` is hard-denied by v1 built-in
+/// policy even if a malformed manifest attempted to permit it."
+/// `permissions-and-capabilities.md`: "For Agent principals, v1 built-in hard
+/// policy denies `secret.read` non-approvably."
+pub const HARD_DENIED_ACTION: &str = "secret.read";
 
 /// Compiles configuration source text.
 ///
@@ -74,103 +93,6 @@ pub fn compile(source: &str) -> Result<CompiledConfiguration, ConfigError> {
     Ok(compiled)
 }
 
-// --- field readers -------------------------------------------------------
-
-fn path(prefix: &str, key: &str) -> String {
-    if prefix.is_empty() {
-        key.to_string()
-    } else {
-        format!("{prefix}.{key}")
-    }
-}
-
-fn field<'a>(value: &'a Value, prefix: &str, key: &str) -> Result<&'a Value, ConfigError> {
-    value.get(key).ok_or_else(|| ConfigError::MissingField {
-        path: path(prefix, key),
-    })
-}
-
-fn as_str<'a>(value: &'a Value, at: &str) -> Result<&'a str, ConfigError> {
-    match value {
-        Value::String(text) => Ok(text),
-        other => Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: format!("expected a string, found {}", other.kind()),
-        }),
-    }
-}
-
-fn as_i64(value: &Value, at: &str) -> Result<i64, ConfigError> {
-    match value {
-        Value::Integer(number) => Ok(*number),
-        other => Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: format!("expected an integer, found {}", other.kind()),
-        }),
-    }
-}
-
-fn as_bool(value: &Value, at: &str) -> Result<bool, ConfigError> {
-    match value {
-        Value::Bool(flag) => Ok(*flag),
-        other => Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: format!("expected a boolean, found {}", other.kind()),
-        }),
-    }
-}
-
-fn as_array<'a>(value: &'a Value, at: &str) -> Result<&'a [Value], ConfigError> {
-    match value {
-        Value::Array(values) => Ok(values),
-        other => Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: format!("expected an array, found {}", other.kind()),
-        }),
-    }
-}
-
-fn string_list(parent: &Value, prefix: &str, key: &str) -> Result<Vec<String>, ConfigError> {
-    let at = path(prefix, key);
-    as_array(field(parent, prefix, key)?, &at)?
-        .iter()
-        .map(|entry| as_str(entry, &at).map(ToString::to_string))
-        .collect()
-}
-
-fn non_empty(text: &str, at: &str) -> Result<(), ConfigError> {
-    if text.is_empty() {
-        return Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: "must not be empty".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn positive(number: i64, at: &str) -> Result<(), ConfigError> {
-    if number <= 0 {
-        return Err(ConfigError::InvalidValue {
-            path: at.to_string(),
-            detail: format!("must be greater than zero, found {number}"),
-        });
-    }
-    Ok(())
-}
-
-/// Rejects a repeated identity, which is a conflicting declaration rather
-/// than a redefinition.
-fn unique(seen: &mut Vec<String>, kind: &'static str, id: &str) -> Result<(), ConfigError> {
-    if seen.iter().any(|existing| existing == id) {
-        return Err(ConfigError::DuplicateIdentity {
-            kind,
-            id: id.to_string(),
-        });
-    }
-    seen.push(id.to_string());
-    Ok(())
-}
-
 // --- component compilation ----------------------------------------------
 
 fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
@@ -190,6 +112,26 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
             &path(&prefix, "minContextTokens"),
         )?;
         positive(min_context_tokens, &path(&prefix, "minContextTokens"))?;
+
+        let actions = string_list(entry, &prefix, "actions")?;
+        for action in &actions {
+            if !ACTIONS.contains(&action.as_str()) {
+                return Err(ConfigError::InvalidValue {
+                    path: path(&prefix, "actions"),
+                    detail: format!("{action:?} is not a canonical Pantheon action"),
+                });
+            }
+            // Built-in hard policy is not something an Agent manifest can opt
+            // out of, so declaring the action at all is rejected rather than
+            // silently compiled and denied later.
+            if action == HARD_DENIED_ACTION {
+                return Err(ConfigError::HardPolicyViolation {
+                    detail: format!(
+                        "agent {name:?} declares {HARD_DENIED_ACTION}, which v1 built-in hard policy denies to Agent principals non-approvably"
+                    ),
+                });
+            }
+        }
 
         agents.push(Agent {
             name,
@@ -212,7 +154,7 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
             )?
             .to_string(),
             sandbox_requirements: string_list(entry, &prefix, "sandboxRequirements")?,
-            actions: string_list(entry, &prefix, "actions")?,
+            actions,
         });
     }
     Ok(AgentComponent { agents })
@@ -471,6 +413,16 @@ fn authorization(value: &Value) -> Result<AuthorizationComponent, ConfigError> {
                 });
             }
         };
+        // A configured rule cannot weaken built-in hard policy. Permitting the
+        // hard-denied action is rejected outright; an explicit forbid is
+        // redundant but harmless and stays compilable.
+        if action == HARD_DENIED_ACTION && effect == RuleEffect::Permit {
+            return Err(ConfigError::HardPolicyViolation {
+                detail: format!(
+                    "an authorization rule permits {HARD_DENIED_ACTION}, which v1 built-in hard policy denies non-approvably"
+                ),
+            });
+        }
         rules.push(AuthorizationRule { action, effect });
     }
 

@@ -292,3 +292,77 @@ fn the_hard_policy_identity_participates_in_the_authorization_digest() {
         "the hard-policy identity must be inside the digested value"
     );
 }
+
+#[test]
+fn configuration_cannot_permit_the_hard_denied_action() {
+    // `agent-manifest.md`: Agent `secret.read` is hard-denied by v1 built-in
+    // policy "even if a malformed manifest attempted to permit it". A
+    // candidate that tries must not be activatable.
+    let err = compile(&variant(
+        r#"{ "action": "secret.read", "effect": "forbid" }"#,
+        r#"{ "action": "secret.read", "effect": "permit" }"#,
+    ))
+    .expect_err("permitting the hard-denied action must be rejected");
+    assert_eq!(err.kind(), "hard-policy-violation", "unexpected: {err}");
+
+    // An explicit forbid is redundant but not a weakening, so it still
+    // compiles — otherwise the rule would be untestable in the fixture.
+    compile(VALID_SOURCE).expect("an explicit forbid remains valid");
+}
+
+#[test]
+fn an_agent_cannot_declare_the_hard_denied_action() {
+    // The same rule from the other direction: hard policy is not something an
+    // Agent manifest opts out of by declaring the action on itself.
+    let err = compile(&variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "secret.read"]"#,
+    ))
+    .expect_err("an Agent declaring the hard-denied action must be rejected");
+    assert_eq!(err.kind(), "hard-policy-violation", "unexpected: {err}");
+}
+
+#[test]
+fn agent_actions_are_validated_against_the_canonical_vocabulary() {
+    // Agent actions and authorization rules must describe one world: an
+    // action Pantheon does not define cannot be declared on either side.
+    let err = compile(&variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "workspace.read"]"#,
+    ))
+    .expect_err("a non-canonical Agent action must be rejected");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref detail, .. } if detail.contains("canonical")),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn the_action_vocabulary_is_the_canonical_one() {
+    // Pins the names to `permissions-and-capabilities.md` rather than a local
+    // invention, so a rename there is caught here instead of silently
+    // diverging.
+    use pantheon_core::config::compile::ACTIONS;
+    for canonical in [
+        "filesystem.read",
+        "filesystem.write",
+        "filesystem.delete",
+        "shell.execute",
+        "process.spawn",
+        "artifact.read",
+        "artifact.seal",
+        "secret.read",
+        "secret.use",
+    ] {
+        assert!(
+            ACTIONS.contains(&canonical),
+            "{canonical} must be canonical"
+        );
+    }
+    for invented in ["workspace.read", "workspace.write", "artifact.write"] {
+        assert!(
+            !ACTIONS.contains(&invented),
+            "{invented} is not a canonical Pantheon action"
+        );
+    }
+}

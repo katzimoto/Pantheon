@@ -31,6 +31,13 @@ pub enum ConfigError {
     },
     /// Two individually valid declarations cannot hold at once.
     IncompatibleCombination { detail: String },
+    /// The candidate attempts to weaken Pantheon's compiled-in hard policy.
+    ///
+    /// Distinct from an ordinary invalid value: this is configuration trying
+    /// to grant authority that no configuration scope may grant, and the
+    /// contract requires it to fail even when the rest of the candidate is
+    /// well-formed.
+    HardPolicyViolation { detail: String },
 }
 
 impl ConfigError {
@@ -44,6 +51,7 @@ impl ConfigError {
             Self::DuplicateIdentity { .. } => "duplicate-identity",
             Self::UnknownReference { .. } => "unknown-reference",
             Self::IncompatibleCombination { .. } => "incompatible-combination",
+            Self::HardPolicyViolation { .. } => "hard-policy-violation",
         }
     }
 }
@@ -63,6 +71,12 @@ impl fmt::Display for ConfigError {
             ),
             Self::IncompatibleCombination { detail } => {
                 write!(f, "incompatible configuration: {detail}")
+            }
+            Self::HardPolicyViolation { detail } => {
+                write!(
+                    f,
+                    "configuration may not weaken built-in hard policy: {detail}"
+                )
             }
         }
     }

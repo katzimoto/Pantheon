@@ -14,7 +14,7 @@ fn source(memory_limit: i64) -> String {
   "agents": [{{"name":"builder","version":1,"accepts":["code-change"],"competencies":["rust"],
     "routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
-    "actions":["workspace.read"]}}],
+    "actions":["filesystem.read"]}}],
   "routing": {{"policies":[{{"name":"default","ordering":["featureMatch"],"tieBreak":"backendId"}}]}},
   "execution": {{
     "profiles":[{{"name":"strict","isolationClass":"CONTAINER",
@@ -28,7 +28,7 @@ fn source(memory_limit: i64) -> String {
   "context": {{"schemaVersion":1,"mandatorySections":["task"],"preloadPriority":["task"],
     "memoryLimitTokens":{memory_limit},"workspaceOrientationLimitTokens":2000,
     "safetyMarginTokens":512,"optionalDropOrder":["memory"]}},
-  "authorization": {{"schemaVersion":1,"rules":[{{"action":"workspace.read","effect":"permit"}}]}}
+  "authorization": {{"schemaVersion":1,"rules":[{{"action":"filesystem.read","effect":"permit"}}]}}
 }}"#
     )
 }

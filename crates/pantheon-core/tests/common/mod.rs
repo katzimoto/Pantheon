@@ -23,7 +23,7 @@ pub(crate) const VALID_SOURCE: &str = r#"{
       "minContextTokens": 8000,
       "sandboxProfile": "strict-local-container",
       "sandboxRequirements": ["isolation.control-plane"],
-      "actions": ["shell.execute", "workspace.read", "workspace.write"]
+      "actions": ["shell.execute", "filesystem.read", "filesystem.write"]
     }
   ],
   "routing": {

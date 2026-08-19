@@ -20,7 +20,7 @@ fn source(memory_limit: i64) -> String {
   "agents": [{{"name":"builder","version":1,"accepts":["code-change"],"competencies":["rust"],
     "routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
-    "actions":["workspace.read"]}}],
+    "actions":["filesystem.read"]}}],
   "routing": {{"policies":[{{"name":"default","ordering":["featureMatch"],"tieBreak":"backendId"}}]}},
   "execution": {{
     "profiles":[{{"name":"strict","isolationClass":"CONTAINER",
@@ -34,7 +34,7 @@ fn source(memory_limit: i64) -> String {
   "context": {{"schemaVersion":1,"mandatorySections":["task"],"preloadPriority":["task"],
     "memoryLimitTokens":{memory_limit},"workspaceOrientationLimitTokens":2000,
     "safetyMarginTokens":512,"optionalDropOrder":["memory"]}},
-  "authorization": {{"schemaVersion":1,"rules":[{{"action":"workspace.read","effect":"permit"}}]}}
+  "authorization": {{"schemaVersion":1,"rules":[{{"action":"filesystem.read","effect":"permit"}}]}}
 }}"#
     )
 }
@@ -252,5 +252,119 @@ fn replaying_an_activation_command_does_not_create_a_second_revision() {
             .expect("count"),
         vec![1],
         "replay must not append a duplicate activation Event"
+    );
+}
+
+#[test]
+fn a_tampered_component_payload_fails_closed_on_reload() {
+    // The configuration contract requires startup to *verify* the component
+    // hashes, not merely read them. A payload that no longer hashes to the
+    // identity the active revision names must not be served as authority.
+    let dir = TempDir::new("cfg-tampered");
+    let path = dir.path().join("pantheon.db");
+    {
+        let store = Store::open(&path).expect("open store");
+        activate(&store, "cmd-1", 4000, Revision::new(1)).expect("activation");
+        store.close().expect("close");
+    }
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("raw connection");
+        let changed = conn
+            .execute(
+                "UPDATE configuration_components
+                 SET canonical_json = '{\"tampered\":true}'
+                 WHERE domain = 'context'",
+                [],
+            )
+            .expect("tamper with a stored component");
+        assert_eq!(
+            changed, 1,
+            "the tamper must have landed, or this proves nothing"
+        );
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    let err = store
+        .configuration_pointer()
+        .expect_err("a tampered component must fail closed");
+    assert!(
+        matches!(err, StoreError::InvariantViolated(ref d) if d.contains("hashes to")),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_component_referenced_by_a_revision_cannot_be_deleted() {
+    // The first layer of the same protection, and the one that actually
+    // fires: the revision's foreign keys make a referenced component
+    // undeletable, so "the active revision names a component that is not
+    // stored" is unreachable through ordinary deletion rather than merely
+    // detected afterwards.
+    let dir = TempDir::new("cfg-missing-component");
+    let path = dir.path().join("pantheon.db");
+    {
+        let store = Store::open(&path).expect("open store");
+        activate(&store, "cmd-1", 4000, Revision::new(1)).expect("activation");
+        store.close().expect("close");
+    }
+
+    let conn = rusqlite::Connection::open(&path).expect("raw connection");
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .expect("enforce foreign keys");
+    let err = conn
+        .execute(
+            "DELETE FROM configuration_components WHERE domain = 'routing'",
+            [],
+        )
+        .expect_err("a referenced component must not be deletable");
+    assert!(
+        matches!(
+            err,
+            rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation
+        ),
+        "unexpected error: {err}"
+    );
+
+    // And the store still loads the revision it always had.
+    let store = Store::open(&path).expect("reopen");
+    let active = store
+        .configuration_pointer()
+        .expect("pointer")
+        .active
+        .expect("active");
+    assert_eq!(active.activation_sequence, 1);
+}
+
+#[test]
+fn a_component_stored_under_the_wrong_domain_fails_closed() {
+    // Content addressing alone does not prove a component is being used as
+    // what it was compiled as.
+    let dir = TempDir::new("cfg-wrong-domain");
+    let path = dir.path().join("pantheon.db");
+    {
+        let store = Store::open(&path).expect("open store");
+        activate(&store, "cmd-1", 4000, Revision::new(1)).expect("activation");
+        store.close().expect("close");
+    }
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("raw connection");
+        let changed = conn
+            .execute(
+                "UPDATE configuration_components SET domain = 'evaluators' WHERE domain = 'context'",
+                [],
+            )
+            .expect("relabel a stored component");
+        assert_eq!(changed, 1);
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    let err = store
+        .configuration_pointer()
+        .expect_err("a relabelled component must fail closed");
+    assert!(
+        matches!(err, StoreError::InvariantViolated(ref d) if d.contains("stored as")),
+        "unexpected error: {err}"
     );
 }
