@@ -684,3 +684,26 @@ fn configuration_binding_detects_a_later_activation() {
     );
     assert!(!first.matches(later));
 }
+
+#[test]
+fn configuration_binding_compares_every_component_not_a_chosen_few() {
+    // The fence exists so routing cannot commit under one configuration
+    // generation what it resolved under another. A hand-listed subset of the
+    // component digests would keep passing when a component is added later —
+    // the routing contract already names one that is coming — so this pins the
+    // comparison to the whole struct. `evaluatorRegistry` is the case that
+    // matters most: routing itself never reads it, which is exactly why a
+    // subset comparison would be tempting to write and wrong.
+    let compiled = compile(VALID_SOURCE).expect("fixture compiles");
+    let first = binding(&compiled);
+
+    let mut components = first.component_digests;
+    components.evaluator_registry = pantheon_core::config::Digest::of(b"another generation");
+    let divergent =
+        ConfigurationBinding::new(first.activation_sequence, first.content_digest, components);
+
+    assert!(
+        !first.matches(divergent),
+        "a component the routing decision does not read is still part of the generation"
+    );
+}

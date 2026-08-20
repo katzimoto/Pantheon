@@ -7,6 +7,7 @@ mod common;
 use common::{VALID_SOURCE, variant};
 use pantheon_core::config::ConfigError;
 use pantheon_core::config::compile::compile;
+use pantheon_core::config::revision::COMPILER_VERSION;
 
 #[test]
 fn the_mvp_source_compiles_to_the_components_the_slice_needs() {
@@ -503,4 +504,63 @@ fn agent_membership_order_does_not_change_compiled_identity() {
         other.component_digests().agents
     );
     assert_eq!(reference.revision_digest(), other.revision_digest());
+}
+
+#[test]
+fn a_repeated_entry_in_a_set_valued_list_is_rejected() {
+    // These lists canonicalize as sorted sets, so a repeated entry would
+    // change the component digest without changing what the configuration
+    // means. Rejecting it keeps source and compiled identity in step, and
+    // matches the `uniqueItems` the Agent manifest schema already declares.
+    let source = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "filesystem.read", "shell.execute"]"#,
+    );
+    match compile(&source).expect_err("a repeated action is not a set") {
+        ConfigError::DuplicateIdentity { kind, id } => {
+            assert_eq!(kind, "agent action");
+            assert_eq!(id, "shell.execute");
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+}
+
+#[test]
+fn a_route_preference_key_outside_the_vocabulary_is_rejected_at_activation() {
+    // `featureMatch` is the specific key this rejects, and it is not an
+    // arbitrary example: candidate validation already fails closed on a
+    // missing required execution feature, so counting the matched ones can
+    // only restate how many the Agent asked for. A preference key that cannot
+    // express a preference has to fail at activation rather than quietly
+    // ordering nothing.
+    let source = variant(
+        r#""ordering": ["contextCapacity"]"#,
+        r#""ordering": ["featureMatch"]"#,
+    );
+    match compile(&source).expect_err("an unusable preference key is refused") {
+        ConfigError::InvalidValue { path, detail } => {
+            assert!(path.ends_with("ordering"), "unexpected path {path:?}");
+            assert!(
+                detail.contains("featureMatch"),
+                "unexpected detail {detail:?}"
+            );
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+}
+
+#[test]
+fn the_compiler_version_is_part_of_revision_identity() {
+    // The constant exists so that a change to how Pantheon compiles
+    // configuration produces a different identity instead of two incompatible
+    // compilations both claiming one version. That only holds if the version
+    // actually reaches the digest.
+    let components = compile(VALID_SOURCE).expect("compiles").component_digests();
+
+    assert_ne!(
+        components.revision_digest("pantheon-config-v1"),
+        components.revision_digest(COMPILER_VERSION),
+        "the compiler version must reach the revision identity: a digest that \
+         ignores it lets two incompatible compilations claim one version"
+    );
 }
