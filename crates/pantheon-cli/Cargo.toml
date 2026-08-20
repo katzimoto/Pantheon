@@ -5,11 +5,58 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
-
 # Package `pantheon-cli`, binary `pantheon`. The package name keeps the crate's
 # role obvious in the workspace; the binary name is the operator-facing command.
 [[bin]]
 name = "pantheon"
 path = "src/main.rs"
+
+[dependencies]
+# The CLI's only internal dependency, and the only one it may ever have.
+# `scripts/check-crate-deps.sh` enforces that ceiling, which is what makes the
+# CLI structurally unable to reach the database or the engine rather than
+# merely discouraged from trying.
+pantheon-operator-protocol = { path = "../pantheon-operator-protocol" }
+
+# A minimal HTTP/1.1 client. `hyper::client::conn::http1` speaks HTTP over an
+# already-connected stream, which is exactly the shape a Unix socket needs:
+# there is no connector, no pool, no DNS and no URL authority to resolve. A
+# higher-level client would have to be talked out of doing all four.
+hyper = { version = "1.11.0", default-features = false, features = [
+    "client",
+    "http1",
+] }
+# Only for `TokioIo`, which adapts a tokio stream to hyper's IO traits.
+hyper-util = { version = "0.1.20", default-features = false, features = [
+    "tokio",
+] }
+http-body-util = "0.1.5"
+
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt",
+    "net",
+    "macros",
+    "io-util",
+] }
+
+# The trait bounds on this crate's JSON helpers name `serde` directly, and the
+# wire types it decodes are `serde` types.
+serde = { version = "1.0.229", default-features = false, features = ["std"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# The workflow test reads the daemon's JSON to assert on it.
+serde_json = "1.0.151"
+
+# The transport tests stand up a stub HTTP responder on a real Unix socket, so
+# they need a runtime, the `#[tokio::test]` macro and the IO traits to write
+# exact bytes back.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt",
+    "net",
+    "macros",
+    "io-util",
+] }
+
+[lints]
+workspace = true

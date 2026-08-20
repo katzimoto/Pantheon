@@ -33,6 +33,7 @@
 //! also serving reads and Event streams.
 
 mod command;
+mod description;
 mod events;
 mod goals;
 mod problem;
@@ -69,8 +70,8 @@ pub fn router(runtime: Arc<OperatorRuntime>) -> Router {
         .route("/health/live", get(system::live))
         .route("/health/ready", get(system::ready))
         .route("/goals", get(goals::list).post(goals::create))
-        .route("/goals/{goal_id}", get(goals::get))
-        .route("/goals/{goal_id}/actions/cancel", post(goals::cancel))
+        .route("/goals/{goalId}", get(goals::get))
+        .route("/goals/{goalId}/actions/cancel", post(goals::cancel))
         .route("/events", get(events::list))
         .route("/events/watch", get(events::watch));
 
