@@ -386,6 +386,29 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
         Err(CandidateRejection::ResourceIncompatible { .. })
     ));
 
+    let mut absent_resource_request = request.clone();
+    absent_resource_request.resource_requirements = vec![ResourceQuantity {
+        name: "gpu".to_string(),
+        quantity: 0,
+    }];
+    let absent_resource_offer = offer(
+        &absent_resource_request,
+        "fake-local",
+        1,
+        LaunchSemantics::KeyedIdempotent,
+    );
+    assert!(matches!(
+        validate_execution_candidate(
+            &absent_resource_request,
+            &agent,
+            &keyed_descriptor,
+            &absent_resource_offer,
+            true,
+            &safety(false)
+        ),
+        Err(CandidateRejection::ResourceIncompatible { .. })
+    ));
+
     let unproven = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
     let no_isolation_safety = ControllerSafetyFacts {
         isolation_guarantees: Vec::new(),
@@ -399,6 +422,38 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &unproven,
             true,
             &no_isolation_safety
+        ),
+        Err(CandidateRejection::IsolationNotProven { .. })
+    ));
+
+    let mut offer_without_isolation =
+        offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
+    offer_without_isolation.isolation_facts = Vec::new();
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &offer_without_isolation,
+            true,
+            &safety(false)
+        ),
+        Err(CandidateRejection::IsolationNotProven { .. })
+    ));
+
+    let mut descriptor_without_isolation = keyed_descriptor.clone();
+    descriptor_without_isolation.isolation_facts = Vec::new();
+    let mut offer_with_isolation =
+        offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
+    offer_with_isolation.descriptor_digest = descriptor_without_isolation.digest();
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &descriptor_without_isolation,
+            &offer_with_isolation,
+            true,
+            &safety(false)
         ),
         Err(CandidateRejection::IsolationNotProven { .. })
     ));
@@ -428,6 +483,20 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &safety(false)
         ),
         Err(CandidateRejection::DescriptorRevisionMismatch)
+    ));
+
+    let mut mismatched_offer = offer(&request, "fake-local", 1, LaunchSemantics::Observational);
+    mismatched_offer.descriptor_digest = keyed_descriptor.digest();
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &mismatched_offer,
+            true,
+            &safety(false)
+        ),
+        Err(CandidateRejection::LaunchSemanticsMismatch)
     ));
 
     let mut wrong_request = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);

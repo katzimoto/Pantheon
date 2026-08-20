@@ -722,7 +722,14 @@ pub fn validate_execution_candidate(
         return Err(CandidateRejection::UnsafeLaunchSemantics);
     }
     for required in &request.resource_requirements {
-        let descriptor_quantity = resource_quantity(&descriptor.resources, &required.name);
+        let Some(descriptor_quantity) = resource_quantity(&descriptor.resources, &required.name)
+        else {
+            return Err(CandidateRejection::ResourceIncompatible {
+                name: required.name.clone(),
+                required: required.quantity,
+                offered: 0,
+            });
+        };
         if descriptor_quantity < required.quantity {
             return Err(CandidateRejection::ResourceIncompatible {
                 name: required.name.clone(),
@@ -730,7 +737,13 @@ pub fn validate_execution_candidate(
                 offered: descriptor_quantity,
             });
         }
-        let offer_quantity = resource_quantity(&offer.resources, &required.name);
+        let Some(offer_quantity) = resource_quantity(&offer.resources, &required.name) else {
+            return Err(CandidateRejection::ResourceIncompatible {
+                name: required.name.clone(),
+                required: required.quantity,
+                offered: 0,
+            });
+        };
         if offer_quantity < required.quantity {
             return Err(CandidateRejection::ResourceIncompatible {
                 name: required.name.clone(),
@@ -925,9 +938,9 @@ fn resources(values: &[ResourceQuantity]) -> Value {
     }))
 }
 
-fn resource_quantity(values: &[ResourceQuantity], name: &str) -> i64 {
+fn resource_quantity(values: &[ResourceQuantity], name: &str) -> Option<i64> {
     values
         .iter()
         .find(|resource| resource.name == name)
-        .map_or(0, |resource| resource.quantity)
+        .map(|resource| resource.quantity)
 }
