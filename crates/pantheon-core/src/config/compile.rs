@@ -113,6 +113,24 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
     let mut agents = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let prefix = format!("agents[{index}]");
+        reject_unknown_fields(
+            entry,
+            &prefix,
+            &[
+                "name",
+                "version",
+                "enabled",
+                "current",
+                "accepts",
+                "competencies",
+                "routePolicy",
+                "executionFeatures",
+                "minContextTokens",
+                "sandboxProfile",
+                "sandboxRequirements",
+                "actions",
+            ],
+        )?;
         let name = as_str(field(entry, &prefix, "name")?, &path(&prefix, "name"))?.to_string();
         non_empty(&name, &path(&prefix, "name"))?;
 
@@ -146,6 +164,11 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
             }
         }
 
+        let accepts = string_list(entry, &prefix, "accepts")?;
+        non_empty_list(&accepts, &path(&prefix, "accepts"))?;
+        let competencies = string_list(entry, &prefix, "competencies")?;
+        non_empty_list(&competencies, &path(&prefix, "competencies"))?;
+
         agents.push(Agent {
             name,
             version: u32::try_from(version).map_err(|_| ConfigError::InvalidValue {
@@ -154,8 +177,8 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
             })?,
             enabled: optional_bool(entry, &prefix, "enabled", true)?,
             current: optional_bool(entry, &prefix, "current", true)?,
-            accepts: string_list(entry, &prefix, "accepts")?,
-            competencies: string_list(entry, &prefix, "competencies")?,
+            accepts,
+            competencies,
             route_policy: as_str(
                 field(entry, &prefix, "routePolicy")?,
                 &path(&prefix, "routePolicy"),
@@ -487,6 +510,29 @@ fn optional_i64(parent: &Value, prefix: &str, key: &str, default: i64) -> Result
     parent
         .get(key)
         .map_or(Ok(default), |value| as_i64(value, &path(prefix, key)))
+}
+
+fn non_empty_list(values: &[String], at: &str) -> Result<(), ConfigError> {
+    if values.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            path: at.to_string(),
+            detail: "must contain at least one value".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_unknown_fields(value: &Value, prefix: &str, allowed: &[&str]) -> Result<(), ConfigError> {
+    let Value::Object(fields) = value else {
+        return Ok(());
+    };
+    if let Some(unknown) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ConfigError::InvalidValue {
+            path: prefix.to_string(),
+            detail: format!("unknown field {unknown:?}"),
+        });
+    }
+    Ok(())
 }
 
 fn agent_references(value: &Value, key: &str) -> Result<Vec<LogicalAgentVersion>, ConfigError> {

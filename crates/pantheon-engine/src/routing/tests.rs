@@ -3,15 +3,14 @@
 use std::cell::{Cell, RefCell};
 
 use pantheon_core::execution::{
-    BackendDescriptor, ExecutionOffer, ExecutionRequest, IsolationEvidence, IsolationFact,
-    LaunchSemantics,
+    BackendDescriptor, ControllerSafetyFacts, ExecutionOffer, ExecutionRequest, LaunchSemantics,
 };
 use pantheon_core::planning::TaskPhase;
 use pantheon_core::planning::direct::{self, PlanningInput, Trigger};
 use pantheon_core::planning::goal::{Deliverable, GoalConstraints, GoalInput, GoalSpec};
 use pantheon_store::{Command, Store};
 
-use super::{ExecutorBackend, RoutingController, RoutingError};
+use super::{ExecutorBackend, ExecutorBackendPort, RoutingController, RoutingError};
 use crate::configuration::{ConfigurationAuthority, SourceSet};
 
 struct TempDir(std::path::PathBuf);
@@ -217,10 +216,8 @@ impl FakeBackend {
                 placement: vec!["local".to_string()],
                 supported_execution_features: vec!["exec.shell".to_string()],
                 context_capacity_tokens: 16_000,
-                isolation_facts: vec![IsolationFact {
-                    requirement: "isolation.control-plane".to_string(),
-                    evidence: IsolationEvidence::ControllerVerified,
-                }],
+                isolation_facts: vec!["isolation.control-plane".to_string()],
+                resources: Vec::new(),
                 launch_semantics,
             }),
             mode,
@@ -261,6 +258,7 @@ impl ExecutorBackend for FakeBackend {
             context_capacity_tokens: descriptor.context_capacity_tokens,
             placement: descriptor.placement.clone(),
             isolation_facts: descriptor.isolation_facts.clone(),
+            resources: descriptor.resources.clone(),
             launch_semantics: descriptor.launch_semantics,
             offer_reference: format!("offer-{}-{}", descriptor.backend_id, descriptor.revision),
         }])
@@ -301,11 +299,24 @@ impl<'store, 'authority> ExecutorBackend for ReconfiguringBackend<'store, 'autho
     }
 }
 
+fn port<'a>(
+    backend: &'a dyn ExecutorBackend,
+    observational_launch_safe: bool,
+) -> ExecutorBackendPort<'a> {
+    ExecutorBackendPort::new(
+        backend,
+        ControllerSafetyFacts {
+            isolation_guarantees: vec!["isolation.control-plane".to_string()],
+            observational_launch_safe,
+        },
+    )
+}
+
 fn route(
     store: &Store,
     authority: &ConfigurationAuthority<'_>,
     task_id: &str,
-    backends: &[&dyn ExecutorBackend],
+    backends: &[ExecutorBackendPort<'_>],
 ) -> Result<pantheon_core::execution::RoutingResult, RoutingError> {
     RoutingController::new(store, authority).route_ready_task(task_id, backends)
 }
@@ -321,7 +332,8 @@ fn ready_task_routes_to_one_agent_and_offer_without_execution_side_effects() {
         LaunchSemantics::KeyedIdempotent,
     );
 
-    let result = route(&store, &authority, "task-1", &[&fake]).expect("route succeeds");
+    let result =
+        route(&store, &authority, "task-1", &[port(&fake, false)]).expect("route succeeds");
     let task = store
         .task("task-1")
         .expect("read task")
@@ -347,7 +359,8 @@ fn incompatible_or_disabled_offers_leave_the_task_ready() {
         OfferMode::MissingFeature,
         LaunchSemantics::KeyedIdempotent,
     );
-    let error = route(&store, &authority, "task-1", &[&fake]).expect_err("offer is rejected");
+    let error =
+        route(&store, &authority, "task-1", &[port(&fake, false)]).expect_err("offer is rejected");
     assert!(
         matches!(error, RoutingError::NoCompatibleOffers { rejections, .. } if !rejections.is_empty())
     );
@@ -368,8 +381,8 @@ fn incompatible_or_disabled_offers_leave_the_task_ready() {
         OfferMode::Compatible,
         LaunchSemantics::KeyedIdempotent,
     );
-    let error =
-        route(&store, &authority, "task-1", &[&fake]).expect_err("disabled backend is skipped");
+    let error = route(&store, &authority, "task-1", &[port(&fake, false)])
+        .expect_err("disabled backend is skipped");
     assert!(matches!(error, RoutingError::NoCompatibleOffers { .. }));
     assert_eq!(fake.offer_calls.get(), 0);
 }
@@ -385,7 +398,7 @@ fn observational_launch_is_filtered_or_allowed_by_the_captured_route_policy() {
         LaunchSemantics::Observational,
     );
     assert!(matches!(
-        route(&store, &authority, "task-1", &[&fake]),
+        route(&store, &authority, "task-1", &[port(&fake, false)]),
         Err(RoutingError::NoCompatibleOffers { .. })
     ));
 
@@ -397,7 +410,8 @@ fn observational_launch_is_filtered_or_allowed_by_the_captured_route_policy() {
         OfferMode::Compatible,
         LaunchSemantics::Observational,
     );
-    let result = route(&store, &authority, "task-1", &[&fake]).expect("policy permits it");
+    let result =
+        route(&store, &authority, "task-1", &[port(&fake, true)]).expect("policy permits it");
     assert_eq!(
         result.candidate.offer.launch_semantics,
         LaunchSemantics::Observational
@@ -420,9 +434,20 @@ fn selection_is_stable_when_backend_inputs_are_permuted() {
         LaunchSemantics::KeyedIdempotent,
     );
 
-    let first = route(&store, &authority, "task-1", &[&secondary, &primary]).expect("first route");
-    let second =
-        route(&store, &authority, "task-1", &[&primary, &secondary]).expect("second route");
+    let first = route(
+        &store,
+        &authority,
+        "task-1",
+        &[port(&secondary, false), port(&primary, false)],
+    )
+    .expect("first route");
+    let second = route(
+        &store,
+        &authority,
+        "task-1",
+        &[port(&primary, false), port(&secondary, false)],
+    )
+    .expect("second route");
     assert_eq!(first, second);
     assert_eq!(first.candidate.offer.backend_id, "fake-local");
 }
@@ -437,10 +462,10 @@ fn descriptor_revision_and_configuration_revision_are_bound_not_reinterpreted() 
         OfferMode::Compatible,
         LaunchSemantics::KeyedIdempotent,
     );
-    let first = route(&store, &authority, "task-1", &[&fake]).expect("first route");
+    let first = route(&store, &authority, "task-1", &[port(&fake, false)]).expect("first route");
 
     fake.set_revision(2);
-    let second = route(&store, &authority, "task-1", &[&fake]).expect("second route");
+    let second = route(&store, &authority, "task-1", &[port(&fake, false)]).expect("second route");
     assert_eq!(first.candidate.offer.descriptor_revision, 1);
     assert_eq!(second.candidate.offer.descriptor_revision, 2);
     assert!(first.candidate.offer.is_stale_against(&fake.describe()));
@@ -484,7 +509,7 @@ fn configuration_change_during_offer_collection_returns_a_stale_failure() {
     };
 
     assert!(matches!(
-        route(&store, &authority, "task-1", &[&backend]),
+        route(&store, &authority, "task-1", &[port(&backend, false)]),
         Err(RoutingError::StaleConfiguration)
     ));
     assert_eq!(backend.fake.offer_calls.get(), 1);
@@ -500,7 +525,7 @@ fn routing_does_not_create_a_run_or_other_execution_authority() {
         OfferMode::NoOffers,
         LaunchSemantics::KeyedIdempotent,
     );
-    let _ = route(&store, &authority, "task-1", &[&fake]);
+    let _ = route(&store, &authority, "task-1", &[port(&fake, false)]);
 
     let task = store
         .task("task-1")

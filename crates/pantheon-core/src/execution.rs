@@ -117,32 +117,22 @@ impl LaunchSemantics {
     }
 }
 
-/// The source of evidence for an isolation fact.
+/// Controller-owned safety evidence supplied beside a backend port.
 ///
-/// A backend may report a capability, but that report is not enough to prove a
-/// physical security guarantee. Candidate validation accepts required isolation
-/// only when the composition boundary supplies controller-verified evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationEvidence {
-    ControllerVerified,
-    BackendReported,
-}
-
-impl IsolationEvidence {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ControllerVerified => "CONTROLLER_VERIFIED",
-            Self::BackendReported => "BACKEND_REPORTED",
-        }
-    }
-}
-
-/// One factual isolation capability attached to a descriptor or offer.
+/// These facts are deliberately not returned by `ExecutorBackend::describe` or
+/// `offer`: backend self-attestation cannot prove physical isolation or provide
+/// an outer duplicate-prevention supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IsolationFact {
-    pub requirement: String,
-    pub evidence: IsolationEvidence,
+pub struct ControllerSafetyFacts {
+    pub isolation_guarantees: Vec<String>,
+    pub observational_launch_safe: bool,
+}
+
+/// A generic resource quantity used only for factual compatibility checks.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResourceQuantity {
+    pub name: String,
+    pub quantity: i64,
 }
 
 /// Revisioned factual information published by an ExecutorBackend.
@@ -154,7 +144,9 @@ pub struct BackendDescriptor {
     pub placement: Vec<String>,
     pub supported_execution_features: Vec<String>,
     pub context_capacity_tokens: i64,
-    pub isolation_facts: Vec<IsolationFact>,
+    /// Backend-reported compatibility facts; not security proof.
+    pub isolation_facts: Vec<String>,
+    pub resources: Vec<ResourceQuantity>,
     pub launch_semantics: LaunchSemantics,
 }
 
@@ -180,6 +172,7 @@ impl BackendDescriptor {
                 Value::Integer(self.context_capacity_tokens),
             ),
             ("isolationFacts", isolation_facts(&self.isolation_facts)),
+            ("resources", resources(&self.resources)),
             (
                 "launchSemantics",
                 Value::string(self.launch_semantics.as_str()),
@@ -200,6 +193,7 @@ pub struct ExecutionRequest {
     pub min_context_tokens: i64,
     pub placement_constraints: Vec<String>,
     pub isolation_requirements: Vec<String>,
+    pub resource_requirements: Vec<ResourceQuantity>,
     pub required_actions: Vec<String>,
     pub configuration: ConfigurationBinding,
     pub route_policy_digest: Digest,
@@ -234,6 +228,10 @@ impl ExecutionRequest {
             (
                 "isolationRequirements",
                 strings(&self.isolation_requirements),
+            ),
+            (
+                "resourceRequirements",
+                resources(&self.resource_requirements),
             ),
             ("requiredActions", strings(&self.required_actions)),
             ("configuration", self.configuration.to_value()),
@@ -476,6 +474,7 @@ pub fn build_execution_request(
         min_context_tokens: agent.agent.min_context_tokens,
         placement_constraints: Vec::new(),
         isolation_requirements,
+        resource_requirements: Vec::new(),
         required_actions,
         configuration: binding,
         route_policy_digest: agent.route_policy.digest(),
@@ -497,10 +496,24 @@ pub enum CandidateRejection {
     BackendMismatch,
     DescriptorRevisionMismatch,
     OfferRequestMismatch,
-    MissingExecutionFeatures { missing: Vec<String> },
-    ContextCapacityTooSmall { required: i64, offered: i64 },
-    PlacementIncompatible { missing: Vec<String> },
-    IsolationNotProven { missing: Vec<String> },
+    MissingExecutionFeatures {
+        missing: Vec<String>,
+    },
+    ContextCapacityTooSmall {
+        required: i64,
+        offered: i64,
+    },
+    PlacementIncompatible {
+        missing: Vec<String>,
+    },
+    IsolationNotProven {
+        missing: Vec<String>,
+    },
+    ResourceIncompatible {
+        name: String,
+        required: i64,
+        offered: i64,
+    },
     LaunchSemanticsMismatch,
     UnsafeLaunchSemantics,
     RoutePolicyMismatch,
@@ -558,7 +571,9 @@ pub struct ExecutionOffer {
     pub supported_execution_features: Vec<String>,
     pub context_capacity_tokens: i64,
     pub placement: Vec<String>,
-    pub isolation_facts: Vec<IsolationFact>,
+    /// Backend-reported compatibility facts; not security proof.
+    pub isolation_facts: Vec<String>,
+    pub resources: Vec<ResourceQuantity>,
     pub launch_semantics: LaunchSemantics,
     /// Opaque to core; the adapter may use it later to bind backend-private
     /// facts without making them semantic Agent identity.
@@ -597,6 +612,7 @@ impl ExecutionOffer {
             ),
             ("placement", strings(&self.placement)),
             ("isolationFacts", isolation_facts(&self.isolation_facts)),
+            ("resources", resources(&self.resources)),
             (
                 "launchSemantics",
                 Value::string(self.launch_semantics.as_str()),
@@ -619,6 +635,7 @@ pub fn validate_execution_candidate(
     descriptor: &BackendDescriptor,
     offer: &ExecutionOffer,
     backend_enabled: bool,
+    safety: &ControllerSafetyFacts,
 ) -> Result<ExecutionCandidate, CandidateRejection> {
     if !backend_enabled {
         return Err(CandidateRejection::BackendDisabled);
@@ -681,8 +698,9 @@ pub fn validate_execution_candidate(
         .isolation_requirements
         .iter()
         .filter(|requirement| {
-            !has_verified_fact(&descriptor.isolation_facts, requirement)
-                || !has_verified_fact(&offer.isolation_facts, requirement)
+            !safety.isolation_guarantees.contains(requirement)
+                || !descriptor.isolation_facts.contains(requirement)
+                || !offer.isolation_facts.contains(requirement)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -696,6 +714,30 @@ pub fn validate_execution_candidate(
         && offer.launch_semantics != LaunchSemantics::KeyedIdempotent
     {
         return Err(CandidateRejection::UnsafeLaunchSemantics);
+    }
+    if request.launch_safety == LaunchSafety::ObservationalAllowed
+        && offer.launch_semantics == LaunchSemantics::Observational
+        && !safety.observational_launch_safe
+    {
+        return Err(CandidateRejection::UnsafeLaunchSemantics);
+    }
+    for required in &request.resource_requirements {
+        let descriptor_quantity = resource_quantity(&descriptor.resources, &required.name);
+        if descriptor_quantity < required.quantity {
+            return Err(CandidateRejection::ResourceIncompatible {
+                name: required.name.clone(),
+                required: required.quantity,
+                offered: descriptor_quantity,
+            });
+        }
+        let offer_quantity = resource_quantity(&offer.resources, &required.name);
+        if offer_quantity < required.quantity {
+            return Err(CandidateRejection::ResourceIncompatible {
+                name: required.name.clone(),
+                required: required.quantity,
+                offered: offer_quantity,
+            });
+        }
     }
 
     Ok(ExecutionCandidate {
@@ -854,12 +896,6 @@ fn missing_strings(required: &[String], available: &[String]) -> Vec<String> {
     sorted_difference(required, available)
 }
 
-fn has_verified_fact(facts: &[IsolationFact], requirement: &str) -> bool {
-    facts.iter().any(|fact| {
-        fact.requirement == requirement && fact.evidence == IsolationEvidence::ControllerVerified
-    })
-}
-
 fn agent_value(agent: &LogicalAgentVersion) -> Value {
     Value::object([
         ("name", Value::string(&agent.name)),
@@ -874,16 +910,24 @@ fn strings(values: &[String]) -> Value {
     Value::array(values.into_iter().map(Value::string))
 }
 
-fn isolation_facts(values: &[IsolationFact]) -> Value {
+fn isolation_facts(values: &[String]) -> Value {
+    strings(values)
+}
+
+fn resources(values: &[ResourceQuantity]) -> Value {
     let mut values = values.to_vec();
-    values.sort_by(|left, right| {
-        (&left.requirement, left.evidence.as_str())
-            .cmp(&(&right.requirement, right.evidence.as_str()))
-    });
-    Value::array(values.into_iter().map(|fact| {
+    values.sort();
+    Value::array(values.into_iter().map(|resource| {
         Value::object([
-            ("requirement", Value::string(fact.requirement)),
-            ("evidence", Value::string(fact.evidence.as_str())),
+            ("name", Value::string(resource.name)),
+            ("quantity", Value::Integer(resource.quantity)),
         ])
     }))
+}
+
+fn resource_quantity(values: &[ResourceQuantity], name: &str) -> i64 {
+    values
+        .iter()
+        .find(|resource| resource.name == name)
+        .map_or(0, |resource| resource.quantity)
 }

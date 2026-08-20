@@ -105,14 +105,17 @@ impl Component for AgentComponent {
                     ("version", Value::Integer(i64::from(agent.version))),
                     ("enabled", Value::Bool(agent.enabled)),
                     ("current", Value::Bool(agent.current)),
-                    ("accepts", strings(&agent.accepts)),
-                    ("competencies", strings(&agent.competencies)),
+                    ("accepts", set_strings(&agent.accepts)),
+                    ("competencies", set_strings(&agent.competencies)),
                     ("routePolicy", Value::string(&agent.route_policy)),
-                    ("executionFeatures", strings(&agent.execution_features)),
+                    ("executionFeatures", set_strings(&agent.execution_features)),
                     ("minContextTokens", Value::Integer(agent.min_context_tokens)),
                     ("sandboxProfile", Value::string(&agent.sandbox_profile)),
-                    ("sandboxRequirements", strings(&agent.sandbox_requirements)),
-                    ("actions", strings(&agent.actions)),
+                    (
+                        "sandboxRequirements",
+                        set_strings(&agent.sandbox_requirements),
+                    ),
+                    ("actions", set_strings(&agent.actions)),
                 ])
             })),
         )])
@@ -260,7 +263,7 @@ impl SandboxProfile {
                 "isolationClass",
                 Value::string(self.isolation_class.as_str()),
             ),
-            ("guarantees", strings(&self.guarantees)),
+            ("guarantees", set_strings(&self.guarantees)),
             ("networkMode", Value::string(self.network_mode.as_str())),
             (
                 "environmentIdentity",
@@ -485,6 +488,12 @@ impl Component for AuthorizationComponent {
 
 fn strings(values: &[String]) -> Value {
     Value::array(values.iter().map(Value::string))
+}
+
+fn set_strings(values: &[String]) -> Value {
+    let mut values = values.to_vec();
+    values.sort();
+    Value::array(values.into_iter().map(Value::string))
 }
 
 fn agent_references(values: &[LogicalAgentVersion]) -> Value {

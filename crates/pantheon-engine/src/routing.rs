@@ -6,8 +6,8 @@
 
 use pantheon_core::execution::{
     AgentResolutionError, BackendDescriptor, CandidateRejection, ConfigurationBinding,
-    ExecutionOffer, ExecutionRequest, RequestBuildError, RoutingResult, SelectionError,
-    build_execution_request, resolve_agents, select_execution_candidate,
+    ControllerSafetyFacts, ExecutionOffer, ExecutionRequest, RequestBuildError, RoutingResult,
+    SelectionError, build_execution_request, resolve_agents, select_execution_candidate,
     validate_execution_candidate,
 };
 use pantheon_core::planning::{TaskDecodeError, TaskPhase, TaskSpec};
@@ -23,6 +23,24 @@ pub trait ExecutorBackend {
 
     /// Produces zero or more side-effect-free offers for one request.
     fn offer(&self, request: &ExecutionRequest) -> Result<Vec<ExecutionOffer>, BackendError>;
+}
+
+/// Composition-owned backend port and safety evidence.
+///
+/// Backend descriptors/offers may report compatibility facts, but the
+/// controller-owned safety evidence is supplied here by the composition root,
+/// outside the backend trait. This keeps a backend from self-awarding physical
+/// isolation or duplicate-prevention authority.
+pub struct ExecutorBackendPort<'a> {
+    pub backend: &'a dyn ExecutorBackend,
+    pub safety: ControllerSafetyFacts,
+}
+
+impl<'a> ExecutorBackendPort<'a> {
+    #[must_use]
+    pub const fn new(backend: &'a dyn ExecutorBackend, safety: ControllerSafetyFacts) -> Self {
+        Self { backend, safety }
+    }
 }
 
 /// A backend-side failure while describing or offering, without exposing a
@@ -198,7 +216,7 @@ impl<'store, 'authority> RoutingController<'store, 'authority> {
     pub fn route_ready_task(
         &self,
         task_id: &str,
-        backends: &[&dyn ExecutorBackend],
+        backends: &[ExecutorBackendPort<'_>],
     ) -> Result<RoutingResult, RoutingError> {
         let snapshot = self.configuration.snapshot()?;
         let binding = binding_from_snapshot(&snapshot);
@@ -228,8 +246,8 @@ impl<'store, 'authority> RoutingController<'store, 'authority> {
 
         let mut descriptors = Vec::with_capacity(backends.len());
         let mut descriptor_ids = Vec::with_capacity(backends.len());
-        for &backend in backends {
-            let descriptor = backend.describe();
+        for backend in backends {
+            let descriptor = backend.backend.describe();
             if descriptor_ids.contains(&descriptor.backend_id) {
                 return Err(RoutingError::DuplicateBackendDescriptor {
                     backend_id: descriptor.backend_id,
@@ -245,9 +263,10 @@ impl<'store, 'authority> RoutingController<'store, 'authority> {
                     backend_id: descriptor.backend_id.clone(),
                 })?;
             descriptors.push(BackendView {
-                backend,
+                backend: backend.backend,
                 descriptor,
                 enabled: registration.enabled,
+                safety: backend.safety.clone(),
             });
         }
         descriptors.sort_by(|left, right| {
@@ -277,6 +296,7 @@ impl<'store, 'authority> RoutingController<'store, 'authority> {
                         &backend.descriptor,
                         &offer,
                         backend.enabled,
+                        &backend.safety,
                     ) {
                         Ok(candidate) => candidates.push(candidate),
                         Err(reason) => rejections.push(OfferRejection {
@@ -322,6 +342,7 @@ struct BackendView<'a> {
     backend: &'a dyn ExecutorBackend,
     descriptor: BackendDescriptor,
     enabled: bool,
+    safety: ControllerSafetyFacts,
 }
 
 struct LoadedTask {

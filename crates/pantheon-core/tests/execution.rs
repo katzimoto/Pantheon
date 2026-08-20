@@ -7,7 +7,7 @@ use pantheon_core::config::Digest;
 use pantheon_core::config::compile::compile;
 use pantheon_core::execution::{
     AgentResolutionError, BackendDescriptor, CandidateRejection, ConfigurationBinding,
-    ExecutionOffer, IsolationEvidence, IsolationFact, LaunchSemantics, ResolvedAgent,
+    ControllerSafetyFacts, ExecutionOffer, LaunchSemantics, ResolvedAgent, ResourceQuantity,
     build_execution_request, resolve_agents, select_execution_candidate,
     validate_execution_candidate,
 };
@@ -57,6 +57,13 @@ fn binding(compiled: &pantheon_core::config::CompiledConfiguration) -> Configura
     ConfigurationBinding::new(1, compiled.revision_digest(), compiled.component_digests())
 }
 
+fn safety(observational_launch_safe: bool) -> ControllerSafetyFacts {
+    ControllerSafetyFacts {
+        isolation_guarantees: vec!["isolation.control-plane".to_string()],
+        observational_launch_safe,
+    }
+}
+
 fn resolved_agent() -> (pantheon_core::config::CompiledConfiguration, ResolvedAgent) {
     let compiled = compile(VALID_SOURCE).expect("fixture compiles");
     let result = resolve_agents(
@@ -83,10 +90,8 @@ fn descriptor(
         placement: vec!["local".to_string()],
         supported_execution_features: vec!["exec.shell".to_string()],
         context_capacity_tokens: 16_000,
-        isolation_facts: vec![IsolationFact {
-            requirement: "isolation.control-plane".to_string(),
-            evidence: IsolationEvidence::ControllerVerified,
-        }],
+        isolation_facts: vec!["isolation.control-plane".to_string()],
+        resources: Vec::new(),
         launch_semantics,
     }
 }
@@ -105,10 +110,8 @@ fn offer(
         supported_execution_features: vec!["exec.shell".to_string()],
         context_capacity_tokens: 16_000,
         placement: vec!["local".to_string()],
-        isolation_facts: vec![IsolationFact {
-            requirement: "isolation.control-plane".to_string(),
-            evidence: IsolationEvidence::ControllerVerified,
-        }],
+        isolation_facts: vec!["isolation.control-plane".to_string()],
+        resources: Vec::new(),
         launch_semantics,
         offer_reference: format!("opaque-{backend_id}-{revision}"),
     }
@@ -274,6 +277,7 @@ fn compatible_offer_becomes_an_agent_offer_candidate() {
         &keyed_descriptor,
         &offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent),
         true,
+        &safety(false),
     )
     .expect("facts are compatible");
 
@@ -315,7 +319,8 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &agent,
             &feature_descriptor,
             &feature_offer,
-            true
+            true,
+            &safety(false)
         ),
         Err(CandidateRejection::MissingExecutionFeatures { .. })
     ));
@@ -323,7 +328,14 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
     let mut small = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
     small.context_capacity_tokens = 1;
     assert!(matches!(
-        validate_execution_candidate(&request, &agent, &keyed_descriptor, &small, true),
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &small,
+            true,
+            &safety(false)
+        ),
         Err(CandidateRejection::ContextCapacityTooSmall { .. })
     ));
 
@@ -338,15 +350,56 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &agent,
             &keyed_descriptor,
             &misplaced,
-            true
+            true,
+            &safety(false)
         ),
         Err(CandidateRejection::PlacementIncompatible { .. })
     ));
 
-    let mut unproven = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
-    unproven.isolation_facts[0].evidence = IsolationEvidence::BackendReported;
+    let mut resource_request = request.clone();
+    resource_request.resource_requirements = vec![ResourceQuantity {
+        name: "cpu".to_string(),
+        quantity: 2,
+    }];
+    let mut resource_descriptor = keyed_descriptor.clone();
+    resource_descriptor.resources = vec![ResourceQuantity {
+        name: "cpu".to_string(),
+        quantity: 1,
+    }];
+    let mut resource_offer = offer(
+        &resource_request,
+        "fake-local",
+        1,
+        LaunchSemantics::KeyedIdempotent,
+    );
+    resource_offer.descriptor_digest = resource_descriptor.digest();
+    resource_offer.resources = resource_descriptor.resources.clone();
     assert!(matches!(
-        validate_execution_candidate(&request, &agent, &keyed_descriptor, &unproven, true),
+        validate_execution_candidate(
+            &resource_request,
+            &agent,
+            &resource_descriptor,
+            &resource_offer,
+            true,
+            &safety(false)
+        ),
+        Err(CandidateRejection::ResourceIncompatible { .. })
+    ));
+
+    let unproven = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
+    let no_isolation_safety = ControllerSafetyFacts {
+        isolation_guarantees: Vec::new(),
+        observational_launch_safe: false,
+    };
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &unproven,
+            true,
+            &no_isolation_safety
+        ),
         Err(CandidateRejection::IsolationNotProven { .. })
     ));
 
@@ -358,21 +411,36 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &agent,
             &observational_descriptor,
             &observational,
-            true
+            true,
+            &safety(false)
         ),
         Err(CandidateRejection::UnsafeLaunchSemantics)
     ));
 
     let stale = offer(&request, "fake-local", 2, LaunchSemantics::KeyedIdempotent);
     assert!(matches!(
-        validate_execution_candidate(&request, &agent, &keyed_descriptor, &stale, true),
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &stale,
+            true,
+            &safety(false)
+        ),
         Err(CandidateRejection::DescriptorRevisionMismatch)
     ));
 
     let mut wrong_request = offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent);
     wrong_request.request_digest = Digest::of(b"another-request");
     assert!(matches!(
-        validate_execution_candidate(&request, &agent, &keyed_descriptor, &wrong_request, true),
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &wrong_request,
+            true,
+            &safety(false)
+        ),
         Err(CandidateRejection::OfferRequestMismatch)
     ));
 }
@@ -410,6 +478,7 @@ fn observational_launch_is_allowed_only_when_the_route_policy_says_so() {
         &descriptor("fake-local", 1, LaunchSemantics::Observational),
         &observational,
         true,
+        &safety(true),
     )
     .expect("the route policy permits observational semantics");
     assert_eq!(
@@ -437,6 +506,7 @@ fn deterministic_selection_ignores_candidate_insertion_order() {
         &a_descriptor,
         &offer(&request, "a-local", 1, LaunchSemantics::KeyedIdempotent),
         true,
+        &safety(false),
     )
     .expect("a candidate");
     let z = validate_execution_candidate(
@@ -445,6 +515,7 @@ fn deterministic_selection_ignores_candidate_insertion_order() {
         &z_descriptor,
         &offer(&request, "z-local", 1, LaunchSemantics::KeyedIdempotent),
         true,
+        &safety(false),
     )
     .expect("z candidate");
 

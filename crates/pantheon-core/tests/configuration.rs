@@ -469,3 +469,38 @@ fn invalid_agent_pin_and_conflicting_current_versions_are_rejected_before_activa
         "unexpected: {err}"
     );
 }
+
+#[test]
+fn compiled_agent_declarations_reject_unknown_or_empty_manifest_fields() {
+    let unknown = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"], "unexpected": true"#,
+    );
+    let err = compile(&unknown).expect_err("unknown Agent fields are not authority");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref detail, .. } if detail.contains("unknown field")),
+        "unexpected: {err}"
+    );
+
+    let empty = variant(r#""accepts": ["code-change"]"#, r#""accepts": []"#);
+    let err = compile(&empty).expect_err("an Agent must declare applicability");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref path, .. } if path == "agents[0].accepts"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn agent_membership_order_does_not_change_compiled_identity() {
+    let reference = compile(VALID_SOURCE).expect("reference compiles");
+    let reordered = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["filesystem.write", "shell.execute", "filesystem.read"]"#,
+    );
+    let other = compile(&reordered).expect("reordered Agent compiles");
+    assert_eq!(
+        reference.component_digests().agents,
+        other.component_digests().agents
+    );
+    assert_eq!(reference.revision_digest(), other.revision_digest());
+}
