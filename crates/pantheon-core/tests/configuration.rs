@@ -412,3 +412,60 @@ fn a_process_spawning_agent_needs_the_control_plane_guarantee_asserted() {
         "unexpected: {err}"
     );
 }
+
+#[test]
+fn agent_status_and_launch_safety_are_part_of_configuration_identity() {
+    let reference = compile(VALID_SOURCE).expect("reference compiles");
+    let changed = compile(&variant(
+        r#""version": 1,"#,
+        r#""version": 1, "enabled": false, "current": true,"#,
+    ))
+    .expect("status change compiles");
+    assert_ne!(
+        reference.component_digests().agents,
+        changed.component_digests().agents,
+        "Agent status is authority-bearing configuration"
+    );
+
+    let changed = compile(&variant(
+        r#""tieBreak": "backendId" }"#,
+        r#""tieBreak": "backendId", "requiresKeyedLaunch": false }"#,
+    ))
+    .expect("launch policy change compiles");
+    assert_ne!(
+        reference.component_digests().routing,
+        changed.component_digests().routing,
+        "launch safety is part of route policy identity"
+    );
+}
+
+#[test]
+fn invalid_agent_pin_and_conflicting_current_versions_are_rejected_before_activation() {
+    let unknown_pin = VALID_SOURCE.replacen(
+        r#""policies": ["#,
+        r#""agentPins":[{"name":"missing","version":1}],"policies": ["#,
+        1,
+    );
+    let err = compile(&unknown_pin).expect_err("an unknown pin is invalid");
+    assert!(
+        matches!(
+            err,
+            ConfigError::UnknownReference {
+                kind: "Agent version",
+                ..
+            }
+        ),
+        "unexpected: {err}"
+    );
+
+    let conflicting = VALID_SOURCE.replacen(
+        r#""agents": ["#,
+        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"]},"#,
+        1,
+    );
+    let err = compile(&conflicting).expect_err("two current versions are invalid");
+    assert!(
+        matches!(err, ConfigError::IncompatibleCombination { ref detail } if detail.contains("more than one current")),
+        "unexpected: {err}"
+    );
+}

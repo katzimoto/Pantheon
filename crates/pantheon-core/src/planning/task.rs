@@ -2,6 +2,7 @@
 
 use crate::config::Digest;
 use crate::config::canonical::Value;
+use crate::config::parse;
 
 /// The canonical v1 Task phases.
 ///
@@ -277,8 +278,189 @@ impl TaskSpec {
     pub fn acceptance_digest(&self) -> Digest {
         self.acceptance_value().digest()
     }
+
+    /// Reads an immutable Task specification from its stored canonical form.
+    ///
+    /// Routing uses this decoder to consume the durable Task created by the
+    /// planning path; it never accepts an execution-specific replacement from
+    /// a caller.
+    pub fn from_canonical_json(text: &str) -> Result<Self, TaskDecodeError> {
+        let value = parse::parse(text).map_err(|error| TaskDecodeError(error.to_string()))?;
+        let required_string = |name: &str| -> Result<String, TaskDecodeError> {
+            match value.get(name) {
+                Some(Value::String(text)) => Ok(text.clone()),
+                Some(other) => Err(TaskDecodeError(format!(
+                    "{name} is not a string (found {})",
+                    other.kind()
+                ))),
+                None => Err(TaskDecodeError(format!("missing {name}"))),
+            }
+        };
+        let string_list = |parent: &Value, name: &str| -> Result<Vec<String>, TaskDecodeError> {
+            let Some(Value::Array(entries)) = parent.get(name) else {
+                return Err(TaskDecodeError(format!("missing or malformed {name}")));
+            };
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    Value::String(text) => Ok(text.clone()),
+                    other => Err(TaskDecodeError(format!(
+                        "{name} contains a non-string value ({})",
+                        other.kind()
+                    ))),
+                })
+                .collect()
+        };
+
+        let inputs = match value.get("inputs") {
+            Some(Value::Array(entries)) => entries
+                .iter()
+                .map(|entry| {
+                    let (Some(Value::String(name)), Some(Value::String(reference))) =
+                        (entry.get("name"), entry.get("ref"))
+                    else {
+                        return Err(TaskDecodeError("malformed input".to_string()));
+                    };
+                    Ok(TaskInput {
+                        name: name.clone(),
+                        reference: reference.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err(TaskDecodeError("missing or malformed inputs".to_string())),
+        };
+
+        let outputs = match value.get("outputs") {
+            Some(Value::Array(entries)) => entries
+                .iter()
+                .map(|entry| {
+                    let (
+                        Some(Value::String(name)),
+                        Some(Value::String(kind)),
+                        Some(Value::Bool(required)),
+                    ) = (entry.get("name"), entry.get("kind"), entry.get("required"))
+                    else {
+                        return Err(TaskDecodeError("malformed output".to_string()));
+                    };
+                    Ok(TaskOutput {
+                        name: name.clone(),
+                        kind: kind.clone(),
+                        required: *required,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err(TaskDecodeError("missing or malformed outputs".to_string())),
+        };
+
+        let scope = value
+            .get("scope")
+            .ok_or_else(|| TaskDecodeError("missing scope".to_string()))?;
+        let acceptance = value
+            .get("acceptance")
+            .ok_or_else(|| TaskDecodeError("missing acceptance".to_string()))?;
+        let criteria_value = acceptance
+            .get("criteria")
+            .ok_or_else(|| TaskDecodeError("missing acceptance.criteria".to_string()))?;
+        let criteria = match criteria_value {
+            Value::Array(entries) => entries
+                .iter()
+                .map(|entry| {
+                    let id = entry_string(entry, "id")?;
+                    let statement = entry_string(entry, "statement")?;
+                    let evaluator_ref = entry_string(entry, "evaluatorRef")?;
+                    let evaluator_version = entry_string(entry, "evaluatorVersion")?;
+                    let severity = match entry_string(entry, "severity")?.as_str() {
+                        "required" => Severity::Required,
+                        "advisory" => Severity::Advisory,
+                        other => {
+                            return Err(TaskDecodeError(format!(
+                                "unknown criterion severity {other:?}"
+                            )));
+                        }
+                    };
+                    Ok(AcceptanceCriterion {
+                        id,
+                        statement,
+                        evaluator_ref,
+                        evaluator_version,
+                        severity,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(TaskDecodeError(
+                    "acceptance.criteria is not an array".to_string(),
+                ));
+            }
+        };
+        let strategy = entry_string(acceptance, "strategy")?;
+        if strategy != "all" {
+            return Err(TaskDecodeError(format!(
+                "unsupported acceptance strategy {strategy:?}"
+            )));
+        }
+        let evaluator_registry_digest =
+            Digest::from_display(&entry_string(acceptance, "evaluatorRegistryDigest")?)
+                .ok_or_else(|| TaskDecodeError("invalid evaluator registry digest".to_string()))?;
+        let configuration_activation_sequence =
+            entry_integer(acceptance, "configurationActivationSequence")?;
+
+        Ok(Self {
+            task_type: required_string("type")?,
+            objective: required_string("objective")?,
+            inputs,
+            outputs,
+            competencies: string_list(&value, "competencies")?,
+            scope: TaskScope {
+                resources: string_list(scope, "resources")?,
+                permitted_effects: string_list(scope, "permittedEffects")?,
+                forbidden_effects: string_list(scope, "forbiddenEffects")?,
+            },
+            acceptance: AcceptanceContract {
+                criteria,
+                evaluator_registry_digest,
+                configuration_activation_sequence,
+            },
+            goal_id: required_string("goalId")?,
+            goal_revision: entry_integer(&value, "goalRevision")?,
+        })
+    }
+}
+
+fn entry_string(value: &Value, name: &str) -> Result<String, TaskDecodeError> {
+    match value.get(name) {
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(other) => Err(TaskDecodeError(format!(
+            "{name} is not a string (found {})",
+            other.kind()
+        ))),
+        None => Err(TaskDecodeError(format!("missing {name}"))),
+    }
+}
+
+fn entry_integer(value: &Value, name: &str) -> Result<i64, TaskDecodeError> {
+    match value.get(name) {
+        Some(Value::Integer(number)) => Ok(*number),
+        Some(other) => Err(TaskDecodeError(format!(
+            "{name} is not an integer (found {})",
+            other.kind()
+        ))),
+        None => Err(TaskDecodeError(format!("missing {name}"))),
+    }
 }
 
 fn strings(values: &[String]) -> Value {
     Value::array(values.iter().map(Value::string))
 }
+
+/// A stored Task specification that cannot be read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDecodeError(pub String);
+
+impl std::fmt::Display for TaskDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stored task specification is not readable: {}", self.0)
+    }
+}
+
+impl std::error::Error for TaskDecodeError {}

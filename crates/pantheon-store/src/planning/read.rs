@@ -70,6 +70,42 @@ impl Store {
         })
     }
 
+    /// Reads one current Task row by its durable identity.
+    pub fn task(&self, task_id: &str) -> Result<Option<TaskRecord>, StoreError> {
+        self.read(|conn| {
+            optional(conn.query_row(
+                "SELECT goal_id, phase, created_graph_revision, spec_digest, revision, active_run_id
+                 FROM tasks WHERE id = ?1",
+                rusqlite::params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            ))?
+            .map(|(goal_id, phase, created_graph_revision, spec_digest, revision, active_run_id)| {
+                let phase = TaskPhase::parse(&phase).ok_or_else(|| {
+                    StoreError::InvariantViolated(format!("task {task_id} has unknown phase"))
+                })?;
+                Ok(TaskRecord {
+                    id: task_id.to_string(),
+                    goal_id,
+                    phase,
+                    created_graph_revision,
+                    spec_digest: digest_from(&spec_digest, "spec_digest")?,
+                    revision: Revision::new(revision),
+                    active_run_id,
+                })
+            })
+            .transpose()
+        })
+    }
+
     /// The immutable Task specification, as canonical JSON.
     pub fn task_spec_json(&self, digest: Digest) -> Result<Option<String>, StoreError> {
         self.read(|conn| {

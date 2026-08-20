@@ -33,4 +33,4 @@ pub mod validate;
 
 pub use goal::{GoalPhase, GoalSpec};
 pub use proposal::Proposal;
-pub use task::{TaskPhase, TaskSpec};
+pub use task::{TaskDecodeError, TaskPhase, TaskSpec};

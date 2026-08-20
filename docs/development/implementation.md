@@ -41,8 +41,10 @@ validation that turns a proposal into something materializable;
 `pantheon-store` owns the Goal, graph, Task and planning tables and the
 authoritative mutations; `pantheon-engine` runs the control path.
 
-There is no scheduler, no backend and no endpoint yet, and nothing creates a
-Run, an Attempt, a Workspace or a Sandbox. The store's schema is limited to
+There is no scheduler, no endpoint and no concrete backend yet. `pantheon-core`
+and `pantheon-engine` now implement the pre-Run Agent-resolution and
+side-effect-free ExecutionOffer path; nothing creates a Run, an Attempt, a
+Workspace or a Sandbox. The store's schema is limited to
 migration bookkeeping, installation identity, the command ledger, Event
 Journal and journal epoch/sequence state, the configuration
 component/revision/active-pointer families, and the Goal, planning, TaskGraph

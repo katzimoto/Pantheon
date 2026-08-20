@@ -29,6 +29,13 @@ fn round_trips_through_storage_bytes() {
 }
 
 #[test]
+fn round_trips_through_the_display_form() {
+    let digest = Digest::of(b"routing");
+    assert_eq!(Digest::from_display(&digest.to_string()), Some(digest));
+    assert!(Digest::from_display("sha256:not-a-digest").is_none());
+}
+
+#[test]
 fn different_input_gives_a_different_identity() {
     assert_ne!(Digest::of(b"a"), Digest::of(b"b"));
 }
