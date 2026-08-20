@@ -69,6 +69,7 @@ fn registry() -> Registry {
 fn authority<'a>(goal: &'a GoalSpec, evaluators: &'a Registry) -> Authority<'a> {
     Authority {
         goal,
+        goal_id: "goal-1",
         goal_revision: 1,
         evaluators,
         evaluator_registry_digest: Digest::of(b"registry"),

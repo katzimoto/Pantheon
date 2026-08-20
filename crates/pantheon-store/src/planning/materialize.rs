@@ -129,6 +129,52 @@ pub(crate) fn apply(
         )));
     }
 
+    // Fencing the revision *number* is not enough. The scope ceiling and
+    // deliverable coverage were checked against some GoalSpec; this proves it
+    // was the one Pantheon durably holds, not a broader copy supplied
+    // alongside it. Without this a caller could validate against a Goal that
+    // permits more than the stored revision actually does.
+    let stored_goal_digest = writer
+        .query_optional(
+            "SELECT content_digest FROM goal_revisions WHERE goal_id = ?1 AND revision = ?2",
+            &[
+                Value::from(goal_id.as_str()),
+                Value::Integer(frozen_goal_revision),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?
+        .ok_or_else(|| {
+            StoreError::InvariantViolated(format!(
+                "goal {goal_id} revision {frozen_goal_revision} is not stored"
+            ))
+        })?;
+    if stored_goal_digest.as_slice() != plan.goal_digest().as_bytes().as_slice() {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "plan was validated against a goal whose content is not the stored revision {frozen_goal_revision}"
+        )));
+    }
+
+    // The proposal that materializes must be the one this operation recorded.
+    // The PlanningRecord is provenance; this is what makes a materialized Task
+    // auditable back to it, and stops a caller materializing a different
+    // proposal under a recorded decision.
+    let recorded_proposal = writer
+        .query_optional(
+            "SELECT proposal_digest FROM planning_records WHERE planning_operation_id = ?1",
+            &[Value::from(operation_id)],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?
+        .ok_or_else(|| {
+            StoreError::InvariantViolated(format!(
+                "planning operation {operation_id} has no recorded proposal"
+            ))
+        })?;
+    if recorded_proposal.as_slice() != plan.proposal_digest().as_bytes().as_slice() {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "plan does not match the proposal recorded for operation {operation_id}"
+        )));
+    }
+
     // 3. Re-read the graph revision.
     let current_graph_revision = writer
         .query_optional(

@@ -10,7 +10,14 @@
 //! PlanningOperation and its immutable PlanningRecord. It patches nothing.
 //! [`PlanningController::materialize`] validates the proposal and hands the
 //! result to the store, which re-reads the Goal revision, graph revision and
-//! active configuration inside its write transaction before committing. A
+//! active configuration inside its write transaction before committing.
+//!
+//! Validation runs against the Goal *Pantheon durably holds*, read back from
+//! the immutable revision — never a copy supplied by the caller. Otherwise the
+//! scope ceiling and deliverable coverage would be checked against whatever
+//! the caller claimed the Goal was, and fencing the revision number would not
+//! notice. The store then re-checks the Goal content digest as well, so the
+//! two layers fail closed independently. A
 //! proposal is therefore never authority at any point in this file: the only
 //! thing that can move the graph is a store transaction that has just
 //! confirmed the world still matches what the planner saw.
@@ -104,14 +111,13 @@ impl<'store> PlanningController<'store> {
         command: &Command<'_>,
         operation_id: &str,
         goal_id: &str,
-        spec: &GoalSpec,
     ) -> Result<Committed<PlanningOperationRecord>, PlanningError> {
         let context = self.context(goal_id)?;
 
         let input = PlanningInput {
             goal_id,
             goal_revision: context.goal_revision,
-            goal: spec,
+            goal: &context.goal,
             expected_graph_revision: context.graph_revision,
             configuration_activation_sequence: context.configuration_activation_sequence,
             trigger: Trigger::Initial,
@@ -155,10 +161,9 @@ impl<'store> PlanningController<'store> {
         operation_id: &str,
         task_id: &str,
         goal_id: &str,
-        spec: &GoalSpec,
         proposal: &Proposal,
     ) -> Result<Committed<MaterializedPlan>, PlanningError> {
-        let plan = self.validate(goal_id, spec, proposal)?;
+        let plan = self.validate(goal_id, proposal)?;
         Ok(self
             .store
             .materialize_plan(command, operation_id, task_id, &plan)?)
@@ -177,14 +182,14 @@ impl<'store> PlanningController<'store> {
     pub fn validate(
         &self,
         goal_id: &str,
-        spec: &GoalSpec,
         proposal: &Proposal,
     ) -> Result<Materializable, PlanningError> {
         let context = self.context(goal_id)?;
         Ok(validate::validate(
             proposal,
             &Authority {
-                goal: spec,
+                goal: &context.goal,
+                goal_id,
                 goal_revision: context.goal_revision,
                 evaluators: &context.evaluators,
                 evaluator_registry_digest: context.evaluator_registry_digest,
@@ -214,7 +219,20 @@ impl<'store> PlanningController<'store> {
         let evaluators = RegistryResolver::from_canonical_json(&component)
             .map_err(|err| PlanningError::Configuration(err.to_string()))?;
 
+        let stored = self
+            .store
+            .goal_revision_json(goal_id, goal.current_revision)?
+            .ok_or_else(|| {
+                PlanningError::Configuration(format!(
+                    "goal {goal_id} revision {} is not stored",
+                    goal.current_revision
+                ))
+            })?;
+        let stored = GoalSpec::from_canonical_json(&stored)
+            .map_err(|err| PlanningError::Configuration(err.to_string()))?;
+
         Ok(PlanningContext {
+            goal: stored,
             goal_revision: goal.current_revision,
             graph_revision: graph.revision.get(),
             configuration_activation_sequence: active.activation_sequence,
@@ -225,6 +243,9 @@ impl<'store> PlanningController<'store> {
 }
 
 struct PlanningContext {
+    /// The Goal as Pantheon durably holds it, read back from the immutable
+    /// revision rather than accepted from the caller.
+    goal: GoalSpec,
     goal_revision: i64,
     graph_revision: i64,
     configuration_activation_sequence: i64,

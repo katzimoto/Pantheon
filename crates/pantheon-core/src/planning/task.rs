@@ -179,6 +179,13 @@ pub struct TaskSpec {
     pub competencies: Vec<String>,
     pub scope: TaskScope,
     pub acceptance: AcceptanceContract,
+    /// The Goal this Task was created for.
+    ///
+    /// Part of the spec identity, not just provenance: two Goals with
+    /// byte-identical content would otherwise produce one content-addressed
+    /// spec row, and the second Goal's Task would reference a row attributed
+    /// to the first.
+    pub goal_id: String,
     /// The Goal revision this Task was created from.
     pub goal_revision: i64,
 }
@@ -219,6 +226,7 @@ impl TaskSpec {
                 ]),
             ),
             ("acceptance", self.acceptance_value()),
+            ("goalId", Value::string(&self.goal_id)),
             ("goalRevision", Value::Integer(self.goal_revision)),
         ])
     }

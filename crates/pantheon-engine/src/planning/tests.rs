@@ -161,7 +161,6 @@ fn the_full_path_reaches_a_ready_task_with_a_pinned_evaluator() {
             &command(epoch.as_str(), "cmd-plan", &[2u8; 32], "planning.recorded"),
             "op-1",
             "goal-1",
-            &spec,
         )
         .expect("planning recorded");
 
@@ -188,7 +187,6 @@ fn the_full_path_reaches_a_ready_task_with_a_pinned_evaluator() {
             "op-1",
             "task-1",
             "goal-1",
-            &spec,
             &proposal,
         )
         .expect("materialized");
@@ -231,7 +229,6 @@ fn a_proposal_that_escalates_beyond_the_goal_never_reaches_the_store() {
             &command(epoch.as_str(), "cmd-plan", &[2u8; 32], "planning.recorded"),
             "op-1",
             "goal-1",
-            &spec,
         )
         .expect("planning recorded");
 
@@ -251,7 +248,6 @@ fn a_proposal_that_escalates_beyond_the_goal_never_reaches_the_store() {
             "op-1",
             "task-1",
             "goal-1",
-            &spec,
             &broken,
         )
         .expect_err("an escalating proposal is refused");
@@ -311,7 +307,7 @@ fn planning_resolves_evaluators_from_the_active_configuration() {
 
     let proposal = proposal(&store, "goal-1", &spec);
     let err = controller
-        .validate("goal-1", &spec, &proposal)
+        .validate("goal-1", &proposal)
         .expect_err("an unresolvable evaluator must be refused");
     assert!(
         matches!(err, PlanningError::Invalid(ref inner) if inner.kind() == "unknown-evaluator"),

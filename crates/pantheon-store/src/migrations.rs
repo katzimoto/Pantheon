@@ -315,8 +315,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             planner_implementation            TEXT    NOT NULL,
             planner_version                   TEXT    NOT NULL,
             configuration_activation_sequence INTEGER NOT NULL,
+            -- Only the two states this mission's behaviour writes. A
+            -- rejection state arrives with the behaviour that records one.
             state                             TEXT    NOT NULL CHECK (state IN (
-                'Planned', 'Materialized', 'Rejected')),
+                'Planned', 'Materialized')),
             revision                          INTEGER NOT NULL CHECK (revision > 0),
             created_at                        INTEGER NOT NULL,
             FOREIGN KEY (goal_id, goal_revision) REFERENCES goal_revisions(goal_id, revision)

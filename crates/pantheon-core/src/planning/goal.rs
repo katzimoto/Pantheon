@@ -2,6 +2,7 @@
 
 use crate::config::Digest;
 use crate::config::canonical::Value;
+use crate::config::parse;
 
 /// The canonical Goal lifecycle phases.
 ///
@@ -158,6 +159,93 @@ impl GoalSpec {
         self.to_value().digest()
     }
 
+    /// Reads a Goal revision back from its stored canonical form.
+    ///
+    /// Validation must run against the Goal Pantheon durably holds, not a
+    /// copy a caller supplies alongside it. Without this the scope ceiling
+    /// and deliverable coverage would be checked against whatever the caller
+    /// said the Goal was, which is exactly the authority the mission exists
+    /// to keep out of the caller's hands.
+    ///
+    /// # Errors
+    ///
+    /// [`GoalDecodeError`] when the stored text is not a Goal revision. This
+    /// fails closed rather than degrading to an empty Goal, because an empty
+    /// constraint set would be a *wider* ceiling, not a narrower one.
+    pub fn from_canonical_json(text: &str) -> Result<Self, GoalDecodeError> {
+        let value = parse::parse(text).map_err(|err| GoalDecodeError(err.to_string()))?;
+        let field = |name: &str| {
+            value
+                .get(name)
+                .ok_or_else(|| GoalDecodeError(format!("missing {name}")))
+        };
+
+        let Value::String(objective) = field("objective")? else {
+            return Err(GoalDecodeError("objective is not a string".to_string()));
+        };
+
+        let mut inputs = Vec::new();
+        if let Value::Array(entries) = field("inputs")? {
+            for entry in entries {
+                let (Some(Value::String(name)), Some(Value::String(reference))) =
+                    (entry.get("name"), entry.get("ref"))
+                else {
+                    return Err(GoalDecodeError("malformed input".to_string()));
+                };
+                inputs.push(GoalInput {
+                    name: name.clone(),
+                    reference: reference.clone(),
+                });
+            }
+        }
+
+        let mut deliverables = Vec::new();
+        if let Value::Array(entries) = field("deliverables")? {
+            for entry in entries {
+                let (
+                    Some(Value::String(name)),
+                    Some(Value::String(kind)),
+                    Some(Value::Bool(required)),
+                ) = (entry.get("name"), entry.get("kind"), entry.get("required"))
+                else {
+                    return Err(GoalDecodeError("malformed deliverable".to_string()));
+                };
+                deliverables.push(Deliverable {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    required: *required,
+                });
+            }
+        }
+
+        let constraints_value = field("constraints")?;
+        let list = |name: &str| -> Result<Vec<String>, GoalDecodeError> {
+            let Some(Value::Array(entries)) = constraints_value.get(name) else {
+                return Err(GoalDecodeError(format!("missing constraints.{name}")));
+            };
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    Value::String(text) => Ok(text.clone()),
+                    _ => Err(GoalDecodeError(format!(
+                        "constraints.{name} is not strings"
+                    ))),
+                })
+                .collect()
+        };
+
+        Ok(Self {
+            objective: objective.clone(),
+            inputs,
+            deliverables,
+            constraints: GoalConstraints {
+                permitted_effects: list("permittedEffects")?,
+                forbidden_effects: list("forbiddenEffects")?,
+                permitted_resources: list("permittedResources")?,
+            },
+        })
+    }
+
     /// The required deliverable kinds a materialized graph must be able to
     /// produce.
     #[must_use]
@@ -173,3 +261,15 @@ impl GoalSpec {
 fn strings(values: &[String]) -> Value {
     Value::array(values.iter().map(Value::string))
 }
+
+/// A stored Goal revision that cannot be read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDecodeError(pub String);
+
+impl std::fmt::Display for GoalDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stored goal revision is not readable: {}", self.0)
+    }
+}
+
+impl std::error::Error for GoalDecodeError {}

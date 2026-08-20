@@ -92,7 +92,9 @@ impl PlanError {
 /// authoritative read inside the caller's transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct Authority<'a> {
+    /// The Goal as Pantheon durably holds it — never a caller's copy.
     pub goal: &'a GoalSpec,
+    pub goal_id: &'a str,
     pub goal_revision: i64,
     /// Resolves a logical evaluator ref to its immutable version id under the
     /// active configuration.
@@ -130,6 +132,13 @@ pub struct Materializable {
     spec: TaskSpec,
     proposal_digest: Digest,
     goal_revision: i64,
+    /// The content identity of the Goal revision this was validated against.
+    ///
+    /// The store compares this with the stored `goal_revisions.content_digest`
+    /// before writing, so a plan validated against a *different* Goal than the
+    /// one durably recorded cannot materialize — fencing the revision number
+    /// alone would not catch that.
+    goal_digest: Digest,
 }
 
 impl Materializable {
@@ -150,6 +159,12 @@ impl Materializable {
     #[must_use]
     pub const fn goal_revision(&self) -> i64 {
         self.goal_revision
+    }
+
+    /// The content identity of the Goal this was validated against.
+    #[must_use]
+    pub const fn goal_digest(&self) -> Digest {
+        self.goal_digest
     }
 }
 
@@ -320,6 +335,7 @@ pub fn validate(
             permitted_effects: task.permitted_effects.clone(),
             forbidden_effects: task.forbidden_effects.clone(),
         },
+        goal_id: authority.goal_id.to_string(),
         acceptance: AcceptanceContract {
             criteria,
             evaluator_registry_digest: authority.evaluator_registry_digest,
@@ -332,6 +348,7 @@ pub fn validate(
         spec,
         proposal_digest: proposal.digest(),
         goal_revision: authority.goal_revision,
+        goal_digest: authority.goal.digest(),
     })
 }
 

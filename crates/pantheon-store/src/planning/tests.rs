@@ -159,6 +159,38 @@ pub(crate) fn validated(
         &proposal,
         &Authority {
             goal: &spec,
+            goal_id: "goal-1",
+            goal_revision: 1,
+            evaluators: &registry,
+            evaluator_registry_digest: registry_digest,
+            configuration_activation_sequence: config_sequence,
+        },
+    )
+    .expect("the proposal validates")
+}
+
+pub(crate) fn validated_for(
+    goal_id: &str,
+    config_sequence: i64,
+    registry_digest: Digest,
+    version: &'static str,
+) -> Materializable {
+    let spec = goal_spec();
+    let input = PlanningInput {
+        goal_id,
+        goal_revision: 1,
+        goal: &spec,
+        expected_graph_revision: 0,
+        configuration_activation_sequence: config_sequence,
+        trigger: Trigger::Initial,
+    };
+    let proposal = direct::plan(&input);
+    let registry = Registry(version);
+    validate::validate(
+        &proposal,
+        &Authority {
+            goal: &spec,
+            goal_id,
             goal_revision: 1,
             evaluators: &registry,
             evaluator_registry_digest: registry_digest,

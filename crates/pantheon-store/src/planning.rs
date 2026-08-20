@@ -89,8 +89,6 @@ pub enum PlanningState {
     Planned,
     /// Its proposal became authoritative graph state.
     Materialized,
-    /// It was refused and can never materialize.
-    Rejected,
 }
 
 impl PlanningState {
@@ -99,7 +97,6 @@ impl PlanningState {
         match self {
             Self::Planned => "Planned",
             Self::Materialized => "Materialized",
-            Self::Rejected => "Rejected",
         }
     }
 
@@ -107,7 +104,6 @@ impl PlanningState {
         Some(match text {
             "Planned" => Self::Planned,
             "Materialized" => Self::Materialized,
-            "Rejected" => Self::Rejected,
             _ => return None,
         })
     }
@@ -278,5 +274,7 @@ mod read;
 
 #[cfg(test)]
 mod fencing_tests;
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 pub(crate) mod tests;
