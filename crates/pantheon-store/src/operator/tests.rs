@@ -221,63 +221,76 @@ fn the_schema_version_is_the_migrated_version_not_a_compiled_constant() {
 
 #[test]
 fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals() {
-    // The gap-free guarantee is exactly this: every `goal.created` Event at
-    // or before the snapshot cursor must correspond to a Goal the snapshot
-    // listed. If the cursor is read outside the transaction that read the
-    // Goals, a commit landing between the two makes an Event reachable at or
-    // before the cursor whose Goal is not in the list — and a client watching
-    // strictly after the cursor never sees it.
+    // The gap-free guarantee is exactly this: every Goal whose creation
+    // committed at or before the snapshot cursor is in the snapshot's list. If
+    // the cursor is read outside the transaction that read the Goals, a commit
+    // landing between the two produces a cursor past a Goal the list omits —
+    // and a client watching strictly after it never sees that Goal's Events.
+    //
+    // One reader spinning while exactly one Goal commits, repeated. A reader
+    // racing a writer that creates many Goals in a loop looked equivalent and
+    // was not: it killed the untransacted mutant reliably on one machine and
+    // not at all on CI, because the writer finished before the reader was
+    // scheduled into the window. The window is two adjacent statements, so the
+    // reader has to already be inside it.
+    //
+    // Observations are collected during the race and judged after it, so no
+    // detection is lost to the sequence not yet being published.
+    const GOALS: usize = 24;
     let (_dir, store, _sequence) = store_with_configuration("snapshot-race");
     let epoch = store.restore_generation().expect("generation");
     let epoch = epoch.as_str().to_string();
-    const GOALS: usize = 60;
 
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            for index in 0..GOALS {
-                store
-                    .create_goal(
-                        &command(&epoch, &format!("race-{index}"), &[7u8; 32], "goal.created"),
-                        &format!("goal-{index:03}"),
-                        &goal_spec(),
-                    )
-                    .expect("commits");
-            }
+    for index in 0..GOALS {
+        let created_at = std::sync::atomic::AtomicI64::new(i64::MAX);
+        let committed = std::sync::atomic::AtomicBool::new(false);
+        let observations = std::sync::Mutex::new(Vec::new());
+
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut after = 0;
+                while after < 48 {
+                    let snapshot = store.goal_snapshot().expect("snapshot");
+                    observations
+                        .lock()
+                        .expect("observations")
+                        .push((snapshot.goals.len(), snapshot.cursor.sequence));
+                    if committed.load(std::sync::atomic::Ordering::Acquire) {
+                        after += 1;
+                    }
+                }
+            });
+
+            let record = store
+                .create_goal(
+                    &command(&epoch, &format!("race-{index}"), &[7u8; 32], "goal.created"),
+                    &format!("goal-{index:03}"),
+                    &goal_spec(),
+                )
+                .expect("commits");
+            created_at.store(
+                record.cursor().sequence(),
+                std::sync::atomic::Ordering::Release,
+            );
+            committed.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().expect("the reader thread ran");
         });
 
-        let mut checked = 0;
-        while checked < 400 {
-            let snapshot = store.goal_snapshot().expect("snapshot");
-            let history = store
-                .events_after(
-                    &Cursor {
-                        journal_epoch: snapshot.cursor.journal_epoch.clone(),
-                        sequence: 0,
-                    },
-                    4096,
-                )
-                .expect("read")
-                .expect("cursor accepted");
-            let created_at_or_before = history
-                .iter()
-                .filter(|event| {
-                    event.event_type == "goal.created" && event.sequence <= snapshot.cursor.sequence
-                })
-                .count();
-            assert_eq!(
-                created_at_or_before,
-                snapshot.goals.len(),
-                "the cursor is ahead of the listed Goals: {} Goals created at or before {},                  but only {} listed",
-                created_at_or_before,
-                snapshot.cursor.sequence,
-                snapshot.goals.len()
+        let created_at = created_at.load(std::sync::atomic::Ordering::Acquire);
+        let observations = observations.into_inner().expect("observations");
+        assert!(
+            observations.len() > 48,
+            "round {index}: the reader must have observed the Goal before the commit, not only after"
+        );
+        for (listed, cursor) in observations {
+            assert!(
+                cursor < created_at || listed == index + 1,
+                "round {index}: cursor {cursor} is at or past the creation at {created_at}, \
+                 but the list held {listed} Goals rather than {}",
+                index + 1
             );
-            checked += 1;
-            if snapshot.goals.len() == GOALS {
-                break;
-            }
         }
-    });
+    }
 }
 
 #[test]
