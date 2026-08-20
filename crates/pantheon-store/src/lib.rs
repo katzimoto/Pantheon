@@ -66,7 +66,7 @@ mod test_support;
 pub use command::{Command, Committed, JournalCursor};
 pub use configuration::{ActiveConfiguration, ConfigurationPointer};
 pub use error::StoreError;
-pub use operator::{Cursor, CursorError, EventRecord, GoalSnapshot};
+pub use operator::{Cursor, CursorError, EventRecord, GoalDetail, GoalSnapshot};
 pub use planning::{
     Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,
     PlanningOperationRecord, PlanningState, ProposalRecord, TaskRecord,

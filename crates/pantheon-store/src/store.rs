@@ -368,6 +368,39 @@ impl Store {
         f(&conn)
     }
 
+    /// Runs `f` against the read-only connection inside one explicit read
+    /// transaction.
+    ///
+    /// [`Store::read`] does not do this, and the difference is load-bearing.
+    /// SQLite in autocommit mode gives each statement its own implicit
+    /// transaction, so two statements in one `read` closure can straddle a
+    /// commit made on the authoritative writer connection and observe two
+    /// different states. Every read whose *answers must agree with each
+    /// other* — a list and the journal cursor it corresponds to, a fence and
+    /// the rows it fences — has to run here instead.
+    ///
+    /// The transaction is deferred and rolled back rather than committed:
+    /// this connection is read-only, so there is nothing to commit, and in
+    /// WAL mode the snapshot is taken at the first read statement and held
+    /// until the transaction ends.
+    ///
+    /// Like [`Store::read`], this holds the reader lock for the duration of
+    /// `f`, so `f` must not call back into either of them.
+    pub(crate) fn read_snapshot<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let conn = self.reader.lock().map_err(|_| {
+            StoreError::ConnectionUnavailable(
+                "the read connection is poisoned by an earlier panic".to_string(),
+            )
+        })?;
+        let transaction = conn.unchecked_transaction()?;
+        let value = f(&transaction)?;
+        transaction.rollback()?;
+        Ok(value)
+    }
+
     /// Closes the store.
     ///
     /// Returns any error SQLite reports while finalizing outstanding

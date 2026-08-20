@@ -10,7 +10,7 @@ use crate::store::Store;
 use crate::transaction::Revision;
 
 /// A Goal with one materialized Ready Task, the shape #24 produces.
-fn goal_with_ready_task(store: &Store, sequence: i64, goal_id: &str) {
+pub(crate) fn goal_with_ready_task(store: &Store, sequence: i64, goal_id: &str) {
     let epoch = store.restore_generation().expect("generation");
     store
         .create_goal(

@@ -270,7 +270,7 @@ pub(crate) fn digest_from(bytes: &[u8], column: &str) -> Result<Digest, StoreErr
 pub use cancel::Cancellation;
 pub use materialize::MaterializedPlan;
 
-mod cancel;
+pub(crate) mod cancel;
 pub(crate) mod materialize;
 mod read;
 

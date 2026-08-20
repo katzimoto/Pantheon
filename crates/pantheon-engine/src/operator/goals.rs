@@ -19,7 +19,7 @@ use std::borrow::Borrow;
 
 use pantheon_core::planning::goal::GoalSpec;
 use pantheon_core::planning::{GoalPhase, TaskPhase};
-use pantheon_store::{Cursor, GoalRecord, Store, TaskRecord};
+use pantheon_store::{Cursor, GoalDetail, GoalRecord, Store, TaskRecord};
 
 use crate::operator::{
     CommandIdentity, OperatorError, OperatorService, derive_command_id, derive_goal_id,
@@ -126,18 +126,22 @@ impl<S: Borrow<Store>> OperatorService<'_, S> {
 
     /// One Goal, with its Tasks.
     ///
+    /// The phase, the revision the ETag is derived from, and the Tasks all
+    /// come from one durable read, so the representation a client caches
+    /// under that validator is a state that actually existed.
+    ///
     /// # Errors
     ///
     /// [`OperatorError::NotFound`] when no such Goal exists.
     pub fn goal(&self, goal_id: &str) -> Result<GoalView, OperatorError> {
-        let record = self
+        let detail = self
             .store
-            .goal(goal_id)?
+            .goal_detail(goal_id)?
             .ok_or_else(|| OperatorError::NotFound {
                 resource: "goal",
                 id: goal_id.to_string(),
             })?;
-        self.view(record)
+        self.view(detail)
     }
 
     /// Every Goal, with the journal cursor the list corresponds to.
@@ -184,31 +188,16 @@ impl<S: Borrow<Store>> OperatorService<'_, S> {
         self.goal(goal_id)
     }
 
-    fn view(&self, record: GoalRecord) -> Result<GoalView, OperatorError> {
-        let canonical = self
-            .store
-            .goal_revision_json(&record.id, record.current_revision)?
-            .ok_or_else(|| {
-                OperatorError::Internal(format!(
-                    "goal {} revision {} is not stored",
-                    record.id, record.current_revision
-                ))
-            })?;
-        let spec = GoalSpec::from_canonical_json(&canonical)
+    fn view(&self, detail: GoalDetail) -> Result<GoalView, OperatorError> {
+        let spec = GoalSpec::from_canonical_json(&detail.revision_json)
             .map_err(|err| OperatorError::Internal(err.to_string()))?;
-        let tasks = self
-            .store
-            .tasks_for_goal(&record.id)?
-            .into_iter()
-            .map(task_view)
-            .collect();
         Ok(GoalView {
-            id: record.id,
-            phase: record.phase,
-            goal_revision: record.current_revision,
-            revision: record.revision.get(),
+            id: detail.goal.id,
+            phase: detail.goal.phase,
+            goal_revision: detail.goal.current_revision,
+            revision: detail.goal.revision.get(),
             spec,
-            tasks,
+            tasks: detail.tasks.into_iter().map(task_view).collect(),
         })
     }
 }
