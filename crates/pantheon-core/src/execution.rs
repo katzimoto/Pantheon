@@ -39,13 +39,7 @@ impl ConfigurationBinding {
     pub fn matches(self, other: Self) -> bool {
         self.activation_sequence == other.activation_sequence
             && self.content_digest == other.content_digest
-            && self.component_digests.agents == other.component_digests.agents
-            && self.component_digests.routing == other.component_digests.routing
-            && self.component_digests.execution_profile == other.component_digests.execution_profile
-            && self.component_digests.evaluator_registry
-                == other.component_digests.evaluator_registry
-            && self.component_digests.context_policy == other.component_digests.context_policy
-            && self.component_digests.authorization == other.component_digests.authorization
+            && self.component_digests == other.component_digests
     }
 
     #[must_use]
@@ -527,7 +521,6 @@ pub struct ExecutionCandidate {
     pub offer: ExecutionOffer,
     pub route_policy: RoutePolicy,
     pub execution_profile_digest: Digest,
-    feature_match: usize,
 }
 
 impl ExecutionCandidate {
@@ -553,11 +546,6 @@ impl ExecutionCandidate {
             ),
         ])
         .digest()
-    }
-
-    #[must_use]
-    pub const fn feature_match(&self) -> usize {
-        self.feature_match
     }
 }
 
@@ -759,11 +747,6 @@ pub fn validate_execution_candidate(
         offer: offer.clone(),
         route_policy: resolved_agent.route_policy.clone(),
         execution_profile_digest: request.execution_profile_digest,
-        feature_match: request
-            .required_execution_features
-            .iter()
-            .filter(|feature| offer.supported_execution_features.contains(feature))
-            .count(),
     })
 }
 
@@ -851,19 +834,16 @@ fn compare_candidates(left: &ExecutionCandidate, right: &ExecutionCandidate) -> 
     if left.route_policy.name != right.route_policy.name {
         return left.route_policy.name.cmp(&right.route_policy.name);
     }
-    if left.route_policy.ordering == right.route_policy.ordering {
-        for key in &left.route_policy.ordering {
-            let order = match key.as_str() {
-                "featureMatch" => right.feature_match.cmp(&left.feature_match),
-                "contextCapacity" => right
-                    .offer
-                    .context_capacity_tokens
-                    .cmp(&left.offer.context_capacity_tokens),
-                _ => Ordering::Equal,
-            };
-            if order != Ordering::Equal {
-                return order;
-            }
+    for key in &left.route_policy.ordering {
+        let order = match key.as_str() {
+            "contextCapacity" => right
+                .offer
+                .context_capacity_tokens
+                .cmp(&left.offer.context_capacity_tokens),
+            _ => Ordering::Equal,
+        };
+        if order != Ordering::Equal {
+            return order;
         }
     }
     let tie_break = match left.route_policy.tie_break.as_str() {

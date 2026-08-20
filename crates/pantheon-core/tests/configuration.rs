@@ -53,8 +53,8 @@ fn source_formatting_does_not_change_semantic_identity() {
 
     // Whitespace and key order differ; semantics do not.
     let reformatted = VALID_SOURCE.replace("\n", " ").replace("  ", " ").replace(
-        r#"{ "name": "default", "ordering": ["featureMatch"], "tieBreak": "backendId" }"#,
-        r#"{"tieBreak":"backendId","ordering":["featureMatch"],"name":"default"}"#,
+        r#"{ "name": "default", "ordering": ["contextCapacity"], "tieBreak": "backendId" }"#,
+        r#"{"tieBreak":"backendId","ordering":["contextCapacity"],"name":"default"}"#,
     );
     let other = compile(&reformatted).expect("the reformatted source compiles");
 

@@ -56,7 +56,7 @@ fn configuration_source(backend_enabled: bool, requires_keyed_launch: bool) -> S
     "executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
     "actions":["filesystem.read"]}}],
-  "routing": {{"policies":[{{"name":"default","priority":0,"ordering":["featureMatch"],
+  "routing": {{"policies":[{{"name":"default","priority":0,"ordering":["contextCapacity"],
     "tieBreak":"backendId","requiresKeyedLaunch":{requires_keyed_launch}}}]}},
   "execution": {{"profiles":[{{"name":"strict","isolationClass":"CONTAINER",
     "guarantees":["isolation.control-plane"],"networkMode":"NONE",

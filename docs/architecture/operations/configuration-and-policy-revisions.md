@@ -36,7 +36,7 @@ configurationRevision:
 
   sourceSetDigest: sha256:SOURCES
   compiler:
-    version: pantheon-config-v1
+    version: pantheon-config-v2
 ```
 
 Revision identity is historical activation identity. Content digest is semantic content identity. Rolling back to identical content creates a new ConfigurationRevision with a later activation sequence.
@@ -153,6 +153,19 @@ compiled component/configuration digest
 ```
 
 The source digest records what the operator supplied. The compiled digest records what Pantheon actually uses.
+
+Set-valued compiled fields canonicalize as sorted sets before hashing:
+
+```text
+Agent accepts, competencies, executionFeatures, sandboxRequirements, actions
+sandbox profile guarantees
+```
+
+The Agent array is sorted by immutable Agent identity (name, then version) and
+the route-policy array by policy name before the component digest is computed,
+so declaration order never changes compiled identity. Duplicate entries in a
+set-valued field are rejected at activation rather than hashed twice, because
+the Agent manifest schema declares these lists `uniqueItems`.
 
 Hash-bearing canonical historical documents are versioned and never rewritten in place by migrations.
 

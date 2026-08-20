@@ -73,7 +73,12 @@ pub const HARD_DENIED_ACTION: &str = "secret.read";
 
 /// The v0.1.0 route preference vocabulary. Unknown keys are rejected at
 /// activation rather than being silently ignored by selection.
-pub const ROUTE_PREFERENCE_KEYS: &[&str] = &["featureMatch", "contextCapacity"];
+///
+/// `featureMatch` is deliberately absent: after the fail-closed feature
+/// checks every validated candidate already supports every required feature,
+/// so a match count cannot discriminate and would be a preference key with no
+/// semantics.
+pub const ROUTE_PREFERENCE_KEYS: &[&str] = &["contextCapacity"];
 
 /// The stable candidate identity keys accepted as route tie-breaks.
 pub const ROUTE_TIE_BREAK_KEYS: &[&str] = &["backendId", "agentId"];
@@ -145,6 +150,7 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
         positive(min_context_tokens, &path(&prefix, "minContextTokens"))?;
 
         let actions = string_list(entry, &prefix, "actions")?;
+        unique_list(&actions, "agent action")?;
         for action in &actions {
             if !ACTIONS.contains(&action.as_str()) {
                 return Err(ConfigError::InvalidValue {
@@ -166,8 +172,10 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
 
         let accepts = string_list(entry, &prefix, "accepts")?;
         non_empty_list(&accepts, &path(&prefix, "accepts"))?;
+        unique_list(&accepts, "accepts entry")?;
         let competencies = string_list(entry, &prefix, "competencies")?;
         non_empty_list(&competencies, &path(&prefix, "competencies"))?;
+        unique_list(&competencies, "competency")?;
 
         agents.push(Agent {
             name,
@@ -184,14 +192,22 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
                 &path(&prefix, "routePolicy"),
             )?
             .to_string(),
-            execution_features: string_list(entry, &prefix, "executionFeatures")?,
+            execution_features: {
+                let features = string_list(entry, &prefix, "executionFeatures")?;
+                unique_list(&features, "execution feature")?;
+                features
+            },
             min_context_tokens,
             sandbox_profile: as_str(
                 field(entry, &prefix, "sandboxProfile")?,
                 &path(&prefix, "sandboxProfile"),
             )?
             .to_string(),
-            sandbox_requirements: string_list(entry, &prefix, "sandboxRequirements")?,
+            sandbox_requirements: {
+                let requirements = string_list(entry, &prefix, "sandboxRequirements")?;
+                unique_list(&requirements, "sandbox requirement")?;
+                requirements
+            },
             actions,
         });
     }
@@ -283,10 +299,13 @@ fn execution(value: &Value) -> Result<ExecutionComponent, ConfigError> {
         .to_string();
         non_empty(&environment_identity, &path(&prefix, "environmentIdentity"))?;
 
+        let guarantees = string_list(entry, &prefix, "guarantees")?;
+        unique_list(&guarantees, "sandbox guarantee")?;
+
         profiles.push(SandboxProfile {
             name,
             isolation_class,
-            guarantees: string_list(entry, &prefix, "guarantees")?,
+            guarantees,
             network_mode,
             environment_identity,
         });
@@ -518,6 +537,19 @@ fn non_empty_list(values: &[String], at: &str) -> Result<(), ConfigError> {
             path: at.to_string(),
             detail: "must contain at least one value".to_string(),
         });
+    }
+    Ok(())
+}
+
+/// Rejects duplicate entries in one set-valued list.
+///
+/// The set-semantics fields canonicalize as sorted sets for the component
+/// digest, and the manifest schema declares them `uniqueItems`, so a repeated
+/// entry is a malformed declaration, not a set with multiplicity.
+fn unique_list(values: &[String], kind: &'static str) -> Result<(), ConfigError> {
+    let mut seen = Vec::new();
+    for value in values {
+        unique(&mut seen, kind, value)?;
     }
     Ok(())
 }

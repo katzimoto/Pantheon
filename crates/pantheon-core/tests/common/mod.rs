@@ -28,7 +28,7 @@ pub(crate) const VALID_SOURCE: &str = r#"{
   ],
   "routing": {
     "policies": [
-      { "name": "default", "ordering": ["featureMatch"], "tieBreak": "backendId" }
+      { "name": "default", "ordering": ["contextCapacity"], "tieBreak": "backendId" }
     ]
   },
   "execution": {

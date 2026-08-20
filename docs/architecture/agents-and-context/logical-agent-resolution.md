@@ -44,6 +44,34 @@ required revision/config compatibility
 
 `accepts` and `competencies` are operator/config-controlled semantic claims; Genome learning cannot auto-expand them.
 
+### Agent version status
+
+Each configured Agent version declares its own status, compiled into the Agent
+component and digested with it:
+
+- `enabled` (default `true`) — whether this immutable version may be considered
+  for new Tasks at all;
+- `current` (default `true`) — whether this is the configured current version
+  of its Logical Agent.
+
+At most one `current` version may exist per Agent name; a candidate declaring
+two is rejected before activation. The Resolver treats `enabled`/`current` as
+hard filters and never infers status from declaration order or version number.
+
+### Pins and exclusions
+
+`routing.agentPins` and `routing.agentExclusions` name exact immutable Agent
+versions (`name@version`):
+
+- a non-empty pin list is an allowlist — every unpinned Agent version becomes
+  ineligible for **every** Task while the pins are active, regardless of Task
+  type;
+- an exclusion removes the named version from eligibility;
+- a version that is both pinned and excluded is rejected before activation.
+
+Both lists participate in the routing component digest, so pin/exclusion
+changes alter routing identity.
+
 ## Not Agent eligibility
 
 Do not use these as semantic eligibility:
@@ -62,6 +90,15 @@ Those belong to later offer/routing/admission.
 ## Ranking
 
 If multiple Agents are eligible, v1 uses deterministic configured precedence/tie-break rules. Optional prose/description matching may provide diagnostics or future ranking signals but cannot override hard eligibility.
+
+RoutePolicy fields are compiled into the routing component and digested with
+it: `priority` (higher values preferred first, default `0`), `ordering` (the
+closed v0.1.0 preference-key vocabulary, currently `contextCapacity`),
+`tieBreak` (`backendId` | `agentId`), and `requiresKeyedLaunch` (default `true`;
+`false` admits `OBSERVATIONAL` launch semantics only when controller-owned
+outer duplicate-prevention evidence exists). Unknown preference or tie-break
+keys are rejected at activation rather than silently ignored. See
+`docs/architecture/execution/execution-offer-routing-and-admission-handshake.md`.
 
 Model-based semantic Agent ranking is deferred from v1. It is not needed for correctness and would introduce another unaccounted/nondeterministic control operation.
 
