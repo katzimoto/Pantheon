@@ -5,5 +5,59 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+# The domain vocabulary a handler translates into, and the operations it calls.
+# Handlers make no decisions of their own; see the crate documentation.
+pantheon-core = { path = "../pantheon-core" }
+pantheon-engine = { path = "../pantheon-engine" }
+pantheon-operator-protocol = { path = "../pantheon-operator-protocol" }
+
+# HTTP/1.1 routing and extraction. Default features are disabled deliberately:
+# the defaults enable `http2`, `form`, `query`, `multipart` and `matched-path`
+# among others, and Operator Control is a local HTTP/1.1 + JSON surface over a
+# Unix socket. `tokio` is what provides `axum::serve` and the `Listener`
+# implementation for `tokio::net::UnixListener`; `query` is needed for the
+# cursor and limit parameters.
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
+
+# The runtime the server and its blocking store calls run on. `rt-multi-thread`
+# so a blocking SQLite read on one connection cannot stall the whole daemon,
+# `net` for the Unix listener, `sync` for the channel that carries a watch
+# stream, and `time` for the stream's keep-alive.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+] }
+
+# Turns the watch channel into the `Stream` an SSE response needs. Preferred
+# over hand-writing a `Stream` state machine, and over `async-stream`'s macro
+# machinery, because a receiver wrapper is the whole of what is required.
+tokio-stream = { version = "0.1.17", default-features = false }
+
+serde = { version = "1.0.229", default-features = false, features = [
+    "derive",
+    "std",
+] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# The API-description drift tests read the published OpenAPI document.
+serde_json = "1.0.151"
+
+# The socket tests are async, so they need a runtime and the `macros` that
+# spell `#[tokio::test]`. Kept out of the normal dependency set: the library
+# itself never starts a runtime, it is handed one.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+] }
+
 [lints]
 workspace = true
