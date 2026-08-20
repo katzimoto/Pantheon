@@ -65,10 +65,6 @@ cd "$root"
 #                             made inside the transaction that acts on it,
 #                             which is every current caller. It stays for the
 #                             observe-then-attempt case no code has yet.
-#   task_spec_json            The only read path for an immutable Task
-#                             specification. Operator Control v1 exposes a spec
-#                             digest and no Task resource, so nothing reads the
-#                             body yet. Consumed by the mission that adds one.
 #   planning_operation        The durable PlanningOperation record.
 #                             Materialization re-reads it inside its own write
 #                             transaction rather than through this accessor.
@@ -84,7 +80,6 @@ allowlist() {
 planning_operation
 planning_record_proposal
 revision_of
-task_spec_json
 EOF
 }
 

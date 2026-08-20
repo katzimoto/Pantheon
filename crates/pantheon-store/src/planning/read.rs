@@ -1,11 +1,11 @@
 //! Reading durable Goal, graph, Task and planning state.
 
 use pantheon_core::config::Digest;
-use pantheon_core::planning::GoalPhase;
+use pantheon_core::planning::{GoalPhase, TaskPhase};
 
 use crate::error::StoreError;
 use crate::planning::{
-    GoalRecord, GraphRecord, PlanningOperationRecord, PlanningState, digest_from,
+    GoalRecord, GraphRecord, PlanningOperationRecord, PlanningState, TaskRecord, digest_from,
 };
 use crate::store::Store;
 use crate::transaction::Revision;

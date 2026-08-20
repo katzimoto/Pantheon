@@ -533,10 +533,16 @@ fn routing_does_not_create_a_run_or_other_execution_authority() {
         .expect("task exists");
     assert_eq!(task.phase, TaskPhase::Ready);
     assert!(task.active_run_id.is_none());
+    // Through the composite read, so the whole graph is judged at one moment
+    // rather than task by task: routing must have left every Task alone, not
+    // merely the one it routed.
+    let detail = store
+        .goal_detail("goal-1")
+        .expect("read Goal detail")
+        .expect("Goal exists");
     assert!(
-        store
-            .tasks_for_goal("goal-1")
-            .expect("read tasks")
+        detail
+            .tasks
             .iter()
             .all(|task| { task.phase == TaskPhase::Ready && task.active_run_id.is_none() })
     );
