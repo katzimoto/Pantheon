@@ -50,6 +50,7 @@ skill's shape onto it.
    | Defect fixed | Reproduction before + regression after |
    | Runtime behaviour | Executed result at the same altitude as the claim |
    | Recovery/concurrency property | Relevant path and edge branch exercised or otherwise convincingly established |
+   | A fence, invariant or security property | The test that proves it, **and** the mutant that test kills. A passing test is not evidence that it would fail; `./scripts/check-mutants.sh` and `tests/mutants.txt` are where that becomes durable |
    | Architecture/schema change | Affected canonical contracts reconciled, no conflicting authority |
    | Documentation correction | Often the diff plus the structural validator |
 

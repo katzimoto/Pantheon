@@ -4,7 +4,7 @@ use pantheon_core::planning::{GoalPhase, TaskPhase};
 
 use crate::error::StoreError;
 use crate::planning::tests::{
-    command, goal_spec, plan_and_record, store_with_configuration, validated_for,
+    command, goal_spec, plan_and_record, store_with_configuration, tasks_of, validated_for,
 };
 use crate::store::Store;
 use crate::transaction::Revision;
@@ -102,13 +102,13 @@ fn cancellation_fences_every_nonterminal_task_in_the_same_transaction() {
     let (_dir, store, sequence) = store_with_configuration("cancel-tasks");
     goal_with_ready_task(&store, sequence, "goal-1");
 
-    let before = store.tasks_for_goal("goal-1").expect("tasks");
+    let before = tasks_of(&store, "goal-1");
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].phase, TaskPhase::Ready);
 
     cancel(&store, "goal-1", "cancel-1").expect("cancellation commits");
 
-    let after = store.tasks_for_goal("goal-1").expect("tasks");
+    let after = tasks_of(&store, "goal-1");
     assert_eq!(after[0].phase, TaskPhase::Finalizing);
     assert_ne!(
         after[0].revision, before[0].revision,
@@ -123,13 +123,13 @@ fn cancelling_an_already_cancelling_goal_changes_nothing_further() {
 
     cancel(&store, "goal-1", "cancel-1").expect("first cancellation commits");
     let once = store.goal("goal-1").expect("read").expect("goal");
-    let tasks_once = store.tasks_for_goal("goal-1").expect("tasks");
+    let tasks_once = tasks_of(&store, "goal-1");
 
     // A *different* command id, so this is a genuine second execution rather
     // than the command kernel replaying the first one.
     cancel(&store, "goal-1", "cancel-2").expect("second cancellation commits");
     let twice = store.goal("goal-1").expect("read").expect("goal");
-    let tasks_twice = store.tasks_for_goal("goal-1").expect("tasks");
+    let tasks_twice = tasks_of(&store, "goal-1");
 
     assert_eq!(
         once.revision, twice.revision,

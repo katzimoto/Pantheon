@@ -81,6 +81,20 @@ pub(crate) fn activate_configuration(store: &Store, command_id: &str, memory_lim
         .expect("activation commits");
 }
 
+/// The Tasks of a Goal, for assertions.
+///
+/// `Store::goal_detail` is the composite read the Operator surface uses; there
+/// is no narrower public read path, because a public read path nothing but
+/// tests call is the shape `scripts/check-store-read-paths.sh` exists to
+/// refuse.
+pub(crate) fn tasks_of(store: &Store, goal_id: &str) -> Vec<crate::planning::TaskRecord> {
+    store
+        .goal_detail(goal_id)
+        .expect("read")
+        .expect("goal exists")
+        .tasks
+}
+
 pub(crate) fn command<'a>(
     epoch: &'a str,
     id: &'a str,
@@ -256,12 +270,7 @@ fn a_new_goal_begins_in_planning_with_an_empty_graph() {
         Revision::new(0),
         "the graph exists before any Task"
     );
-    assert!(
-        store
-            .tasks_for_goal("goal-1")
-            .expect("read tasks")
-            .is_empty()
-    );
+    assert!(tasks_of(&store, "goal-1").is_empty());
 }
 
 #[test]
@@ -279,7 +288,7 @@ fn the_whole_path_produces_one_ready_task_in_one_graph_revision() {
     assert_eq!(operation.goal_revision, 1);
     assert_eq!(operation.expected_graph_revision, 0);
     assert!(
-        store.tasks_for_goal("goal-1").expect("tasks").is_empty(),
+        tasks_of(&store, "goal-1").is_empty(),
         "a recorded proposal must not have created a Task"
     );
     assert_eq!(
@@ -299,7 +308,7 @@ fn the_whole_path_produces_one_ready_task_in_one_graph_revision() {
     assert_eq!(outcome.graph_revision, 1);
     assert_eq!(outcome.goal_phase, GoalPhase::Active);
 
-    let tasks = store.tasks_for_goal("goal-1").expect("tasks");
+    let tasks = tasks_of(&store, "goal-1");
     assert_eq!(tasks.len(), 1, "DIRECT materializes exactly one Task");
     let task = &tasks[0];
     assert_eq!(
@@ -332,7 +341,7 @@ fn the_materialized_task_pins_the_evaluator_version_durably() {
     let plan = validated(seq, Digest::of(b"registry"), "unit-tests-v1");
     materialize(&store, &op, "task-1", &plan, "cmd-materialize").expect("commits");
 
-    let task = store.tasks_for_goal("goal-1").expect("tasks").remove(0);
+    let task = tasks_of(&store, "goal-1").remove(0);
     let spec_json = store
         .task_spec_json(task.spec_digest)
         .expect("read spec")

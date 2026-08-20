@@ -256,7 +256,14 @@ fn a_proposal_that_escalates_beyond_the_goal_never_reaches_the_store() {
         "unexpected: {err}"
     );
 
-    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
+    assert!(
+        store
+            .goal_detail("goal-1")
+            .expect("read")
+            .expect("goal exists")
+            .tasks
+            .is_empty()
+    );
     assert_eq!(
         store
             .task_graph("goal-1")

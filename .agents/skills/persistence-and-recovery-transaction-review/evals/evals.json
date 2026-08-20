@@ -14,14 +14,26 @@
       ]
     },
     {
-      "id": "read-only-store-query",
+      "id": "single-statement-store-read",
       "trigger": "negative",
-      "prompt": "Add a read-only query to `pantheon-store` that lists completed runs for the operator CLI. No writes, no schema change, and no transaction boundary change.",
-      "expected_output": "Does not activate the transaction-review skill; treats this as an ordinary read-only change with no invariant-family work and no concurrency/recovery evidence to demand.",
+      "prompt": "Add a read-only query to `pantheon-store` that returns the phase of one Run by id, for the operator CLI. One SELECT, no writes, no schema change, no transaction boundary change, and no other read has to agree with its answer.",
+      "expected_output": "Does not activate the transaction-review skill. A single-statement read whose answer nothing else must agree with is a stated non-trigger, and invoking the invariant-family procedure for it is noise. Answers the request directly.",
       "files": [],
       "assertions": [
-        "The response does not apply the invariant-family checklist",
-        "The response does not demand concurrency or recovery evidence for a read-only query"
+        "The response does not walk the invariant-family table",
+        "The response answers the request rather than demanding concurrency evidence"
+      ]
+    },
+    {
+      "id": "list-plus-cursor-read",
+      "trigger": "positive",
+      "prompt": "Add a `pantheon-store` read that returns every Goal together with the Event Journal cursor the list corresponds to, so an operator client can start watching after it without a list/watch gap. It only reads \u2014 no writes and no schema change.",
+      "expected_output": "Activates the transaction-review skill despite the change being read-only, because the two reads must agree with each other. Names the multi-statement read consistency family, states that SQLite in autocommit gives each statement its own implicit transaction so the cursor can end up ahead of the listed rows, requires the reads to share one explicit read transaction, and demands evidence at that altitude: a write committed between the two reads observed to be invisible to the second, plus a concurrency test asserting every Event at or before the cursor has its row in the list.",
+      "files": [],
+      "assertions": [
+        "The response names the multi-statement read consistency family",
+        "The response requires one explicit read transaction rather than relying on autocommit",
+        "The response demands a concurrency test, not only a sequential one"
       ]
     }
   ]

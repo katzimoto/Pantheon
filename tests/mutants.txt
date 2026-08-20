@@ -1,0 +1,184 @@
+# Mutants that must be caught.
+#
+# Each record names a single-line edit to production source and the test that
+# must fail once it is applied. `scripts/check-mutants.sh` applies each one to a
+# scratch copy of the tree and reports any mutant the named test does not kill.
+#
+# The point is not to find defects in the implementation — the suite and
+# independent review do that. It is to prove the *tests* are load-bearing. Every
+# entry below was written after a real surviving mutant exposed a test that
+# could not fail:
+#
+#   - #18 shipped a canary test whose constant was never passed to anything;
+#   - #24's scope-escalation test used a fixture that satisfied two rules at
+#     once, so either rule alone could rot unnoticed;
+#   - #26 had four survivors, including a permission test that compared each
+#     mode constant with itself.
+#
+# Format: blank-line-separated records of `key: value`. Required keys are
+# name, file, find, replace, scope and test; `runs` (default 3) repeats a
+# mutant that races, and every run must fail. `occurrence` selects which match
+# to replace when `find` is not unique in the file.
+#
+# Adding an entry: pick the smallest edit that removes the property, not the
+# largest. A mutant that breaks compilation proves nothing.
+
+name: journal-head-off-by-one
+file: crates/pantheon-store/src/operator.rs
+find: sequence: next - 1,
+replace: sequence: next,
+scope: -p pantheon-store --lib
+test: operator::tests::the_snapshot_cursor_is_the_position_the_listed_goals_correspond_to
+
+name: cursor-epoch-fence-removed
+file: crates/pantheon-store/src/operator.rs
+find: if cursor.journal_epoch != head.journal_epoch {
+replace: if false {
+scope: -p pantheon-store --lib
+test: operator::tests::a_cursor_from_another_journal_history_is_refused_rather_than_restarted
+
+name: cursor-ahead-fence-removed
+file: crates/pantheon-store/src/operator.rs
+find: if cursor.sequence > head.sequence {
+replace: if false {
+scope: -p pantheon-store --lib
+test: operator::tests::a_cursor_ahead_of_the_journal_head_is_refused
+
+name: goal-snapshot-untransacted
+file: crates/pantheon-store/src/operator.rs
+find: self.read_snapshot(|conn| {
+replace: self.read(|conn| {
+occurrence: 2
+scope: -p pantheon-store --lib
+test: operator::tests::a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals
+runs: 5
+
+name: goal-detail-untransacted
+file: crates/pantheon-store/src/operator.rs
+find: self.read_snapshot(|conn| {
+replace: self.read(|conn| {
+occurrence: 1
+scope: -p pantheon-store --lib
+test: operator::tests::a_goal_detail_never_pairs_one_moments_phase_with_another_moments_tasks
+runs: 5
+
+name: read-snapshot-loses-its-transaction
+file: crates/pantheon-store/src/store.rs
+find: let value = f(&transaction)?;
+replace: drop(transaction); let value = f(&conn)?; let transaction = conn.unchecked_transaction()?;
+scope: -p pantheon-store --lib
+test: substrate_tests::a_read_snapshot_holds_one_view_across_every_statement_in_it
+
+name: cancellation-skips-task-fencing
+file: crates/pantheon-store/src/planning/cancel.rs
+find: for (task_id, phase, revision, terminal_target) in rows {
+replace: for (task_id, phase, revision, terminal_target) in rows.into_iter().take(0) {
+scope: -p pantheon-store --lib
+test: planning::cancel::tests::cancellation_fences_every_nonterminal_task_in_the_same_transaction
+
+name: terminal-goal-accepts-cancellation
+file: crates/pantheon-store/src/planning/cancel.rs
+find: (GoalPhase::Finalizing, Some("Cancelled")) => true,
+replace: (GoalPhase::Finalizing, Some("Cancelled")) => true, _ => true,
+scope: -p pantheon-store --lib
+test: planning::cancel::tests::a_goal_finalizing_toward_another_outcome_is_refused_and_nothing_is_written
+
+name: goal-id-ignores-the-command-id
+file: crates/pantheon-engine/src/operator.rs
+find: ("commandId", Value::string(command_id)),
+replace: ("commandId", Value::string("")),
+occurrence: 2
+scope: -p pantheon-engine --lib
+test: operator::tests::a_different_command_id_creates_a_different_goal
+
+name: sub-command-id-ignores-the-step
+file: crates/pantheon-engine/src/operator.rs
+find: ("step", Value::string(step)),
+replace: ("step", Value::string("")),
+scope: -p pantheon-engine --lib
+test: operator::tests::derived_identities_are_stable_and_do_not_collide_across_steps_or_epochs
+
+name: readiness-asserts-the-missing-recovery-barrier
+file: crates/pantheon-engine/src/operator/system.rs
+find: state: ComponentState::Unimplemented,
+replace: state: ComponentState::Satisfied,
+occurrence: 1
+scope: -p pantheon-engine --lib
+test: operator::tests::readiness_reports_what_this_build_cannot_establish_instead_of_asserting_it
+
+name: partial-page-reports-the-head
+file: crates/pantheon-engine/src/operator/events.rs
+find: let next = events
+replace: let next = self.store.journal_head()?; let _unused = events
+scope: -p pantheon-engine --lib
+test: operator::tests::a_partial_page_resumes_from_its_last_event_rather_than_from_the_head
+
+name: store-proposal-fence-removed
+file: crates/pantheon-store/src/planning/materialize.rs
+find: if recorded_proposal.as_slice() != plan.proposal_digest().as_bytes().as_slice() {
+replace: if false {
+scope: -p pantheon-engine --lib
+test: operator::tests::a_planning_record_that_does_not_reproduce_its_proposal_stops_materialization
+
+name: socket-mode-widened
+file: crates/pantheon-operator-api/src/socket.rs
+find: const SOCKET_MODE: u32 = 0o600;
+replace: const SOCKET_MODE: u32 = 0o666;
+scope: -p pantheon-operator-api --lib
+test: socket::tests::the_socket_and_its_directory_are_reachable_only_by_their_owner
+
+name: socket-directory-mode-widened
+file: crates/pantheon-operator-api/src/socket.rs
+find: const DIRECTORY_MODE: u32 = 0o700;
+replace: const DIRECTORY_MODE: u32 = 0o755;
+scope: -p pantheon-operator-api --lib
+test: socket::tests::a_directory_left_loose_is_tightened_before_the_socket_appears
+
+name: live-daemon-socket-is-stolen
+file: crates/pantheon-operator-api/src/socket.rs
+find: match UnixStream::connect(path).await {
+replace: match UnixStream::connect(std::path::Path::new("/pantheon-no-such-socket")).await {
+scope: -p pantheon-operator-api --lib
+test: socket::tests::a_socket_a_live_daemon_is_serving_is_never_stolen
+
+name: regular-file-at-the-socket-path-is-deleted
+file: crates/pantheon-operator-api/src/socket.rs
+find: if !metadata.file_type().is_socket() {
+replace: if false {
+scope: -p pantheon-operator-api --lib
+test: socket::tests::a_regular_file_at_the_socket_path_is_refused_rather_than_deleted
+
+name: cancellation-reported-as-completed
+file: crates/pantheon-operator-api/src/goals.rs
+find: Ok(view) => goal_response(StatusCode::ACCEPTED, view),
+replace: Ok(view) => goal_response(StatusCode::OK, view),
+scope: -p pantheond --test operator_control
+test: the_whole_operator_path_works_over_the_socket
+
+name: etag-tracks-the-semantic-revision
+file: crates/pantheon-operator-api/src/goals.rs
+find: let etag = format!("\"{}-{}\"", view.id, view.revision);
+replace: let etag = format!("\"{}-{}\"", view.id, view.goal_revision);
+scope: -p pantheond --test operator_control
+test: the_whole_operator_path_works_over_the_socket
+
+name: command-identity-headers-defaulted
+file: crates/pantheon-operator-api/src/command.rs
+find: let value = headers
+replace: if headers.get(name).is_none() { return Ok("placeholder".to_string()); } let value = headers
+scope: -p pantheond --test operator_control
+test: a_mutation_without_command_identity_is_refused_as_a_missing_precondition
+
+name: watch-opens-without-validating-its-cursor
+file: crates/pantheon-operator-api/src/events.rs
+find: service.events_after(&cursor, 1)?;
+replace: let _skipped = &cursor;
+scope: -p pantheond --test operator_control
+test: an_unreachable_journal_position_is_reported_rather_than_restarted_from_the_head
+
+name: bad-cursor-falls-back-to-the-head
+file: crates/pantheon-operator-api/src/events.rs
+find: .ok_or_else(|| OperatorError::CursorGone(format!("{text} is not a journal cursor"))),
+replace: .map_or_else(head, Ok),
+scope: -p pantheond --test operator_control
+test: an_unreachable_journal_position_is_reported_rather_than_restarted_from_the_head

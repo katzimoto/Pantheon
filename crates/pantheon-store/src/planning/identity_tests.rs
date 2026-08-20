@@ -6,7 +6,8 @@ use pantheon_core::config::Digest;
 
 use crate::error::StoreError;
 use crate::planning::tests::{
-    create_goal, goal_spec, materialize, plan_and_record, store_with_configuration, validated_for,
+    create_goal, goal_spec, materialize, plan_and_record, store_with_configuration, tasks_of,
+    validated_for,
 };
 use crate::transaction::Revision;
 
@@ -70,7 +71,7 @@ fn a_plan_validated_against_a_different_goal_cannot_materialize() {
         "unexpected: {err}"
     );
     assert!(
-        store.tasks_for_goal("goal-1").expect("tasks").is_empty(),
+        tasks_of(&store, "goal-1").is_empty(),
         "no Task may exceed the stored Goal's ceiling"
     );
     assert_eq!(
@@ -132,7 +133,7 @@ fn a_plan_that_is_not_the_recorded_proposal_cannot_materialize() {
         matches!(err, StoreError::InvariantViolated(ref d) if d.contains("recorded for operation")),
         "unexpected: {err}"
     );
-    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
+    assert!(tasks_of(&store, "goal-1").is_empty());
 }
 
 #[test]
@@ -158,8 +159,8 @@ fn two_goals_with_identical_content_do_not_share_one_task_spec() {
     materialize(&store, &op1, "task-1", &plan1, "cmd-mat-1").expect("first commits");
     materialize(&store, &op2, "task-2", &plan2, "cmd-mat-2").expect("second commits");
 
-    let first = store.tasks_for_goal("goal-1").expect("tasks").remove(0);
-    let second = store.tasks_for_goal("goal-2").expect("tasks").remove(0);
+    let first = tasks_of(&store, "goal-1").remove(0);
+    let second = tasks_of(&store, "goal-2").remove(0);
     assert_ne!(first.spec_digest, second.spec_digest);
 
     // And each spec row is attributed to its own Goal.
@@ -196,6 +197,6 @@ fn a_plan_naming_another_goal_cannot_materialize_under_this_operation() {
         matches!(err, StoreError::InvariantViolated(ref d) if d.contains("belongs to")),
         "unexpected: {err}"
     );
-    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
-    assert!(store.tasks_for_goal("goal-2").expect("tasks").is_empty());
+    assert!(tasks_of(&store, "goal-1").is_empty());
+    assert!(tasks_of(&store, "goal-2").is_empty());
 }

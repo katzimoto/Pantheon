@@ -1,0 +1,49 @@
+name: Mutants
+
+# Proves Pantheon's tests are load-bearing by breaking the code on purpose and
+# requiring a named test to fail. This answers a question the Rust workflow
+# structurally cannot: not "is the tree sound" but "would the tests notice if it
+# stopped being".
+#
+# Deliberately a separate workflow rather than a stage of ./scripts/verify.sh.
+# The reason is recorded in AGENTS.md ("The one thing that is not in the gate"):
+# each mutant costs a scratch rebuild, and folding minutes of work into the gate
+# makes the gate something people avoid running. verify.sh remains the canonical
+# correctness gate and this never replaces, weakens, or depends on it.
+#
+# A surviving mutant is a test that does not check what it claims to. The fix is
+# always to strengthen the test, never to weaken or delete the mutant.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'tests/mutants.txt'
+      - 'scripts/check-mutants.sh'
+      - '.github/workflows/mutants.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: Mutants killed
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full-length commit SHA, the only immutable way to reference
+      # an action, and enforced by scripts/check-action-pins.sh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show pinned toolchain
+        run: rustc --version && cargo --version
+
+      # Exactly the command a developer runs locally, for the same reason the
+      # Verify job runs verify.sh unmodified: if this drifts from local
+      # behaviour, that is the defect.
+      - name: Kill every mutant
+        run: ./scripts/check-mutants.sh

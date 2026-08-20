@@ -23,13 +23,29 @@ complete or handing it off. It works from anywhere in the repository, and CI run
 the same command on Linux.
 
 It runs the GitHub Actions pin check, the documentation checks, the internal
-crate dependency check, formatting, Clippy with warnings denied, the tests, and
-rustdoc with warnings denied — all against the committed lockfile. It needs the
-pinned Rust toolchain and ordinary OS build prerequisites, and nothing else.
+crate dependency check, the store read-path check, formatting, Clippy with
+warnings denied, the tests, and rustdoc with warnings denied — all against the
+committed lockfile. It needs the pinned Rust toolchain and ordinary OS build
+prerequisites, and nothing else.
 
 `docs/development/implementation.md` states what each stage proves and what is
 deliberately excluded. A new check belongs in `scripts/verify.sh`, so that local
 and CI verification never drift into two different commands.
+
+### The one thing that is not in the gate
+
+`./scripts/check-mutants.sh` breaks the code on purpose and requires a named
+test to fail. It answers a question `verify.sh` structurally cannot: not
+"is the tree sound" but "would the tests notice if it stopped being". Those are
+different jobs, and the second one costs a scratch rebuild per mutant.
+
+It is therefore a second command, deliberately, and the reason is recorded here
+rather than assumed: folding minutes of work into the gate makes the gate
+something people avoid running, which costs more than a second command does. It
+runs in CI on any pull request touching `crates/`, and it is where evidence
+about a *fence* belongs — see `pantheon-pr-evidence`.
+
+Everything else still belongs in `verify.sh`.
 
 ## Agent skills and hooks
 
@@ -120,6 +136,18 @@ Solve the requested problem completely, and change almost nothing else.
 - Do not add a dependency without a stated need.
 - Do not broaden the acceptance criteria you were handed.
 
+### Claims about the substrate
+
+A comment asserting how SQLite, a dependency, or the operating system behaves
+is a claim, and it needs a test exactly as a claim about Pantheon does. Issue
+#26 shipped a helper documented as reading "one implicit read transaction",
+which SQLite does not provide; the guarantee resting on it did not hold, and
+nothing in the suite disagreed with the comment.
+
+Establish the fact with a probe, then pin it with a test that fails if the
+substrate changes under you. `crates/pantheon-store/src/substrate_tests.rs` is
+where the persistence ones live.
+
 ### Work discovered along the way
 
 Ask one question: is fixing this required to satisfy the current acceptance
@@ -143,6 +171,17 @@ whatever the code happens to do.
   cross-references and the architecture map consistent, per the rules in
   `docs/README.md`.
 - **Unexpected conflict.** Surface it, as described under Sources of truth.
+- **The contract is silent and you must choose.** This is not the same as a
+  contract you disagree with. When a canonical document does not determine
+  something the implementation cannot avoid deciding — a status code, a wire
+  spelling, what a digest is computed over — the mission that first implements
+  that surface writes the decision into the canonical document, with its
+  reasoning. Recording it only in rustdoc or a pull request leaves it
+  non-canonical, and the next mission re-derives or contradicts it.
+
+  A decision made under silence is still bounded by the mission's scope: choose
+  the narrowest thing that lets the work proceed, and say in the pull request
+  which choices you made and why.
 
 ## Finishing
 
