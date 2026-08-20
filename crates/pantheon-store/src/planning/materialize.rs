@@ -154,6 +154,18 @@ pub(crate) fn apply(
         )));
     }
 
+    // `goal_digest` covers the Goal's *content*, which does not include its
+    // id, and `goal_id` reaches the spec through the caller. So the spec's own
+    // Goal must be checked against the operation's directly, or a spec whose
+    // canonical `goalId` disagrees with its `task_specs.goal_id` column could
+    // be stored.
+    if plan.spec().goal_id != goal_id {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "plan names goal {:?}, but operation {operation_id} belongs to {goal_id:?}",
+            plan.spec().goal_id
+        )));
+    }
+
     // The proposal that materializes must be the one this operation recorded.
     // The PlanningRecord is provenance; this is what makes a materialized Task
     // auditable back to it, and stops a caller materializing a different

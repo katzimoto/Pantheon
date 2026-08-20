@@ -176,3 +176,26 @@ fn two_goals_with_identical_content_do_not_share_one_task_spec() {
         "no spec may be attributed to another Goal"
     );
 }
+
+#[test]
+fn a_plan_naming_another_goal_cannot_materialize_under_this_operation() {
+    // The Goal content digest does not cover the Goal's id, and the id reaches
+    // the spec through the caller, so the spec's own Goal is checked against
+    // the operation's directly.
+    let (_dir, store, seq) = store_with_configuration("goal-mismatched-id");
+    create_goal(&store, "goal-1", "cmd-goal-1");
+    create_goal(&store, "goal-2", "cmd-goal-2");
+    let op = plan_and_record(&store, "goal-1", seq, "op-1");
+
+    // Validated for goal-2, materialized under goal-1's operation.
+    let plan = validated_for("goal-2", seq, Digest::of(b"registry"), "unit-tests-v1");
+
+    let err = materialize(&store, &op, "task-1", &plan, "cmd-materialize")
+        .expect_err("a plan for another Goal must be refused");
+    assert!(
+        matches!(err, StoreError::InvariantViolated(ref d) if d.contains("belongs to")),
+        "unexpected: {err}"
+    );
+    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
+    assert!(store.tasks_for_goal("goal-2").expect("tasks").is_empty());
+}
