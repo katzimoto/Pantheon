@@ -8,7 +8,7 @@ use crate::error::StoreError;
 use crate::planning::PlanningState;
 use crate::planning::tests::{
     activate_configuration, command, create_goal, goal_spec, materialize, plan_and_record,
-    store_with_configuration, validated, validated_for,
+    store_with_configuration, validated,
 };
 use crate::store::Store;
 use crate::test_support::TempDir;
