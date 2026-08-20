@@ -339,4 +339,4 @@ fn digest(bytes: &[u8], column: &str) -> Result<Digest, StoreError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

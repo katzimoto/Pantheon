@@ -186,6 +186,156 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             SELECT 'singleton', 1, NULL
             WHERE NOT EXISTS (SELECT 1 FROM active_configuration WHERE id = 'singleton');",
     },
+    Migration {
+        version: 7,
+        name: "create_goal_planning_and_task_graph",
+        // Table and column shapes follow the canonical persistence contract's
+        // "Goal and Task", "Temporal TaskGraph" and "Planning" sections. The
+        // row-local CHECK constraints below are quoted from that contract
+        // rather than invented here.
+        sql: "CREATE TABLE goals (
+            id               TEXT    NOT NULL PRIMARY KEY,
+            phase            TEXT    NOT NULL CHECK (phase IN (
+                'Planning', 'Active', 'Evaluating', 'Finalizing',
+                'Succeeded', 'Failed', 'Cancelled')),
+            current_revision INTEGER NOT NULL CHECK (current_revision >= 1),
+            -- Carries a revision so lifecycle transitions are ordinary
+            -- revisioned CAS through the #17 primitive.
+            revision         INTEGER NOT NULL CHECK (revision > 0),
+            terminal_target  TEXT,
+            created_at       INTEGER NOT NULL,
+            -- Terminal-intent coherence: a crash cannot leave a Finalizing
+            -- Goal whose intended outcome must be guessed, and a terminal
+            -- Goal cannot retain a contradictory stale target.
+            CHECK (
+                (phase IN ('Planning', 'Active', 'Evaluating')
+                 AND terminal_target IS NULL)
+                OR (phase = 'Finalizing'
+                    AND terminal_target IN ('Succeeded', 'Failed', 'Cancelled'))
+                OR (phase IN ('Succeeded', 'Failed', 'Cancelled')
+                    AND terminal_target = phase)
+            )
+        ) STRICT;
+
+        CREATE TABLE goal_revisions (
+            goal_id        TEXT    NOT NULL REFERENCES goals(id),
+            revision       INTEGER NOT NULL CHECK (revision >= 1),
+            content_digest BLOB    NOT NULL CHECK (length(content_digest) = 32),
+            canonical_json TEXT    NOT NULL,
+            created_at     INTEGER NOT NULL,
+            PRIMARY KEY (goal_id, revision)
+        ) STRICT;
+
+        CREATE TABLE task_graphs (
+            -- One graph per Goal. `id` is the Goal id and `revision` is the
+            -- graph revision, so a graph patch is an ordinary revisioned CAS
+            -- rather than a bespoke compare. Starts at 0: a Goal has a graph
+            -- before it has any Task.
+            id       TEXT    NOT NULL PRIMARY KEY REFERENCES goals(id),
+            revision INTEGER NOT NULL CHECK (revision >= 0)
+        ) STRICT;
+
+        CREATE TABLE task_specs (
+            -- Immutable and content-addressed: the same compiled spec reached
+            -- twice is the same row.
+            digest                            BLOB    NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            goal_id                           TEXT    NOT NULL REFERENCES goals(id),
+            -- The Goal revision this Task was created from.
+            goal_revision                     INTEGER NOT NULL,
+            canonical_json                    TEXT    NOT NULL,
+            -- The acceptance contract identity later evaluation binds.
+            acceptance_digest                 BLOB    NOT NULL CHECK (length(acceptance_digest) = 32),
+            -- Evaluator resolution provenance, pinned at materialization. A
+            -- later registry change cannot reach back through this.
+            evaluator_registry_digest         BLOB    NOT NULL CHECK (length(evaluator_registry_digest) = 32),
+            configuration_activation_sequence INTEGER NOT NULL,
+            FOREIGN KEY (goal_id, goal_revision) REFERENCES goal_revisions(goal_id, revision)
+        ) STRICT;
+
+        CREATE TABLE tasks (
+            id                     TEXT    NOT NULL PRIMARY KEY,
+            goal_id                TEXT    NOT NULL REFERENCES goals(id),
+            -- The graph revision that created this Task.
+            created_graph_revision INTEGER NOT NULL,
+            phase                  TEXT    NOT NULL CHECK (phase IN (
+                'Pending', 'Ready', 'Active', 'Waiting', 'Evaluating',
+                'Finalizing', 'Succeeded', 'Failed', 'Cancelled', 'Superseded')),
+            revision               INTEGER NOT NULL CHECK (revision > 0),
+            terminal_target        TEXT,
+            terminal_reason_json   TEXT,
+            -- The responsible Run pointer. Always NULL in this mission; the
+            -- column exists because the canonical phase invariants below are
+            -- expressed in terms of it, and an MVP-only lifecycle a later
+            -- mission must replace is exactly what the mission forbids.
+            active_run_id          TEXT,
+            spec_digest            BLOB    NOT NULL REFERENCES task_specs(digest),
+            CHECK (
+                (phase IN ('Pending', 'Ready', 'Active', 'Waiting', 'Evaluating')
+                 AND terminal_target IS NULL)
+                OR (phase = 'Finalizing'
+                    AND terminal_target IN ('Succeeded', 'Failed', 'Cancelled', 'Superseded'))
+                OR (phase IN ('Succeeded', 'Failed', 'Cancelled', 'Superseded')
+                    AND terminal_target = phase)
+            ),
+            -- `Task Ready|Waiting => zero nonterminal Runs`, in the part
+            -- SQLite can express row-locally.
+            CHECK (phase NOT IN ('Ready', 'Waiting') OR active_run_id IS NULL),
+            CHECK (phase != 'Active' OR active_run_id IS NOT NULL)
+        ) STRICT;
+
+        CREATE TABLE task_graph_edges (
+            -- Temporal, never deleted: active at revision R when
+            -- created <= R and removed is null or > R. No edge exists in this
+            -- mission, but deletion-by-row-removal is the kind of MVP-only
+            -- model a later mission would have to replace.
+            goal_id                TEXT    NOT NULL REFERENCES task_graphs(id),
+            upstream_task_id       TEXT    NOT NULL REFERENCES tasks(id),
+            downstream_task_id     TEXT    NOT NULL REFERENCES tasks(id),
+            kind                   TEXT    NOT NULL CHECK (kind = 'requires_success'),
+            created_graph_revision INTEGER NOT NULL,
+            removed_graph_revision INTEGER,
+            CHECK (upstream_task_id != downstream_task_id),
+            CHECK (removed_graph_revision IS NULL
+                   OR removed_graph_revision > created_graph_revision)
+        ) STRICT;
+
+        CREATE TABLE planning_operations (
+            id                                TEXT    NOT NULL PRIMARY KEY,
+            goal_id                           TEXT    NOT NULL REFERENCES goals(id),
+            -- The exact Goal revision and graph precondition this decision was
+            -- frozen against. Materialization re-reads current state and
+            -- compares against these.
+            goal_revision                     INTEGER NOT NULL,
+            expected_graph_revision           INTEGER NOT NULL CHECK (expected_graph_revision >= 0),
+            trigger_kind                      TEXT    NOT NULL CHECK (trigger_kind IN ('initial')),
+            planning_input_digest             BLOB    NOT NULL CHECK (length(planning_input_digest) = 32),
+            -- Local deterministic planner provenance. The architecture names
+            -- only an external 'Planner Agent snapshot'; a local planner still
+            -- has to be identifiable to reproduce a decision.
+            planner_implementation            TEXT    NOT NULL,
+            planner_version                   TEXT    NOT NULL,
+            configuration_activation_sequence INTEGER NOT NULL,
+            -- Only the two states this mission's behaviour writes. A
+            -- rejection state arrives with the behaviour that records one.
+            state                             TEXT    NOT NULL CHECK (state IN (
+                'Planned', 'Materialized')),
+            revision                          INTEGER NOT NULL CHECK (revision > 0),
+            created_at                        INTEGER NOT NULL,
+            FOREIGN KEY (goal_id, goal_revision) REFERENCES goal_revisions(goal_id, revision)
+        ) STRICT;
+
+        CREATE TABLE planning_records (
+            -- One immutable normalized proposal per operation. It is evidence,
+            -- never authority: nothing reads this table to decide whether a
+            -- graph may be mutated.
+            planning_operation_id    TEXT    NOT NULL PRIMARY KEY
+                                             REFERENCES planning_operations(id),
+            proposal_digest          BLOB    NOT NULL CHECK (length(proposal_digest) = 32),
+            canonical_proposal       TEXT    NOT NULL,
+            normalization_provenance TEXT    NOT NULL,
+            created_at               INTEGER NOT NULL
+        ) STRICT;",
+    },
 ];
 
 /// Runs the production migration set against `conn`.
