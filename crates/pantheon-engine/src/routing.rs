@@ -193,14 +193,14 @@ impl From<SelectionError> for RoutingError {
 #[derive(Debug)]
 pub struct RoutingController<'store, 'authority> {
     store: &'store Store,
-    configuration: &'authority ConfigurationAuthority<'store>,
+    configuration: &'authority ConfigurationAuthority<&'store Store>,
 }
 
 impl<'store, 'authority> RoutingController<'store, 'authority> {
     #[must_use]
     pub const fn new(
         store: &'store Store,
-        configuration: &'authority ConfigurationAuthority<'store>,
+        configuration: &'authority ConfigurationAuthority<&'store Store>,
     ) -> Self {
         Self {
             store,

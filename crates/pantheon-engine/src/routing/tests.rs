@@ -122,11 +122,11 @@ fn prepared(label: &str, backend_enabled: bool, requires_keyed_launch: bool) -> 
     (dir, store)
 }
 
-fn loaded<'store>(
-    store: &'store Store,
+fn loaded(
+    store: &Store,
     backend_enabled: bool,
     requires_keyed_launch: bool,
-) -> ConfigurationAuthority<'store> {
+) -> ConfigurationAuthority<&Store> {
     let authority = ConfigurationAuthority::new(store);
     authority
         .load(&SourceSet::single(
@@ -268,7 +268,7 @@ impl ExecutorBackend for FakeBackend {
 struct ReconfiguringBackend<'store, 'authority> {
     fake: FakeBackend,
     store: &'store Store,
-    authority: &'authority ConfigurationAuthority<'store>,
+    authority: &'authority ConfigurationAuthority<&'store Store>,
     changed: Cell<bool>,
 }
 
@@ -314,7 +314,7 @@ fn port<'a>(
 
 fn route(
     store: &Store,
-    authority: &ConfigurationAuthority<'_>,
+    authority: &ConfigurationAuthority<&Store>,
     task_id: &str,
     backends: &[ExecutorBackendPort<'_>],
 ) -> Result<pantheon_core::execution::RoutingResult, RoutingError> {
