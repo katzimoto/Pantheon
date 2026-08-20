@@ -1,6 +1,6 @@
 ---
 name: persistence-and-recovery-transaction-review
-description: Review or implement Pantheon's authoritative SQLite persistence and recovery work — authoritative `pantheon-store` mutations, schema/table families that carry authoritative or revisioned state, command/idempotency/Event Journal transactions, and recovery/reconciliation paths whose correctness depends on persisted evidence. Use to identify the invariant families a change touches, retrieve only the relevant sections of the canonical persistence/recovery contracts, and demand high-value concurrency, failure, replay, and recovery evidence. Do not use for pure read-only queries with no relevant invariant change, pure `pantheon-core` domain work, CLI presentation work, or unrelated Rust changes.
+description: Review or implement Pantheon's authoritative SQLite persistence and recovery work — authoritative `pantheon-store` mutations, schema/table families that carry authoritative or revisioned state, command/idempotency/Event Journal transactions, recovery/reconciliation paths whose correctness depends on persisted evidence, and reads that issue more than one statement whose answers must agree with each other. Use to identify the invariant families a change touches, retrieve only the relevant sections of the canonical persistence/recovery contracts, and demand high-value concurrency, failure, replay, and recovery evidence. Do not use for a single-statement read whose answer nothing else must agree with, pure `pantheon-core` domain work, CLI presentation work, or unrelated Rust changes.
 metadata:
   pantheon-authority: procedural-guidance-only
 ---
@@ -29,7 +29,11 @@ of:
   state, including a migration, an index, or a constraint;
 - a command, idempotency, or Event Journal transaction boundary;
 - a recovery or reconciliation path whose correctness depends on persisted
-  evidence (startup inventory, restore, crash reconciliation, fencing).
+  evidence (startup inventory, restore, crash reconciliation, fencing);
+- a read that issues more than one statement whose answers must agree with
+  each other — a list and the cursor it corresponds to, a resource
+  representation and the validator it is served under, a fence and the rows it
+  fences.
 
 ## Procedure
 
@@ -50,18 +54,25 @@ of:
    recovery, or atomicity property; name the concrete failing case the test
    exercises and prove the outcome of that case.
 
-4. **Keep transaction and schema design owned by the driving mission and the
+4. **When the change adds a fence, check it at the identity level, not only
+   the payload level.** Verifying that each stored payload matches its own
+   recorded digest proves the payloads are intact; it does not prove the
+   record is the one it claims to be. Ask what a swap of the whole record for
+   another internally consistent one would do, and require the fence to catch
+   that too.
+
+5. **Keep transaction and schema design owned by the driving mission and the
    canonical architecture.** If the mission does not specify a table, state
    machine, recovery policy, or schema rule, do not invent one to satisfy this
    checklist.
 
-5. **Keep this review distinct from independent review.** Applying this
+6. **Keep this review distinct from independent review.** Applying this
    checklist to your own change is implementation self-review. It is not an
    independent review, does not mechanically grade a pull request, and does not
    claim semantic acceptance on its own — see
    `docs/development/change-lifecycle.md` and `pantheon-independent-review`.
 
-6. **Finish through `./scripts/verify.sh`.** The canonical gate is
+7. **Finish through `./scripts/verify.sh`.** The canonical gate is
    `./scripts/verify.sh`, run and interpreted per
    `pantheon-change-verification`. Do not introduce a second verification
    command, a transaction test runner, an ORM, a database abstraction, or a
@@ -81,6 +92,7 @@ concern, and require the listed evidence shape.
 | Cardinality and uniqueness enforcement | enforces a "one per" or "at most one nonterminal" rule, or adds an index or CHECK constraint | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` "Goal and Task", "Run status", "Attempt and launch-contact state", "Planning", "Evaluation", "ResourceReservation" and "Invariant checker" | Establish which part of the rule is declared (partial unique index, CHECK) versus controller logic, and that both layers agree. Evidence: a test proves a second nonterminal row is rejected at the database layer, not only by the controller. |
 | Command identity and idempotent replay | executes an authoritative mutation under durable command identity, or appends Event Journal rows | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` "Commands", "Event Journal", "Named transaction families"; `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` "27. Backups and disaster recovery" (Operator command identity after restore) | Establish the identity scope, same-identity same-hash versus same-identity different-hash behaviour, stale-epoch fail-closed before row lookup, and one atomic commit of state, command outcome, and events. Evidence: replay returns the prior outcome without re-execution, a different-hash conflict, a stale-epoch rejection, and a failure before commit that leaves no state, no completed command, and no event. |
 | Restore-generation fencing | involves authority or idempotency a restored snapshot could rewind: commands, grants/tickets, broker operations, Agent Control sessions, the restore fence itself | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` "Disaster-restore authority fence (T0)", "Commands", "Agent Control", "Grants and broker operation redemption"; `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` "3. Installation identity, restore generation, and daemon incarnation" and "27. Backups and disaster recovery" | Establish what is generation-bound, where the current generation is compared, and that old-generation rows are fenced and never rewritten to current. Evidence: restore/recovery fencing cases — a consumed grant cannot redeem, a stale command epoch is rejected, an old-generation Agent Control session fails before request lookup. |
+| Multi-statement read consistency | issues two or more reads whose answers must agree with each other, or changes which transaction a read runs in | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` "SQLite operating rules"; `docs/architecture/operations/public-daemon-api-and-cli.md` "Gap-free list + Event watch" where a cursor is involved | Establish that the reads share **one explicit** read transaction. SQLite in autocommit gives each statement its own implicit transaction, so two statements in one helper can straddle a commit on the writer connection and return answers describing different states — and a comment claiming otherwise is not evidence. Evidence: a write committed between the two reads observed to be invisible to the second, plus a concurrency test asserting the derived invariant (every Event at or before the cursor has its row in the list; a fenced child is never shown beside an unfenced parent). |
 | Launch-contact certainty | crosses an external-effect boundary: Attempt launch, Planning or Evaluation call, Sandbox, broker operation, or any restore-mode negative evidence | `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md` "Attempt and launch-contact state", "Planning", "Evaluation", "Agent Control"; `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md` "9. External operation certainty" (including the restore-specific negative evidence rule) and "12. Execution and Sandbox recovery" | Establish the durable contact markers and their monotonicity, and that UNKNOWN contact authorizes no duplicate replacement work — including the restore rule that snapshot-only negative evidence is not post-snapshot proof of absence. Evidence: crash/reconciliation cases prove no overlapping replacement lineage is created while contact is ambiguous, and restore cases require fresh domain inspection before replacement work relies on a negative fact. |
 
 ## What this skill must not do
@@ -101,8 +113,10 @@ concern, and require the listed evidence shape.
 
 ## Non-triggers
 
-- A pure read-only query against existing schema with no relevant invariant
-  change.
+- A **single-statement** read against existing schema whose answer nothing
+  else must agree with. A read-only helper that issues more than one statement
+  is not covered by this exemption — see the multi-statement read consistency
+  family above.
 - Pure `pantheon-core` domain work with no persistence involvement.
 - CLI presentation work in `pantheon-cli`, or wire-format work in
   `pantheon-operator-protocol`.

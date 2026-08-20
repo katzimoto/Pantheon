@@ -27,6 +27,7 @@ cd "$root"
 ./scripts/check-action-pins.sh
 ./scripts/check-docs-links.sh
 ./scripts/check-crate-deps.sh
+./scripts/check-store-read-paths.sh
 ./scripts/check-skill-symlinks.sh
 ./scripts/check-skill-conformance.sh
 ./scripts/check-skill-conformance.sh --self-test

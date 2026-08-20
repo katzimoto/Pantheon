@@ -219,8 +219,17 @@ build prerequisites — no task runner, no test runner, no auditing tool, no oth
 language runtime.
 
 It runs the GitHub Actions pin check, the documentation checks, the crate
-dependency check, `cargo fmt --check`, workspace Clippy with warnings denied,
-workspace tests, and rustdoc with warnings denied, all with `--locked`.
+dependency check, the store read-path check, `cargo fmt --check`, workspace
+Clippy with warnings denied, workspace tests, and rustdoc with warnings denied,
+all with `--locked`.
+
+`scripts/check-store-read-paths.sh` refuses a public method on `Store` that
+nothing outside test code calls. Twice a review has found a durable fact stored,
+a read path for it present, and no caller — so the fence the schema implied did
+not exist. A `pub fn` with a caller in another crate is not dead code, and tests
+are not callers for this purpose. An unconsumed read path belongs in that
+script's allowlist with the reason it still exists, which turns an oversight into
+tracked debt.
 
 It does not use `--all-features`. A union of every feature is a configuration
 nobody ships: it hides real conflicts and reports failures in code paths no
@@ -230,6 +239,26 @@ CI job naming its combination.
 CI adds one job beyond this: `cargo test --workspace --locked` on macOS, which
 is a different OS and a different architecture. That is the portability claim
 Pantheon makes today. Windows is not supported.
+
+### Proving the tests are load-bearing
+
+```sh
+./scripts/check-mutants.sh
+```
+
+Applies each single-line edit in `tests/mutants.txt` to a scratch copy of the
+workspace and requires the named test to fail. A surviving mutant means that
+test does not check the property it claims to — strengthen the test, never the
+mutant.
+
+This is the one thing deliberately outside `verify.sh`, and `AGENTS.md` records
+why: it answers whether the tests would notice a regression, not whether the
+tree is currently sound, and it costs a scratch rebuild per mutant. It has its
+own CI workflow on pull requests touching `crates/`.
+
+Every entry exists because a real surviving mutant exposed a test that could not
+fail. Adding one is how a mission makes a claim about a fence durable rather
+than a claim in a pull request body that decays.
 
 ## Where to look
 

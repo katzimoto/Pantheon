@@ -8,7 +8,7 @@ use crate::error::StoreError;
 use crate::planning::PlanningState;
 use crate::planning::tests::{
     activate_configuration, command, create_goal, goal_spec, materialize, plan_and_record,
-    store_with_configuration, validated,
+    store_with_configuration, tasks_of, validated,
 };
 use crate::store::Store;
 use crate::test_support::TempDir;
@@ -53,7 +53,7 @@ fn a_stale_goal_revision_cannot_materialize() {
     );
 
     assert!(
-        store.tasks_for_goal("goal-1").expect("tasks").is_empty(),
+        tasks_of(&store, "goal-1").is_empty(),
         "a stale plan must not create a Task"
     );
     assert_eq!(
@@ -94,7 +94,7 @@ fn a_stale_graph_revision_cannot_materialize() {
         ),
         "unexpected: {err}"
     );
-    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
+    assert!(tasks_of(&store, "goal-1").is_empty());
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn a_configuration_change_since_planning_cannot_materialize() {
         ),
         "unexpected: {err}"
     );
-    assert!(store.tasks_for_goal("goal-1").expect("tasks").is_empty());
+    assert!(tasks_of(&store, "goal-1").is_empty());
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn one_planning_decision_cannot_materialize_twice() {
         "unexpected: {err}"
     );
     assert_eq!(
-        store.tasks_for_goal("goal-1").expect("tasks").len(),
+        tasks_of(&store, "goal-1").len(),
         1,
         "still exactly one Task"
     );
@@ -188,7 +188,7 @@ fn replaying_the_command_identities_creates_no_duplicate_authority() {
     assert!(!replayed_materialize.was_executed());
 
     // Exactly one of everything.
-    assert_eq!(store.tasks_for_goal("goal-1").expect("tasks").len(), 1);
+    assert_eq!(tasks_of(&store, "goal-1").len(), 1);
     assert_eq!(
         store
             .task_graph("goal-1")
@@ -232,10 +232,7 @@ fn a_failure_during_materialization_leaves_the_graph_untouched() {
         .expect_err("the injected failure aborts the patch");
     assert!(matches!(err, StoreError::InvariantViolated(ref d) if d == "injected"));
 
-    assert!(
-        store.tasks_for_goal("goal-1").expect("tasks").is_empty(),
-        "no Task may survive"
-    );
+    assert!(tasks_of(&store, "goal-1").is_empty(), "no Task may survive");
     assert_eq!(
         store
             .task_graph("goal-1")
@@ -285,7 +282,7 @@ fn reopening_preserves_the_goal_graph_and_task_authority() {
         let op = plan_and_record(&store, "goal-1", seq, "op-1");
         let plan = validated(seq, Digest::of(b"registry"), "unit-tests-v1");
         materialize(&store, &op, "task-1", &plan, "cmd-materialize").expect("commits");
-        let task = store.tasks_for_goal("goal-1").expect("tasks").remove(0);
+        let task = tasks_of(&store, "goal-1").remove(0);
         let graph = store.task_graph("goal-1").expect("graph").expect("exists");
         let spec = store
             .task_spec_json(task.spec_digest)
@@ -296,7 +293,7 @@ fn reopening_preserves_the_goal_graph_and_task_authority() {
     };
 
     let store = Store::open(&path).expect("reopen");
-    let task = store.tasks_for_goal("goal-1").expect("tasks").remove(0);
+    let task = tasks_of(&store, "goal-1").remove(0);
     assert_eq!(task, before_task, "the Task survives reopen exactly");
     assert_eq!(task.phase, TaskPhase::Ready);
     assert_eq!(

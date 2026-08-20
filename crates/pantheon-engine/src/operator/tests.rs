@@ -511,8 +511,10 @@ fn a_planning_record_that_does_not_reproduce_its_proposal_stops_materialization(
     assert!(
         fixture
             .store
-            .tasks_for_goal(&goal_id)
-            .expect("tasks")
+            .goal_detail(&goal_id)
+            .expect("read")
+            .expect("goal exists")
+            .tasks
             .is_empty()
     );
 }

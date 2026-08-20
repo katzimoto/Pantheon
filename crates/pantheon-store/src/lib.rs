@@ -58,6 +58,9 @@ mod operator;
 mod planning;
 mod policy;
 mod store;
+/// Assumptions about SQLite that Pantheon's correctness rests on.
+#[cfg(test)]
+mod substrate_tests;
 mod transaction;
 
 #[cfg(test)]
