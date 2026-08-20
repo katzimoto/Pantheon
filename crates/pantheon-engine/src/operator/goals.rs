@@ -102,25 +102,15 @@ impl<S: Borrow<Store>> OperatorService<'_, S> {
             &goal_id,
         )?;
 
-        // Re-derive the proposal and check it against the one the planning
-        // transaction durably recorded. The recorded digest is authority
-        // provenance, and provenance nothing ever reads is not a fence at
-        // all: without this, a change that broke DIRECT determinism would
-        // materialize a Task from a proposal no PlanningRecord describes.
+        // Re-derive the proposal the planning transaction recorded. DIRECT
+        // planning is deterministic, so the same authoritative state yields
+        // the same proposal — but this call does not *rely* on that. The
+        // store compares the plan's proposal digest against the recorded
+        // PlanningRecord inside the materializing transaction, so a break in
+        // determinism is refused there rather than trusted here. Checking it
+        // again in this layer would be a second, weaker copy of a fence that
+        // already exists in the only place it can be authoritative.
         let proposal = planning.proposal(&goal_id)?;
-        let (recorded, _) = self
-            .store
-            .planning_record_proposal(&operation_id)?
-            .ok_or_else(|| {
-                OperatorError::Internal(format!(
-                    "planning operation {operation_id} recorded no proposal"
-                ))
-            })?;
-        if recorded != proposal.digest() {
-            return Err(OperatorError::Internal(format!(
-                "the proposal for {goal_id} no longer reproduces its recorded digest {recorded}"
-            )));
-        }
 
         let materialize = command.step("goal-materialize");
         planning.materialize(

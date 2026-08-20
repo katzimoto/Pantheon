@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 
 use crate::socket::{DIRECTORY_MODE, SOCKET_MODE, SocketError, bind};
 
+/// The modes asserted below are written out rather than taken from the
+/// constants they check. A test that compared a constant with itself would
+/// pass no matter what the constant was changed to, which is exactly the
+/// change worth catching.
+const OWNER_ONLY_DIRECTORY: u32 = 0o700;
+const OWNER_ONLY_SOCKET: u32 = 0o600;
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -46,8 +53,17 @@ async fn the_socket_and_its_directory_are_reachable_only_by_their_owner() {
     let socket = dir.socket();
     let listener = bind(&socket).await.expect("binds");
 
-    assert_eq!(mode(socket.parent().expect("parent")), DIRECTORY_MODE);
-    assert_eq!(mode(&socket), SOCKET_MODE);
+    assert_eq!(mode(socket.parent().expect("parent")), OWNER_ONLY_DIRECTORY);
+    assert_eq!(mode(&socket), OWNER_ONLY_SOCKET);
+    // And the constants the implementation applies are those modes, so a
+    // change to either is caught here rather than at whatever reads them.
+    assert_eq!(DIRECTORY_MODE, OWNER_ONLY_DIRECTORY);
+    assert_eq!(SOCKET_MODE, OWNER_ONLY_SOCKET);
+    assert_eq!(
+        mode(&socket) & 0o077,
+        0,
+        "no group or other permission may remain on the operator socket"
+    );
     drop(listener);
 }
 
@@ -63,7 +79,12 @@ async fn a_directory_left_loose_is_tightened_before_the_socket_appears() {
     assert_eq!(mode(parent), 0o777);
 
     let listener = bind(&socket).await.expect("binds");
-    assert_eq!(mode(parent), DIRECTORY_MODE);
+    assert_eq!(mode(parent), OWNER_ONLY_DIRECTORY);
+    assert_eq!(
+        mode(parent) & 0o077,
+        0,
+        "the directory is the gate; nothing outside the owner may traverse it"
+    );
     drop(listener);
 }
 

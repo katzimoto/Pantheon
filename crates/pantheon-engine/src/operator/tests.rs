@@ -2,9 +2,10 @@
 //! makes a retried request idempotent, and readiness reports only what this
 //! build can establish.
 
+use pantheon_core::config::Digest;
 use pantheon_core::planning::goal::{Deliverable, GoalConstraints, GoalInput, GoalSpec};
 use pantheon_core::planning::{GoalPhase, TaskPhase};
-use pantheon_store::{Command, Store};
+use pantheon_store::{Command, PlanningDecision, ProposalRecord, Store};
 
 use crate::configuration::{ConfigurationAuthority, SourceSet};
 use crate::operator::{
@@ -315,6 +316,52 @@ fn the_goal_list_cursor_covers_everything_the_list_already_shows() {
 }
 
 #[test]
+fn a_partial_page_resumes_from_its_last_event_rather_than_from_the_head() {
+    // A page that reported the journal head as its next position would tell a
+    // paginating client to skip every Event it had just declined to return.
+    // The empty-page case cannot catch this: there, the head and the correct
+    // answer are the same value.
+    let fixture = Fixture::new("partial-page");
+    let authority = ConfigurationAuthority::new(&fixture.store);
+    activate(&fixture.store, &authority);
+    let service = OperatorService::new(&fixture.store, &authority);
+    let epoch = fixture.store.restore_generation().expect("generation");
+
+    let start = service.journal_head().expect("head");
+    service
+        .create_goal(&command(epoch.as_str(), "req-1", [2u8; 32]), &spec())
+        .expect("commits");
+
+    let all = service.events_after(&start, 64).expect("read");
+    assert!(
+        all.events.len() > 2,
+        "creating a Goal commits more than two Events: {}",
+        all.events.len()
+    );
+
+    let page = service.events_after(&start, 2).expect("read");
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(
+        page.next, page.events[1].cursor,
+        "a partial page resumes from its own last Event"
+    );
+    assert_ne!(
+        page.next,
+        service.journal_head().expect("head"),
+        "and not from the head, which is past the Events it did not return"
+    );
+
+    // Continuing from that position returns the rest with nothing skipped and
+    // nothing repeated.
+    let rest = service.events_after(&page.next, 64).expect("read");
+    assert_eq!(
+        rest.events.first().map(|event| event.cursor.sequence),
+        Some(page.events[1].cursor.sequence + 1)
+    );
+    assert_eq!(page.events.len() + rest.events.len(), all.events.len());
+}
+
+#[test]
 fn readiness_reports_what_this_build_cannot_establish_instead_of_asserting_it() {
     let fixture = Fixture::new("readiness");
     let authority = ConfigurationAuthority::new(&fixture.store);
@@ -372,6 +419,105 @@ fn the_system_view_separates_the_command_epoch_from_the_journal_epoch() {
 }
 
 #[test]
+fn a_planning_record_that_does_not_reproduce_its_proposal_stops_materialization() {
+    // Materialization takes the proposal the planning transaction recorded,
+    // and the store re-checks that inside its write transaction. This drives
+    // the operator create path onto a PlanningRecord whose digest is not what
+    // DIRECT re-derivation produces — what a break in planner determinism
+    // would look like — and proves the fence refuses it rather than
+    // materializing a Task no PlanningRecord describes.
+    let fixture = Fixture::new("proposal-fence");
+    let authority = ConfigurationAuthority::new(&fixture.store);
+    activate(&fixture.store, &authority);
+    let service = OperatorService::new(&fixture.store, &authority);
+    let epoch = fixture.store.restore_generation().expect("generation");
+    let epoch = epoch.as_str();
+    let hash = [2u8; 32];
+
+    // Perform the first two steps by hand, under exactly the identities
+    // `create_goal` derives, so the real call replays them instead of
+    // executing them.
+    let goal_id = derive_goal_id(epoch, "req-1");
+    let operation_id = derive_command_id(epoch, "req-1", "plan");
+    fixture
+        .store
+        .create_goal(
+            &Command {
+                epoch,
+                id: &derive_command_id(epoch, "req-1", "goal-create"),
+                request_hash: &hash,
+                event_type: "goal.created",
+            },
+            &goal_id,
+            &spec(),
+        )
+        .expect("the goal commits");
+
+    let configuration = fixture
+        .store
+        .configuration_pointer()
+        .expect("pointer")
+        .active
+        .expect("active")
+        .activation_sequence;
+    fixture
+        .store
+        .record_direct_planning(
+            &Command {
+                epoch,
+                id: &derive_command_id(epoch, "req-1", "goal-plan"),
+                request_hash: &hash,
+                event_type: "planning.recorded",
+            },
+            &PlanningDecision {
+                operation_id: &operation_id,
+                goal_id: &goal_id,
+                goal_revision: 1,
+                expected_graph_revision: 0,
+                configuration_activation_sequence: configuration,
+                planning_input_digest: Digest::of(b"input"),
+                trigger_kind: "initial",
+                planner_implementation: "direct",
+                planner_version: "test",
+            },
+            &ProposalRecord {
+                // Not the proposal DIRECT produces for this Goal.
+                digest: Digest::of(b"a proposal nobody planned"),
+                canonical: "{}",
+                normalization_provenance: "direct/v1",
+            },
+        )
+        .expect("the planning record commits");
+
+    let err = service
+        .create_goal(
+            &CommandIdentity {
+                epoch: epoch.to_string(),
+                id: "req-1".to_string(),
+                request_hash: hash,
+            },
+            &spec(),
+        )
+        .expect_err("materialization must refuse a proposal the record does not describe");
+    // Reported as internal rather than as the caller's fault: the request was
+    // fine, and a PlanningRecord that does not describe its own proposal is a
+    // defect an operator can do nothing about.
+    assert!(
+        matches!(err, OperatorError::Internal(_)),
+        "unexpected: {err}"
+    );
+
+    // And nothing was materialized: the Goal still has no Task.
+    assert!(
+        fixture
+            .store
+            .tasks_for_goal(&goal_id)
+            .expect("tasks")
+            .is_empty()
+    );
+}
+
+#[test]
 fn derived_identities_are_stable_and_do_not_collide_across_steps_or_epochs() {
     // Every idempotency property in this module rests on these being a
     // function of the command identity alone.
@@ -384,6 +530,20 @@ fn derived_identities_are_stable_and_do_not_collide_across_steps_or_epochs() {
     assert_eq!(plan, derive_command_id("epoch-a", "req-1", "goal-plan"));
     assert_ne!(plan, derive_command_id("epoch-a", "req-1", "goal-create"));
     assert_ne!(plan, derive_command_id("epoch-b", "req-1", "goal-plan"));
+
+    // The step must reach the *digest*, not only the readable prefix. Two
+    // steps whose ids differ solely by that prefix would collide the moment
+    // the prefix was dropped or renamed, and the collision would be a
+    // sub-command replaying another step's outcome.
+    let digest_of = |step: &str| {
+        derive_command_id("epoch-a", "req-1", step)
+            .rsplit_once('-')
+            .expect("an id is <step>-<digest>")
+            .1
+            .to_string()
+    };
+    assert_ne!(digest_of("goal-plan"), digest_of("goal-create"));
+    assert_ne!(digest_of("goal-plan"), digest_of("goal-materialize"));
 
     // Canonical encoding, not concatenation: no split of the parts can be
     // read two ways.

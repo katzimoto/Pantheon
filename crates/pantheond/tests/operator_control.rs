@@ -68,12 +68,24 @@ async fn the_whole_operator_path_works_over_the_socket() {
     )
     .await;
     assert_eq!(cancelled.status, StatusCode::ACCEPTED);
+    // The ETag must move even though the semantic GoalRevision did not. This
+    // is the whole reason it is derived from the authoritative row revision:
+    // a cached representation of a Goal that has since been fenced is stale,
+    // and an ETag tracking goalRevision would still call it fresh.
+    assert_ne!(
+        cancelled.etag, created.etag,
+        "a lifecycle transition must invalidate the cached representation"
+    );
     let cancelled = cancelled.json();
     assert_eq!(cancelled["phase"], "Finalizing");
     assert_eq!(cancelled["tasks"][0]["phase"], "Finalizing");
     assert_eq!(
         cancelled["goalRevision"], goal["goalRevision"],
         "cancellation is a lifecycle transition, not a semantic revision"
+    );
+    assert_ne!(
+        cancelled["revision"], goal["revision"],
+        "but the authoritative row revision did advance"
     );
 
     // events: the cancellation is reachable from the cursor taken before it.
