@@ -5,5 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+# SHA-256 for canonical configuration component and revision digests.
+# `docs/architecture/operations/configuration-and-policy-revisions.md`
+# ("Canonical hashing") names sha256 digests as configuration identity, and the
+# SQLite operating rules require 32-byte SHA-256 digests as BLOBs where digests
+# are relational fields. Hand-rolling a cryptographic hash for identity that
+# binds authority decisions would be worse engineering than depending on the
+# vetted RustCrypto implementation. Default features are disabled: this crate
+# needs the one-shot digest and nothing else.
+sha2 = { version = "0.11.0", default-features = false }
+
 [lints]
 workspace = true

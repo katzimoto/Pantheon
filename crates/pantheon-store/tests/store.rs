@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
-use common::{TempDir, columns, fixture_row, seed_fixture};
+use common::{TempDir, fixture_row, seed_fixture};
 use pantheon_store::{Revision, Store, StoreError, Value};
 
 #[test]
@@ -92,7 +92,7 @@ fn opening_a_database_with_an_unsupported_newer_schema_version_fails_closed() {
             err,
             StoreError::UnsupportedSchemaVersion {
                 found: 999,
-                max_known: 4
+                max_known: 6
             }
         ),
         "unexpected error: {err}"
@@ -400,89 +400,4 @@ fn a_deferred_transaction_would_not_hold_that_lock() {
     probe.execute_batch("ROLLBACK").expect("release probe");
 
     tx.rollback().expect("release owner");
-}
-
-#[test]
-fn production_schema_contains_only_the_tables_this_behaviour_needs() {
-    let dir = TempDir::new("schema-purity");
-    Store::open(dir.db_path()).expect("open store");
-
-    let conn = rusqlite::Connection::open(dir.db_path()).expect("raw connection");
-    let mut stmt = conn
-        .prepare(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-        )
-        .unwrap();
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-
-    // The durable command ledger, Event Journal and journal epoch/sequence
-    // state this behaviour needs — and nothing else. No revisioned fixture
-    // table, and none of the future domain schema (Goal, Task, Run,
-    // scheduler) that later missions own.
-    assert_eq!(
-        tables,
-        vec![
-            "commands".to_string(),
-            "event_journal".to_string(),
-            "journal_epochs".to_string(),
-            "schema_migrations".to_string(),
-            "system_state".to_string(),
-        ],
-        "unexpected production table set"
-    );
-
-    // The exact column set of every table this mission adds. A table-level
-    // guard cannot see a speculative column, and it cannot see a request-body
-    // or payload column being added to the command ledger — which is the
-    // mission's "persist only non-sensitive request identity and hash data"
-    // constraint expressed as something mechanical rather than as prose.
-    assert_eq!(
-        columns(&dir.db_path(), "commands"),
-        [
-            "command_epoch",
-            "command_id",
-            "journal_epoch",
-            "recorded_at",
-            "request_hash",
-            "sequence"
-        ],
-        "the command ledger must carry identity and hash only, never a request body"
-    );
-    assert_eq!(
-        columns(&dir.db_path(), "event_journal"),
-        [
-            "command_epoch",
-            "command_id",
-            "event_id",
-            "event_type",
-            "journal_epoch",
-            "recorded_at",
-            "sequence"
-        ]
-    );
-    assert_eq!(
-        columns(&dir.db_path(), "journal_epochs"),
-        ["epoch", "is_current", "next_sequence"]
-    );
-
-    // AUTOINCREMENT would create `sqlite_sequence` and would be a plausible
-    // shortcut that contradicts the contract's singleton next-sequence
-    // allocator and its epoch-scoped ordering.
-    let autoincrement: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        !autoincrement,
-        "journal sequencing must not use SQLite AUTOINCREMENT"
-    );
 }

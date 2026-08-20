@@ -6,6 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The configuration vocabulary this crate persists. First internal edge in the
+# workspace; `docs/development/implementation.md` allows `pantheon-store ->
+# pantheon-core`, and it is declared here because real code needs it rather
+# than because the graph permits it.
+pantheon-core = { path = "../pantheon-core" }
+
 # Pantheon's vetted bundled SQLite: `bundled` compiles SQLite from source
 # instead of linking whatever the host happens to have installed, per
 # docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md

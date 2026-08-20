@@ -15,6 +15,15 @@
 //! A rule that has to read the database or call a backend to reach its answer
 //! is not a pure domain rule; it belongs in `pantheon-engine`.
 //!
-//! Nothing is implemented yet. The crate map, the allowed dependency graph and
-//! the rule for when a new crate is justified are in
-//! `docs/development/implementation.md`.
+//! # Current state
+//!
+//! [`config`] holds the configuration vocabulary: the canonical value form and
+//! its deterministic encoding, content [`config::Digest`]s, and the immutable
+//! compiled components a ConfigurationRevision is built from. Compiling a
+//! revision from source and activating it are effects and belong to
+//! `pantheon-engine`; storing one belongs to `pantheon-store`.
+//!
+//! The crate map, the allowed dependency graph and the rule for when a new
+//! crate is justified are in `docs/development/implementation.md`.
+
+pub mod config;

@@ -11,8 +11,8 @@ the architecture contract wins and the disagreement is a defect to report.
 ## Current state
 
 Most of the workspace is still scaffolding: every crate exists, compiles,
-documents its own boundary and is covered by the dependency checker, but only
-`pantheon-store` implements Pantheon behaviour so far — the authoritative
+documents its own boundary and is covered by the dependency checker.
+`pantheon-store` implements the authoritative
 SQLite store kernel described in
 `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`,
 together with that contract's state-dependent authoritative write mechanism:
@@ -23,15 +23,26 @@ durable command mutation kernel — restore-generation-scoped command identity,
 idempotent replay, deterministic conflict on a reused identity, and the Event
 Journal append and its sequence allocation committing in the same
 authoritative transaction.
-There is no scheduler, no backend and no endpoint yet, and the store's own
-schema is limited to migration bookkeeping, installation identity, and the
-command ledger, Event Journal and journal epoch/sequence state that kernel
-requires; the future conceptual production schema is not implemented ahead of
-the behaviour that needs it. Revisioned mutation and the command envelope are
-exercised against test-only fixture tables for that reason.
+`pantheon-core` holds the configuration vocabulary: the canonical value form
+whose encoding defines configuration identity, content digests, the immutable
+compiled components, and the compile/validate pipeline — all pure computation.
+`pantheon-engine` owns configuration publication: compiling a candidate,
+activating it through the store's command envelope, and keeping the
+process-local snapshot consistent with the durable active pointer. Those are
+the workspace's first internal crate edges: `pantheon-store -> pantheon-core`
+and `pantheon-engine -> pantheon-core, pantheon-store`.
 
-`pantheon-store` depends on `rusqlite` (bundled SQLite); every other crate
-still has no third-party dependencies. That remains a deliberate default for
+There is no scheduler, no backend and no endpoint yet. The store's schema is
+limited to migration bookkeeping, installation identity, the command ledger,
+Event Journal and journal epoch/sequence state, and the configuration
+component/revision/active-pointer families; the future conceptual production
+schema is not implemented ahead of the behaviour that needs it. Revisioned
+mutation and the command envelope are exercised against test-only fixture
+tables for that reason.
+
+`pantheon-store` depends on `rusqlite` (bundled SQLite) and `pantheon-core`
+depends on `sha2` for the SHA-256 configuration digests the configuration
+contract names; every other crate still has no third-party dependencies. That remains a deliberate default for
 a crate until real code needs one, not an oversight.
 
 ## Crate map
