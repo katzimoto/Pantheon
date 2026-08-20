@@ -40,9 +40,17 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "configuration_components".to_string(),
             "configuration_revisions".to_string(),
             "event_journal".to_string(),
+            "goal_revisions".to_string(),
+            "goals".to_string(),
             "journal_epochs".to_string(),
+            "planning_operations".to_string(),
+            "planning_records".to_string(),
             "schema_migrations".to_string(),
             "system_state".to_string(),
+            "task_graph_edges".to_string(),
+            "task_graphs".to_string(),
+            "task_specs".to_string(),
+            "tasks".to_string(),
         ],
         "unexpected production table set"
     );
@@ -106,6 +114,103 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "source_set_digest"
         ],
         "each component keeps its own digest column; no ambiguous catch-all hash"
+    );
+
+    // The Task carries only the bounded semantic outcome. No Logical Agent,
+    // backend, provider, model, runtime, credential, Workspace path,
+    // LaunchKey or dependency edge has a column here — the Task contract
+    // forbids each by name, and a column-level guard is what keeps a later
+    // mission from adding one quietly.
+    assert_eq!(
+        columns(&dir.db_path(), "tasks"),
+        [
+            "active_run_id",
+            "created_graph_revision",
+            "goal_id",
+            "id",
+            "phase",
+            "revision",
+            "spec_digest",
+            "terminal_reason_json",
+            "terminal_target"
+        ],
+        "the Task row is lifecycle state only"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "task_specs"),
+        [
+            "acceptance_digest",
+            "canonical_json",
+            "configuration_activation_sequence",
+            "digest",
+            "evaluator_registry_digest",
+            "goal_id",
+            "goal_revision"
+        ]
+    );
+    // Dependency relationships live on the graph, never on the spec.
+    assert_eq!(
+        columns(&dir.db_path(), "task_graph_edges"),
+        [
+            "created_graph_revision",
+            "downstream_task_id",
+            "goal_id",
+            "kind",
+            "removed_graph_revision",
+            "upstream_task_id"
+        ]
+    );
+    assert_eq!(columns(&dir.db_path(), "task_graphs"), ["id", "revision"]);
+    assert_eq!(
+        columns(&dir.db_path(), "goals"),
+        [
+            "created_at",
+            "current_revision",
+            "id",
+            "phase",
+            "revision",
+            "terminal_target"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "goal_revisions"),
+        [
+            "canonical_json",
+            "content_digest",
+            "created_at",
+            "goal_id",
+            "revision"
+        ]
+    );
+    // Local deterministic planning carries no external backend, metering or
+    // attempt lineage — those columns arrive with the behaviour that needs
+    // them, and `planning_attempts` does not exist at all.
+    assert_eq!(
+        columns(&dir.db_path(), "planning_operations"),
+        [
+            "configuration_activation_sequence",
+            "created_at",
+            "expected_graph_revision",
+            "goal_id",
+            "goal_revision",
+            "id",
+            "planner_implementation",
+            "planner_version",
+            "planning_input_digest",
+            "revision",
+            "state",
+            "trigger_kind"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "planning_records"),
+        [
+            "canonical_proposal",
+            "created_at",
+            "normalization_provenance",
+            "planning_operation_id",
+            "proposal_digest"
+        ]
     );
 
     // AUTOINCREMENT would create `sqlite_sequence` and would be a plausible

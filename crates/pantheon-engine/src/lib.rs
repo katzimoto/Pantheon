@@ -17,3 +17,4 @@
 //! Nothing is implemented yet. See `docs/development/implementation.md`.
 
 pub mod configuration;
+pub mod planning;

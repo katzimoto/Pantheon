@@ -32,10 +32,21 @@ process-local snapshot consistent with the durable active pointer. Those are
 the workspace's first internal crate edges: `pantheon-store -> pantheon-core`
 and `pantheon-engine -> pantheon-core, pantheon-store`.
 
-There is no scheduler, no backend and no endpoint yet. The store's schema is
-limited to migration bookkeeping, installation identity, the command ledger,
-Event Journal and journal epoch/sequence state, and the configuration
-component/revision/active-pointer families; the future conceptual production
+On top of that the three crates carry the first real semantic path: a bounded
+coding Goal, deterministic DIRECT planning into a durable PlanningOperation
+and immutable PlanningRecord, and validated materialization of one Goal-owned
+TaskGraph revision containing exactly one immutable Task in the canonical
+`Ready` phase. `pantheon-core` holds the Goal/Task/proposal vocabulary and the
+validation that turns a proposal into something materializable;
+`pantheon-store` owns the Goal, graph, Task and planning tables and the
+authoritative mutations; `pantheon-engine` runs the control path.
+
+There is no scheduler, no backend and no endpoint yet, and nothing creates a
+Run, an Attempt, a Workspace or a Sandbox. The store's schema is limited to
+migration bookkeeping, installation identity, the command ledger, Event
+Journal and journal epoch/sequence state, the configuration
+component/revision/active-pointer families, and the Goal, planning, TaskGraph
+and Task families that path requires; the future conceptual production
 schema is not implemented ahead of the behaviour that needs it. Revisioned
 mutation and the command envelope are exercised against test-only fixture
 tables for that reason.

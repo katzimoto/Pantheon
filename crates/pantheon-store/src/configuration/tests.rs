@@ -14,7 +14,7 @@ use crate::transaction::Revision;
 /// A minimal internally consistent configuration. Store-level evidence cares
 /// about identities and transitions, not component content, so this is
 /// deliberately the smallest thing that compiles.
-fn source(memory_limit: i64) -> String {
+pub(crate) fn source(memory_limit: i64) -> String {
     format!(
         r#"{{
   "agents": [{{"name":"builder","version":1,"accepts":["code-change"],"competencies":["rust"],
