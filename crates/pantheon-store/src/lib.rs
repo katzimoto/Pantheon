@@ -54,6 +54,7 @@ mod command;
 mod configuration;
 mod error;
 mod migrations;
+mod operator;
 mod planning;
 mod policy;
 mod store;
@@ -65,9 +66,10 @@ mod test_support;
 pub use command::{Command, Committed, JournalCursor};
 pub use configuration::{ActiveConfiguration, ConfigurationPointer};
 pub use error::StoreError;
+pub use operator::{Cursor, CursorError, EventRecord, GoalSnapshot};
 pub use planning::{
-    GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision, PlanningOperationRecord,
-    PlanningState, ProposalRecord, TaskRecord,
+    Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,
+    PlanningOperationRecord, PlanningState, ProposalRecord, TaskRecord,
 };
 pub use store::{RestoreGeneration, Store};
 pub use transaction::{Revision, Value, Writer};

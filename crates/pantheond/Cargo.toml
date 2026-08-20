@@ -5,5 +5,44 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+# The composition root names every concrete implementation exactly once.
+pantheon-engine = { path = "../pantheon-engine" }
+pantheon-operator-api = { path = "../pantheon-operator-api" }
+pantheon-store = { path = "../pantheon-store" }
+
+# The runtime the operator surface is served on. `signal` is what turns an
+# interrupt into a graceful shutdown rather than a killed process holding a
+# half-written transaction.
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+] }
+
+[dev-dependencies]
+# The end-to-end tests speak HTTP/1.1 over the real Unix socket, because that
+# is the only way to prove the transport an operator actually uses works. A
+# test that called the engine directly would prove nothing about it.
+http-body-util = "0.1.5"
+hyper = { version = "1.11.0", default-features = false, features = [
+    "client",
+    "http1",
+] }
+hyper-util = { version = "0.1.20", default-features = false, features = [
+    "client",
+    "client-legacy",
+    "http1",
+    "tokio",
+] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "process",
+    "time",
+] }
+
 [lints]
 workspace = true

@@ -309,6 +309,32 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Reads every matching row inside the same authoritative transaction.
+    ///
+    /// Same boundary and same reason as [`Writer::query_optional`]: a
+    /// transaction that must decide something about a *set* of rows — every
+    /// nonterminal Task of a Goal, say — has to see them on its own snapshot,
+    /// not on the read-only connection's older one. Rows are collected
+    /// eagerly so the statement is finalized before the caller issues the
+    /// mutations it decided on.
+    pub(crate) fn query_all<T>(
+        &self,
+        sql: &'static str,
+        params: &[Value],
+        map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, StoreError> {
+        let bound: Vec<rusqlite::types::Value> = params.iter().map(bind).collect();
+        let collect = || -> rusqlite::Result<Vec<T>> {
+            let mut stmt = self.tx.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(bound), map)?;
+            rows.collect()
+        };
+        match collect() {
+            Ok(values) => Ok(values),
+            Err(err) => self.fail(StoreError::Sqlite(err)),
+        }
+    }
+
     fn current_revision(&self, table: &str, id: &str) -> Result<Option<i64>, StoreError> {
         let sql = format!("SELECT {REVISION_COLUMN} FROM {table} WHERE {ID_COLUMN} = ?1");
         self.tx

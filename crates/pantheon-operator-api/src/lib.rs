@@ -15,5 +15,90 @@
 //! It does not own persistence either: it must reach durable state through the
 //! engine rather than talking to `pantheon-store` directly.
 //!
-//! Nothing is implemented yet, and no HTTP framework is a dependency yet. See
-//! `docs/development/implementation.md`.
+//! # Local only, structurally
+//!
+//! [`serve`] takes a filesystem path and binds a Unix-domain socket. There is
+//! no address type, no port, and no code path in this crate that constructs a
+//! TCP listener — the crate cannot fall back to one, because it never learned
+//! how. `docs/architecture/operations/public-daemon-api-and-cli.md` makes
+//! local-socket-only the MVP boundary, and the same-UID reachability a Unix
+//! socket gives is emphatically *not* the Agent/operator trust boundary a
+//! later mission establishes.
+//!
+//! # Blocking work
+//!
+//! Durable reads and writes are synchronous SQLite calls. Every handler that
+//! touches the store runs them on [`tokio::task::spawn_blocking`], so the
+//! serialized authoritative writer cannot stall the async executor that is
+//! also serving reads and Event streams.
+
+mod command;
+mod events;
+mod goals;
+mod problem;
+mod socket;
+mod system;
+
+pub use socket::{SocketError, serve};
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::routing::{get, post};
+use pantheon_engine::operator::{OperatorError, OperatorRuntime, RuntimeService};
+use pantheon_operator_protocol::API_PREFIX;
+
+/// The complete operator surface.
+///
+/// Returned as a plain [`Router`] so the whole API can be exercised in tests
+/// through `tower::Service` without binding a socket — and so the socket code
+/// below has nothing to do with what any route means.
+pub fn router(runtime: Arc<OperatorRuntime>) -> Router {
+    // Health is served both unversioned and under the version prefix. The
+    // canonical contract writes it both ways — `/health/live` in its
+    // health section, `/api/v1/health/live` in its read-endpoint list — and
+    // that internal disagreement is a documentation defect to report, not one
+    // for this crate to settle by picking a winner. Both paths resolve to the
+    // same handler, so neither spelling is made canonical here.
+    let health = Router::new()
+        .route("/health/live", get(system::live))
+        .route("/health/ready", get(system::ready));
+
+    let versioned = Router::new()
+        .route("/system", get(system::system))
+        .route("/health/live", get(system::live))
+        .route("/health/ready", get(system::ready))
+        .route("/goals", get(goals::list).post(goals::create))
+        .route("/goals/{goal_id}", get(goals::get))
+        .route("/goals/{goal_id}/actions/cancel", post(goals::cancel))
+        .route("/events", get(events::list))
+        .route("/events/watch", get(events::watch));
+
+    health
+        .merge(Router::new().nest(API_PREFIX, versioned))
+        .with_state(runtime)
+}
+
+/// Runs one durable operation off the async executor.
+///
+/// Every store call is synchronous SQLite. Running one directly in a handler
+/// would block a runtime thread for the duration of an authoritative
+/// transaction, and the authoritative writer is serialized — so one slow
+/// mutation would stall reads and Event streams that have nothing to do with
+/// it.
+async fn blocking<T, F>(
+    runtime: Arc<OperatorRuntime>,
+    operation: F,
+) -> Result<T, problem::ProblemResponse>
+where
+    T: Send + 'static,
+    F: FnOnce(RuntimeService<'_>) -> Result<T, OperatorError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || operation(runtime.service())).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(err.into()),
+        // The blocking task panicked or was cancelled. Nothing internal is
+        // disclosed: an operator can act on none of it.
+        Err(_) => Err(problem::internal()),
+    }
+}

@@ -83,6 +83,18 @@ pub enum StoreError {
     /// different request is a caller defect, not a retry, so it fails closed
     /// rather than executing or overwriting the durable identity.
     CommandConflict { command_id: String },
+    /// The Goal cannot be driven toward `Cancelled` from the phase it is in.
+    ///
+    /// Typed rather than a generic conflict because the two reasons are
+    /// different facts a caller must be able to tell apart from a stale
+    /// revision: a terminal Goal never reopens, and a Goal already finalizing
+    /// toward a different outcome would need a retarget transition the Goal
+    /// lifecycle contract does not grant. Nothing is written either way.
+    GoalNotCancellable {
+        goal_id: String,
+        phase: &'static str,
+        terminal_target: Option<String>,
+    },
     /// A connection Pantheon needs could not be used: the authoritative
     /// writer is poisoned by an earlier panic, or a caller attempted to
     /// re-enter the serialized authoritative writer it already holds.
@@ -109,6 +121,17 @@ impl fmt::Display for StoreError {
                 f,
                 "migration {version} ({name}) failed and was rolled back: {source}"
             ),
+            Self::GoalNotCancellable {
+                goal_id,
+                phase,
+                terminal_target,
+            } => match terminal_target {
+                Some(target) => write!(
+                    f,
+                    "goal {goal_id} is {phase} toward {target} and cannot be cancelled"
+                ),
+                None => write!(f, "goal {goal_id} is {phase} and cannot be cancelled"),
+            },
             Self::PolicyVerificationFailed(detail) => {
                 write!(f, "connection policy verification failed: {detail}")
             }
@@ -165,6 +188,7 @@ impl std::error::Error for StoreError {
             | Self::AlreadyOpen { .. }
             | Self::StaleCommandEpoch { .. }
             | Self::CommandConflict { .. }
+            | Self::GoalNotCancellable { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

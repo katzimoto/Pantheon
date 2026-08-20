@@ -267,8 +267,10 @@ pub(crate) fn digest_from(bytes: &[u8], column: &str) -> Result<Digest, StoreErr
     Ok(Digest::from_bytes(array))
 }
 
+pub use cancel::Cancellation;
 pub use materialize::MaterializedPlan;
 
+mod cancel;
 pub(crate) mod materialize;
 mod read;
 

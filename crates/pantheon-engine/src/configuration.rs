@@ -29,6 +29,7 @@
 //! not activated, and [`ConfigurationAuthority::status`] reports the drift for
 //! an operator to act on deliberately.
 
+use std::borrow::Borrow;
 use std::sync::{Mutex, PoisonError};
 
 use pantheon_core::config::compile::compile;
@@ -216,22 +217,33 @@ impl Snapshot {
 }
 
 /// Owns the process-local view of configuration authority.
+///
+/// Generic over how the store is held so that both a borrow and a shared
+/// owner work. A long-lived server needs the authority and the store to share
+/// one owner rather than one borrowing the other, and a test wants neither:
+/// `ConfigurationAuthority<&Store>` and `ConfigurationAuthority<Arc<Store>>`
+/// are the same type at different lifetimes, not two implementations.
 #[derive(Debug)]
-pub struct ConfigurationAuthority<'store> {
-    store: &'store Store,
+pub struct ConfigurationAuthority<S> {
+    store: S,
     /// The publication barrier. Held across commit and swap so the two cannot
     /// be observed out of step.
     published: Mutex<Option<Snapshot>>,
 }
 
-impl<'store> ConfigurationAuthority<'store> {
+impl<S: Borrow<Store>> ConfigurationAuthority<S> {
     /// Creates an authority with nothing published yet.
     #[must_use]
-    pub const fn new(store: &'store Store) -> Self {
+    pub const fn new(store: S) -> Self {
         Self {
             store,
             published: Mutex::new(None),
         }
+    }
+
+    /// The store this authority reads and commits through.
+    fn store(&self) -> &Store {
+        self.store.borrow()
     }
 
     /// Loads durable authority at startup and publishes it.
@@ -245,7 +257,7 @@ impl<'store> ConfigurationAuthority<'store> {
     /// Failing closed here is deliberate: serving authority-bearing work
     /// against a revision Pantheon cannot interpret is worse than not serving.
     pub fn load(&self, sources: &SourceSet) -> Result<ConfigurationStatus, ConfigurationError> {
-        let pointer = self.store.configuration_pointer()?;
+        let pointer = self.store().configuration_pointer()?;
         let Some(active) = pointer.active else {
             *self.lock()? = None;
             return Ok(ConfigurationStatus::Uninitialized);
@@ -295,10 +307,10 @@ impl<'store> ConfigurationAuthority<'store> {
         let source_digest = sources.digest();
 
         let mut published = self.lock()?;
-        let expected = self.store.configuration_pointer()?.revision;
+        let expected = self.store().configuration_pointer()?.revision;
 
         let committed =
-            self.store
+            self.store()
                 .activate_configuration(command, &compiled, source_digest, expected)?;
 
         // Same critical section as the commit. A failure above returns without
@@ -308,7 +320,7 @@ impl<'store> ConfigurationAuthority<'store> {
             // A replay changed nothing durably, so the published snapshot must
             // not move either. Re-read rather than assume.
             Committed::Replayed { .. } => {
-                let pointer = self.store.configuration_pointer()?;
+                let pointer = self.store().configuration_pointer()?;
                 match pointer.active {
                     Some(active) => active,
                     None => return Ok(committed),
@@ -343,7 +355,7 @@ impl<'store> ConfigurationAuthority<'store> {
     ///
     /// [`ConfigurationError`] when durable state cannot be read.
     pub fn status(&self, sources: &SourceSet) -> Result<ConfigurationStatus, ConfigurationError> {
-        let pointer = self.store.configuration_pointer()?;
+        let pointer = self.store().configuration_pointer()?;
         let Some(active) = pointer.active else {
             return Ok(ConfigurationStatus::Uninitialized);
         };

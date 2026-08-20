@@ -5,5 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
+[dependencies]
+# The wire contract is JSON, and these types are its only definition. Default
+# features are disabled and `std` re-enabled explicitly: this crate has no
+# no_std ambition, but pinning the feature set means a future dependency
+# cannot quietly widen it. `derive` is what lets the field names in this crate
+# be the wire field names, rather than a second hand-written mapping that can
+# drift from them.
+serde = { version = "1.0.229", default-features = false, features = [
+    "derive",
+    "std",
+] }

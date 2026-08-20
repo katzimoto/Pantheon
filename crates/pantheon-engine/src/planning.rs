@@ -169,6 +169,31 @@ impl<'store> PlanningController<'store> {
             .materialize_plan(command, operation_id, task_id, &plan)?)
     }
 
+    /// The DIRECT proposal for the Goal's current authoritative state.
+    ///
+    /// Materialization takes the proposal that planning recorded, and this is
+    /// how a later transaction obtains it without carrying it in process
+    /// memory across a restart: DIRECT planning is deterministic, so the same
+    /// authoritative state yields the same proposal. The caller is expected
+    /// to check the result against the recorded `proposalDigest` rather than
+    /// trust that determinism held.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanningError::Configuration`] when the Goal, its graph or the
+    /// active configuration cannot be read.
+    pub fn proposal(&self, goal_id: &str) -> Result<Proposal, PlanningError> {
+        let context = self.context(goal_id)?;
+        Ok(direct::plan(&PlanningInput {
+            goal_id,
+            goal_revision: context.goal_revision,
+            goal: &context.goal,
+            expected_graph_revision: context.graph_revision,
+            configuration_activation_sequence: context.configuration_activation_sequence,
+            trigger: Trigger::Initial,
+        }))
+    }
+
     /// Validates a proposal against current authoritative state.
     ///
     /// Exposed so a caller can check a candidate without any possibility of
