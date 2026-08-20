@@ -366,3 +366,49 @@ fn the_action_vocabulary_is_the_canonical_one() {
         );
     }
 }
+
+#[test]
+fn a_process_spawning_agent_also_requires_control_plane_isolation() {
+    // The sandbox contract says "arbitrary shell/process execution" requires
+    // control-plane isolation. Reading that as shell-only would leave the same
+    // escape open under a different action name.
+    let trusted_host = variant(
+        r#""isolationClass": "CONTAINER""#,
+        r#""isolationClass": "TRUSTED_HOST""#,
+    )
+    .replacen(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["process.spawn", "filesystem.read"]"#,
+        1,
+    );
+    let err =
+        compile(&trusted_host).expect_err("process spawning on a trusted host must be rejected");
+    assert!(
+        matches!(err, ConfigError::IncompatibleCombination { ref detail } if detail.contains("process.spawn")),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn a_process_spawning_agent_needs_the_control_plane_guarantee_asserted() {
+    // Class alone is not proof: the profile must actually assert the guarantee.
+    let source = variant(
+        r#""guarantees": ["isolation.control-plane", "isolation.peer-workspaces"]"#,
+        r#""guarantees": ["isolation.peer-workspaces"]"#,
+    )
+    .replacen(
+        r#""sandboxRequirements": ["isolation.control-plane"]"#,
+        r#""sandboxRequirements": []"#,
+        1,
+    )
+    .replacen(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["process.spawn"]"#,
+        1,
+    );
+    let err = compile(&source).expect_err("a profile without the guarantee must be rejected");
+    assert!(
+        matches!(err, ConfigError::IncompatibleCombination { ref detail } if detail.contains("isolation.control-plane")),
+        "unexpected: {err}"
+    );
+}

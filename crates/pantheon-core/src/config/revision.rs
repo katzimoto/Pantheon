@@ -32,6 +32,22 @@ pub struct ComponentDigests {
 }
 
 impl ComponentDigests {
+    /// The revision identity these components produce under `compiler_version`.
+    ///
+    /// Taking the compiler version as a parameter rather than reading the
+    /// current constant is what lets a stored revision be re-derived and
+    /// checked on its own terms: the question at load time is whether the row
+    /// is internally consistent, not whether this build would have produced
+    /// it.
+    #[must_use]
+    pub fn revision_digest(self, compiler_version: &str) -> Digest {
+        Value::object([
+            ("compilerVersion", Value::string(compiler_version)),
+            ("components", self.to_value()),
+        ])
+        .digest()
+    }
+
     /// The canonical value the revision digest is taken over.
     fn to_value(self) -> Value {
         Value::object([
@@ -144,11 +160,7 @@ impl CompiledConfiguration {
     /// change — and not otherwise.
     #[must_use]
     pub fn revision_digest(&self) -> Digest {
-        Value::object([
-            ("compilerVersion", Value::string(COMPILER_VERSION)),
-            ("components", self.component_digests().to_value()),
-        ])
-        .digest()
+        self.component_digests().revision_digest(COMPILER_VERSION)
     }
 }
 

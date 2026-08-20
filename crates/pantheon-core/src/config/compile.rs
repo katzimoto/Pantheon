@@ -28,11 +28,16 @@ use crate::config::reader::{
 use crate::config::revision::CompiledConfiguration;
 use crate::config::validate;
 
-/// The action that requires control-plane isolation.
+/// The actions that require control-plane isolation.
 ///
-/// `sandbox-broker-and-isolation.md`: model-driven arbitrary shell/process
-/// execution requires `isolation.control-plane` by default.
-pub const SHELL_ACTION: &str = "shell.execute";
+/// `sandbox-broker-and-isolation.md` ("Mandatory control-plane isolation"):
+/// "Model-driven arbitrary shell/process execution requires
+/// `isolation.control-plane` by default." Both halves of "shell/process" are
+/// listed here — an Agent that can spawn arbitrary processes is not meaningfully
+/// less dangerous than one that can run arbitrary shell commands, and reading
+/// the rule as covering only the shell would leave the same escape open under
+/// a different action name.
+pub const CONTROL_PLANE_ACTIONS: &[&str] = &["shell.execute", "process.spawn"];
 
 /// The guarantee that names control-plane isolation.
 pub const CONTROL_PLANE_GUARANTEE: &str = "isolation.control-plane";

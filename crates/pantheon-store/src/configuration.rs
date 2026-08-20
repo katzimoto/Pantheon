@@ -203,7 +203,7 @@ fn read_revision_row(
     pointer_revision: Revision,
 ) -> Result<ActiveConfiguration, StoreError> {
     let row = conn.query_row(
-        "SELECT content_digest, source_set_digest, agents_digest, routing_digest,
+        "SELECT content_digest, source_set_digest, compiler_version, agents_digest, routing_digest,
                 execution_profile_digest, evaluator_registry_digest,
                 context_policy_digest, authorization_digest
          FROM configuration_revisions WHERE activation_sequence = ?1",
@@ -212,12 +212,13 @@ fn read_revision_row(
             Ok((
                 row.get::<_, Vec<u8>>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
                 row.get::<_, Vec<u8>>(4)?,
                 row.get::<_, Vec<u8>>(5)?,
                 row.get::<_, Vec<u8>>(6)?,
                 row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
             ))
         },
     );
@@ -234,13 +235,30 @@ fn read_revision_row(
     };
 
     let components = ComponentDigests {
-        agents: digest(&row.2, "agents_digest")?,
-        routing: digest(&row.3, "routing_digest")?,
-        execution_profile: digest(&row.4, "execution_profile_digest")?,
-        evaluator_registry: digest(&row.5, "evaluator_registry_digest")?,
-        context_policy: digest(&row.6, "context_policy_digest")?,
-        authorization: digest(&row.7, "authorization_digest")?,
+        agents: digest(&row.3, "agents_digest")?,
+        routing: digest(&row.4, "routing_digest")?,
+        execution_profile: digest(&row.5, "execution_profile_digest")?,
+        evaluator_registry: digest(&row.6, "evaluator_registry_digest")?,
+        context_policy: digest(&row.7, "context_policy_digest")?,
+        authorization: digest(&row.8, "authorization_digest")?,
     };
+    let content_digest = digest(&row.0, "content_digest")?;
+    let compiler_version = row.2;
+
+    // Verifying each component against its own digest column proves the
+    // payloads are intact, but not that the manifest as a whole is the
+    // revision it claims to be. Recomputing the revision identity from those
+    // component digests is what closes that gap: without it, a `content_digest`
+    // swapped to another valid revision would let a caller recover *that*
+    // revision's semantics while the durable component bindings still belong
+    // to this one — exactly the mixed generation the contract forbids.
+    let recomputed = components.revision_digest(&compiler_version);
+    if recomputed != content_digest {
+        return Err(StoreError::InvariantViolated(format!(
+            "revision {sequence} names content digest {content_digest}, but its components \
+             under compiler {compiler_version} produce {recomputed}"
+        )));
+    }
 
     // The configuration contract requires startup to verify the component
     // hashes, not merely to read them. Each stored component is re-digested
@@ -260,7 +278,7 @@ fn read_revision_row(
 
     Ok(ActiveConfiguration {
         activation_sequence: sequence,
-        content_digest: digest(&row.0, "content_digest")?,
+        content_digest,
         source_set_digest: digest(&row.1, "source_set_digest")?,
         components,
         pointer_revision,

@@ -368,3 +368,44 @@ fn a_component_stored_under_the_wrong_domain_fails_closed() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn a_revision_whose_content_digest_disagrees_with_its_components_fails_closed() {
+    // Component payloads can each be intact while the manifest as a whole is
+    // not the revision it claims to be. Without recomputing the revision
+    // identity from the component digests, a swapped `content_digest` would let
+    // a caller recover a different revision's semantics while the durable
+    // component bindings still belong to this one.
+    let dir = TempDir::new("cfg-tampered-manifest");
+    let path = dir.path().join("pantheon.db");
+    {
+        let store = Store::open(&path).expect("open store");
+        activate(&store, "cmd-1", 4000, Revision::new(1)).expect("activation");
+        store.close().expect("close");
+    }
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("raw connection");
+        // A different, well-formed 32-byte digest: every component row stays
+        // valid and individually verifiable.
+        let changed = conn
+            .execute(
+                "UPDATE configuration_revisions SET content_digest = ?1 WHERE activation_sequence = 1",
+                rusqlite::params![vec![0x5au8; 32]],
+            )
+            .expect("tamper with the revision manifest");
+        assert_eq!(
+            changed, 1,
+            "the tamper must have landed, or this proves nothing"
+        );
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    let err = store
+        .configuration_pointer()
+        .expect_err("a manifest that disagrees with its components must fail closed");
+    assert!(
+        matches!(err, StoreError::InvariantViolated(ref d) if d.contains("produce")),
+        "unexpected error: {err}"
+    );
+}

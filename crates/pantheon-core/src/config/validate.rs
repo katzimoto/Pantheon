@@ -14,7 +14,7 @@
 //!   profile must actually assert (`agent-manifest.md`,
 //!   `sandbox-broker-and-isolation.md`: "Profile names are desired policy, not
 //!   proof");
-//! - model-driven arbitrary shell execution requires
+//! - model-driven arbitrary shell *or process* execution requires
 //!   `isolation.control-plane`, which a trusted-host profile cannot assert
 //!   (`sandbox-broker-and-isolation.md`);
 //! - an evaluator version's profile must resolve, and every logical evaluator
@@ -28,7 +28,7 @@
 //! combination here is a deliberate choice: configuration that could never
 //! place its own Agent is not authority worth activating.
 
-use crate::config::compile::{CONTROL_PLANE_GUARANTEE, SHELL_ACTION};
+use crate::config::compile::{CONTROL_PLANE_ACTIONS, CONTROL_PLANE_GUARANTEE};
 use crate::config::error::ConfigError;
 use crate::config::model::IsolationClass;
 use crate::config::revision::CompiledConfiguration;
@@ -83,13 +83,17 @@ pub fn cross_references(compiled: &CompiledConfiguration) -> Result<(), ConfigEr
             }
         }
 
-        // Rule 3: an Agent that can run arbitrary shell commands must do so
-        // under control-plane isolation.
-        if agent.actions.iter().any(|action| action == SHELL_ACTION) {
+        // Rule 3: an Agent that can run arbitrary shell commands or spawn
+        // arbitrary processes must do so under control-plane isolation.
+        if let Some(action) = agent
+            .actions
+            .iter()
+            .find(|action| CONTROL_PLANE_ACTIONS.contains(&action.as_str()))
+        {
             if !profile.isolation_class.can_isolate_control_plane() {
                 return Err(ConfigError::IncompatibleCombination {
                     detail: format!(
-                        "agent {:?} may run {SHELL_ACTION} but profile {:?} is {}, which cannot isolate the control plane",
+                        "agent {:?} may run {action} but profile {:?} is {}, which cannot isolate the control plane",
                         agent.name,
                         profile.name,
                         profile.isolation_class.as_str()
@@ -103,7 +107,7 @@ pub fn cross_references(compiled: &CompiledConfiguration) -> Result<(), ConfigEr
             {
                 return Err(ConfigError::IncompatibleCombination {
                     detail: format!(
-                        "agent {:?} may run {SHELL_ACTION} but profile {:?} does not assert {CONTROL_PLANE_GUARANTEE}",
+                        "agent {:?} may run {action} but profile {:?} does not assert {CONTROL_PLANE_GUARANTEE}",
                         agent.name, profile.name
                     ),
                 });
