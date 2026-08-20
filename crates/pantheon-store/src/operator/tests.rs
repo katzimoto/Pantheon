@@ -234,24 +234,24 @@ fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals()
     // scheduled into the window. The window is two adjacent statements, so the
     // reader has to already be inside it.
     //
+    // The writer waits for the reader to publish its first observation before
+    // committing. An earlier version only checked afterwards that a pre-commit
+    // observation had happened and failed the test when it had not, which on a
+    // loaded or few-core machine is most of the time: CI macOS failed exactly
+    // that way, twice in a row, on an unrelated pull request. Waiting makes the
+    // precondition hold instead of reporting that it did not, so the assertion
+    // that used to guard it is deleted rather than relaxed — it could no longer
+    // fail, and a test that cannot fail is what `tests/mutants.txt` exists to
+    // keep out of this suite.
+    //
     // Observations are collected during the race and judged after it, so no
     // detection is lost to the sequence not yet being published.
     //
-    // Two residual flake directions, recorded so a future red run is read
-    // correctly rather than dismissed or chased:
-    //
-    //   - the `observations.len() > 48` assertion below fails on *correct*
-    //     code if the reader is never scheduled before the commit, because
-    //     then every observation is a post-commit one and the count lands
-    //     exactly on 48. That is the test declining to claim evidence it did
-    //     not gather, not the guarantee breaking;
-    //   - in the other direction, `scripts/check-mutants.sh` counts the mutant
-    //     killed only when every one of its `runs:` attempts fails, so a
-    //     single attempt in which all `GOALS` rounds happen to catch no
-    //     inconsistency reports a false SURVIVED for a test that is fine.
-    //
-    // Both are unlikely rather than impossible. If either shows up, the fix is
-    // more rounds, not a weaker assertion.
+    // One residual direction remains: `scripts/check-mutants.sh` counts a
+    // mutant killed only when every one of its `runs:` attempts fails, so an
+    // attempt in which all `GOALS` rounds happen to catch no inconsistency
+    // would report a false SURVIVED for a test that is fine. The fix for that
+    // is more rounds, never a weaker assertion.
     const GOALS: usize = 24;
     let (_dir, store, _sequence) = store_with_configuration("snapshot-race");
     let epoch = store.restore_generation().expect("generation");
@@ -260,6 +260,7 @@ fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals()
     for index in 0..GOALS {
         let created_at = std::sync::atomic::AtomicI64::new(i64::MAX);
         let committed = std::sync::atomic::AtomicBool::new(false);
+        let reading = std::sync::atomic::AtomicBool::new(false);
         let observations = std::sync::Mutex::new(Vec::new());
 
         std::thread::scope(|scope| {
@@ -271,11 +272,18 @@ fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals()
                         .lock()
                         .expect("observations")
                         .push((snapshot.goals.len(), snapshot.cursor.sequence));
+                    reading.store(true, std::sync::atomic::Ordering::Release);
                     if committed.load(std::sync::atomic::Ordering::Acquire) {
                         after += 1;
                     }
                 }
             });
+
+            // Yielding rather than spinning: on a single-core runner a busy
+            // wait here would keep the reader off the CPU it is waiting for.
+            while !reading.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
 
             let record = store
                 .create_goal(
@@ -294,10 +302,6 @@ fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals()
 
         let created_at = created_at.load(std::sync::atomic::Ordering::Acquire);
         let observations = observations.into_inner().expect("observations");
-        assert!(
-            observations.len() > 48,
-            "round {index}: the reader must have observed the Goal before the commit, not only after"
-        );
         for (listed, cursor) in observations {
             assert!(
                 cursor < created_at || listed == index + 1,
@@ -321,6 +325,13 @@ fn a_goal_detail_never_pairs_one_moments_phase_with_another_moments_tasks() {
     // that Goal — is cancelled, and the whole arrangement repeats. Spreading
     // the reader across many Goals instead would leave it looking at the
     // wrong one at the moment that matters.
+    //
+    // As in `a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals`,
+    // the writer waits for the reader to publish an observation before
+    // cancelling, so the reader is provably inside its loop when the
+    // cancellation lands. Checking that afterwards and failing when it had not
+    // happened made this test red on correct code whenever the machine was
+    // loaded enough to schedule the writer first.
     const GOALS: usize = 24;
     let (_dir, store, sequence) = store_with_configuration("detail-coherence");
     let epoch = store.restore_generation().expect("generation");
@@ -330,7 +341,7 @@ fn a_goal_detail_never_pairs_one_moments_phase_with_another_moments_tasks() {
         let id = format!("goal-{index:02}");
         crate::planning::cancel::tests::goal_with_ready_task(&store, sequence, &id);
 
-        let observed = std::sync::atomic::AtomicUsize::new(0);
+        let reading = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
                 // Read until the cancellation is visible, then a little
@@ -346,12 +357,18 @@ fn a_goal_detail_never_pairs_one_moments_phase_with_another_moments_tasks() {
                             detail.goal.phase
                         );
                     }
-                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    reading.store(true, std::sync::atomic::Ordering::Release);
                     if fenced {
                         after += 1;
                     }
                 }
             });
+
+            // Yielding rather than spinning: on a single-core runner a busy
+            // wait here would keep the reader off the CPU it is waiting for.
+            while !reading.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
 
             store
                 .cancel_goal(
@@ -366,10 +383,5 @@ fn a_goal_detail_never_pairs_one_moments_phase_with_another_moments_tasks() {
                 .expect("cancellation commits");
             reader.join().expect("the reader thread ran");
         });
-
-        assert!(
-            observed.load(std::sync::atomic::Ordering::Relaxed) > 64,
-            "{id}: the reader must have observed the Goal before the cancellation, not only after"
-        );
     }
 }
