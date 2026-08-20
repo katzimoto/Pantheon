@@ -2,13 +2,13 @@
 
 mod common;
 
-use common::VALID_SOURCE;
+use common::{VALID_SOURCE, variant};
 use pantheon_core::config::Digest;
 use pantheon_core::config::compile::compile;
 use pantheon_core::execution::{
     AgentResolutionError, BackendDescriptor, CandidateRejection, ConfigurationBinding,
-    ControllerSafetyFacts, ExecutionOffer, LaunchSemantics, ResolvedAgent, ResourceQuantity,
-    build_execution_request, resolve_agents, select_execution_candidate,
+    ControllerSafetyFacts, ExecutionOffer, LaunchSafety, LaunchSemantics, ResolvedAgent,
+    ResourceQuantity, build_execution_request, resolve_agents, select_execution_candidate,
     validate_execution_candidate,
 };
 use pantheon_core::planning::task::{
@@ -240,19 +240,72 @@ fn pins_and_exclusions_are_configuration_authority() {
 }
 
 #[test]
-fn request_identity_is_provider_neutral_and_agent_specific() {
-    let (compiled, agent) = resolved_agent();
-    let request = build_execution_request(
-        "task-1",
+fn policy_forbidden_agent_action_is_a_structured_rejection() {
+    let source = variant(
+        r#"{ "action": "shell.execute", "effect": "permit" }"#,
+        r#"{ "action": "shell.execute", "effect": "forbid" }"#,
+    );
+    let compiled = compile(&source).expect("an explicit forbid remains valid");
+    let error = resolve_agents(
         &task("code-change", &["rust"]),
-        &agent,
         &compiled,
         binding(&compiled),
     )
-    .expect("request builds");
+    .expect_err("the Agent action is forbidden by the authorization component");
+
+    assert!(matches!(
+        error,
+        AgentResolutionError::NoEligibleAgent { causes, .. }
+            if matches!(causes[0].reason, pantheon_core::execution::AgentRejectionReason::PolicyIncompatible { .. })
+    ));
+}
+
+#[test]
+fn request_identity_is_provider_neutral_and_agent_specific() {
+    let (compiled, agent) = resolved_agent();
+    let spec = task("code-change", &["rust"]);
+    let binding = binding(&compiled);
+    let request = build_execution_request("task-1", &spec, &agent, &compiled, binding)
+        .expect("request builds");
     let encoded = request.to_value().to_string();
 
     assert_eq!(request.agent.name, "builder");
+    assert_eq!(request.agent.version, 1);
+    assert_eq!(request.task_id, "task-1");
+    assert_eq!(request.task_spec_digest, spec.digest());
+    assert_eq!(request.task_type, "code-change");
+    assert_eq!(request.task_competencies, vec!["rust".to_string()]);
+    assert_eq!(
+        request.required_execution_features,
+        vec!["exec.shell".to_string()]
+    );
+    assert_eq!(request.min_context_tokens, 8000);
+    assert_eq!(
+        request.isolation_requirements,
+        vec!["isolation.control-plane".to_string()]
+    );
+    assert_eq!(
+        request.required_actions,
+        vec![
+            "filesystem.read".to_string(),
+            "filesystem.write".to_string(),
+            "shell.execute".to_string(),
+        ]
+    );
+    assert_eq!(request.configuration, binding);
+    assert_eq!(request.route_policy_digest, agent.route_policy.digest());
+    assert_eq!(
+        request.execution_profile_digest,
+        compiled.component_digests().execution_profile
+    );
+    assert_eq!(
+        request.sandbox_profile_digest,
+        agent.sandbox_profile.digest()
+    );
+    assert_eq!(request.launch_safety, LaunchSafety::KeyedRequired);
+    assert!(request.placement_constraints.is_empty());
+    assert!(request.resource_requirements.is_empty());
+
     assert!(!encoded.contains("provider"));
     assert!(!encoded.contains("model"));
     assert!(!encoded.contains("harness"));
@@ -511,6 +564,32 @@ fn feature_capacity_isolation_and_launch_mismatches_fail_closed() {
             &safety(false)
         ),
         Err(CandidateRejection::OfferRequestMismatch)
+    ));
+
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &keyed_descriptor,
+            &offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent),
+            false,
+            &safety(false)
+        ),
+        Err(CandidateRejection::BackendDisabled)
+    ));
+
+    let mut unavailable_descriptor = keyed_descriptor.clone();
+    unavailable_descriptor.available_for_offers = false;
+    assert!(matches!(
+        validate_execution_candidate(
+            &request,
+            &agent,
+            &unavailable_descriptor,
+            &offer(&request, "fake-local", 1, LaunchSemantics::KeyedIdempotent),
+            true,
+            &safety(false)
+        ),
+        Err(CandidateRejection::BackendUnavailable)
     ));
 }
 
