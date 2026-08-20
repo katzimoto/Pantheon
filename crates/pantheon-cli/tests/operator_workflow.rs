@@ -49,23 +49,17 @@ impl Fixture {
         std::fs::create_dir_all(&dir).expect("create the installation directory");
         std::fs::write(dir.join("configuration.json"), CONFIGURATION).expect("write configuration");
 
-        let socket = dir.join("s.sock");
-        let daemon = Command::new(daemon_binary())
-            .arg("--data-dir")
-            .arg(&dir)
-            .arg("--socket")
-            .arg(&socket)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start pantheond");
+        let daemon = Self::start_daemon(&dir);
 
         let fixture = Self {
             dir,
             daemon: Some(daemon),
         };
         for _ in 0..200 {
-            if fixture.socket().exists() && fixture.run(&["version"]).status.success() {
+            // `status` is used rather than `version` deliberately: `version`
+            // answers without the daemon, so it would report success against
+            // a socket file a killed daemon left behind.
+            if fixture.run(&["status"]).status.success() {
                 return fixture;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -77,6 +71,23 @@ impl Fixture {
         self.dir.join("s.sock")
     }
 
+    /// Stops the daemon and starts a new one over the same installation.
+    fn restart(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+        }
+        let replacement = Self::start_daemon(&self.dir);
+        self.daemon = Some(replacement);
+        for _ in 0..200 {
+            if self.run(&["status"]).status.success() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("pantheond did not resume serving");
+    }
+
     /// Runs `pantheon` against this daemon.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_pantheon"))
@@ -85,6 +96,21 @@ impl Fixture {
             .args(args)
             .output()
             .expect("run pantheon")
+    }
+
+    /// The returned child is stored in a `Fixture`, which kills and waits on
+    /// it in `Drop`. Returning it rather than spawning inline is what lets
+    /// `restart` reuse the same command.
+    fn start_daemon(dir: &Path) -> Child {
+        Command::new(daemon_binary())
+            .arg("--data-dir")
+            .arg(dir)
+            .arg("--socket")
+            .arg(dir.join("s.sock"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start pantheond")
     }
 
     fn stdout(&self, args: &[&str]) -> String {
@@ -275,4 +301,48 @@ fn the_cli_cannot_answer_from_anywhere_but_the_daemon() {
     // `version` is the one exception, because it is a fact about the binary.
     let version = fixture.run(&["version"]);
     assert!(version.status.success());
+}
+
+#[test]
+fn a_restart_leaves_the_cli_reading_and_watching_the_same_durable_goal() {
+    // The acceptance property a restart has to preserve: the Goal, the
+    // command epoch, and the client's journal position. None of it lives in
+    // either process's memory, so all three survive.
+    let mut fixture = Fixture::start("restart");
+
+    let before = fixture.json(GOAL_ARGS);
+    let goal_id = before["id"].as_str().expect("id").to_string();
+    let epoch_before = fixture.json(&["status"])["commandEpoch"].clone();
+    let cursor = fixture.json(&["goal", "list"])["snapshotCursor"]
+        .as_str()
+        .expect("cursor")
+        .to_string();
+
+    fixture.restart();
+
+    let epoch_after = fixture.json(&["status"])["commandEpoch"].clone();
+    assert_eq!(
+        epoch_before, epoch_after,
+        "an ordinary restart must not rotate the command epoch"
+    );
+    assert_eq!(
+        fixture.json(&["goal", "get", &goal_id]),
+        before,
+        "the Goal is exactly as it was"
+    );
+
+    // The cursor taken before the restart still resumes: a mutation after the
+    // restart is reachable from it, with nothing between lost.
+    fixture.stdout(&["goal", "cancel", &goal_id]);
+    let events = fixture.json(&["events", "list", "--after", &cursor]);
+    let events = events["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["eventType"], "goal.cancel.requested");
+
+    // And the retry fence still holds across the restart.
+    let mut args = vec!["--command-id", "across-restart"];
+    args.extend_from_slice(GOAL_ARGS);
+    let first = fixture.json(&args);
+    fixture.restart();
+    assert_eq!(fixture.json(&args), first);
 }
