@@ -236,6 +236,22 @@ fn a_concurrent_write_cannot_put_the_snapshot_cursor_ahead_of_the_listed_goals()
     //
     // Observations are collected during the race and judged after it, so no
     // detection is lost to the sequence not yet being published.
+    //
+    // Two residual flake directions, recorded so a future red run is read
+    // correctly rather than dismissed or chased:
+    //
+    //   - the `observations.len() > 48` assertion below fails on *correct*
+    //     code if the reader is never scheduled before the commit, because
+    //     then every observation is a post-commit one and the count lands
+    //     exactly on 48. That is the test declining to claim evidence it did
+    //     not gather, not the guarantee breaking;
+    //   - in the other direction, `scripts/check-mutants.sh` counts the mutant
+    //     killed only when every one of its `runs:` attempts fails, so a
+    //     single attempt in which all `GOALS` rounds happen to catch no
+    //     inconsistency reports a false SURVIVED for a test that is fine.
+    //
+    // Both are unlikely rather than impossible. If either shows up, the fix is
+    // more rounds, not a weaker assertion.
     const GOALS: usize = 24;
     let (_dir, store, _sequence) = store_with_configuration("snapshot-race");
     let epoch = store.restore_generation().expect("generation");

@@ -33,6 +33,21 @@
 #     with `}` at column zero;
 #   - a test-only block is preceded by `#[cfg(test)]` at column zero.
 #
+# Two limitations are deliberate, and stated here rather than discovered later:
+#
+#   - A caller is matched by method name, not by receiver type. A same-named
+#     method on another type — `Writer::revision_of` beside `Store::revision_of`
+#     — is counted as a caller of the `Store` one. Resolving the receiver would
+#     need type inference this script has no business doing, so instead the
+#     stale-entry error prints the matching lines: the direction that would
+#     otherwise go silent is a maintainer removing an allowlist entry the tool
+#     called stale, and they now see which line made it say so.
+#   - Integration tests under `crates/*/tests/` are not callers, for the same
+#     reason unit tests are not: a read path exercised only by a test that was
+#     written for it is exactly the shape this check exists to find. So a
+#     method reached only from `crates/pantheon-store/tests/` is still
+#     uncalled, and still needs an allowlist entry with its reason.
+#
 # Uses POSIX shell and standard POSIX utilities (find, awk, grep, sort, comm).
 #
 # Usage: scripts/check-store-read-paths.sh   (run from anywhere in the repository)
@@ -133,11 +148,24 @@ done <"$tmp.unlisted"
 
 # 2. An allowlist entry that is now called, or has stopped existing. Either way
 #    the reason recorded for it is no longer true.
+#
+#    The caller lines are printed rather than described, because the scan
+#    matches on method name alone and a same-named method on another type looks
+#    identical to it (see the limitation in the header). Reading the actual
+#    lines is what tells a maintainer whether the entry is really stale, or
+#    whether the receiver is a `Writer` and the entry must stay.
 comm -13 "$tmp.uncalled.sorted" "$tmp.allowed" >"$tmp.stale"
 while IFS= read -r fn; do
 	[ -n "$fn" ] || continue
 	printf 'ERROR: the allowlist in scripts/check-store-read-paths.sh names %s, which now has a caller or no longer exists.\nRemove the entry, and its recorded reason, so the list keeps describing only real debt.\n' \
 		"$fn" >&2
+	if grep -nHE "(\.|Store::)$fn\(" $(cat "$tmp.sources") >"$tmp.callers" 2>/dev/null &&
+		[ -s "$tmp.callers" ]; then
+		printf 'Matching lines — confirm the receiver is a `Store` before removing the entry:\n' >&2
+		head -5 "$tmp.callers" >&2
+	else
+		printf 'No matching lines: the method no longer exists.\n' >&2
+	fi
 	status=1
 done <"$tmp.stale"
 

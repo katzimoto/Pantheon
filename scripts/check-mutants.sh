@@ -148,19 +148,32 @@ printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find rep
 	run=1
 	while [ "$run" -le "$runs" ]; do
 		if (cd "$scratch/tree" && cargo test --locked $scope "$test" >"$scratch/out" 2>&1); then
-			killed=0
-			break
+			passed=1
+		else
+			passed=0
 		fi
 		# Distinguish a test that failed from a build that failed: a mutant
 		# that does not compile proves nothing about the test.
-		if grep -qE '^error(\[|:)' "$scratch/out" && ! grep -q '^test result: FAILED' "$scratch/out"; then
+		if [ "$passed" -eq 0 ] &&
+			grep -qE '^error(\[|:)' "$scratch/out" &&
+			! grep -q '^test result: FAILED' "$scratch/out"; then
 			printf 'ERROR [%s]: the mutant does not compile, so it proves nothing.\n' "$name" >&2
 			sed -n '/^error/,+6p' "$scratch/out" | head -12 >&2
 			exit 1
 		fi
+		# Both outcomes are meaningless unless the named test actually ran, so
+		# this is checked before the pass/fail decision rather than inside the
+		# failure branch. `cargo test` exits 0 for a filter that matches
+		# nothing: a renamed or mistyped `test:` key would otherwise take the
+		# pass branch and be reported as a surviving mutant, sending someone
+		# hunting a test weakness that does not exist.
 		if ! grep -q "^test .*$test" "$scratch/out"; then
 			printf 'ERROR [%s]: no test matching `%s` ran under `%s`.\n' "$name" "$test" "$scope" >&2
 			exit 1
+		fi
+		if [ "$passed" -eq 1 ]; then
+			killed=0
+			break
 		fi
 		run=$((run + 1))
 	done
