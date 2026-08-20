@@ -7,6 +7,7 @@ mod common;
 use common::{VALID_SOURCE, variant};
 use pantheon_core::config::ConfigError;
 use pantheon_core::config::compile::compile;
+use pantheon_core::config::revision::COMPILER_VERSION;
 
 #[test]
 fn the_mvp_source_compiles_to_the_components_the_slice_needs() {
@@ -53,8 +54,8 @@ fn source_formatting_does_not_change_semantic_identity() {
 
     // Whitespace and key order differ; semantics do not.
     let reformatted = VALID_SOURCE.replace("\n", " ").replace("  ", " ").replace(
-        r#"{ "name": "default", "ordering": ["featureMatch"], "tieBreak": "backendId" }"#,
-        r#"{"tieBreak":"backendId","ordering":["featureMatch"],"name":"default"}"#,
+        r#"{ "name": "default", "ordering": ["contextCapacity"], "tieBreak": "backendId" }"#,
+        r#"{"tieBreak":"backendId","ordering":["contextCapacity"],"name":"default"}"#,
     );
     let other = compile(&reformatted).expect("the reformatted source compiles");
 
@@ -410,5 +411,156 @@ fn a_process_spawning_agent_needs_the_control_plane_guarantee_asserted() {
     assert!(
         matches!(err, ConfigError::IncompatibleCombination { ref detail } if detail.contains("isolation.control-plane")),
         "unexpected: {err}"
+    );
+}
+
+#[test]
+fn agent_status_and_launch_safety_are_part_of_configuration_identity() {
+    let reference = compile(VALID_SOURCE).expect("reference compiles");
+    let changed = compile(&variant(
+        r#""version": 1,"#,
+        r#""version": 1, "enabled": false, "current": true,"#,
+    ))
+    .expect("status change compiles");
+    assert_ne!(
+        reference.component_digests().agents,
+        changed.component_digests().agents,
+        "Agent status is authority-bearing configuration"
+    );
+
+    let changed = compile(&variant(
+        r#""tieBreak": "backendId" }"#,
+        r#""tieBreak": "backendId", "requiresKeyedLaunch": false }"#,
+    ))
+    .expect("launch policy change compiles");
+    assert_ne!(
+        reference.component_digests().routing,
+        changed.component_digests().routing,
+        "launch safety is part of route policy identity"
+    );
+}
+
+#[test]
+fn invalid_agent_pin_and_conflicting_current_versions_are_rejected_before_activation() {
+    let unknown_pin = VALID_SOURCE.replacen(
+        r#""policies": ["#,
+        r#""agentPins":[{"name":"missing","version":1}],"policies": ["#,
+        1,
+    );
+    let err = compile(&unknown_pin).expect_err("an unknown pin is invalid");
+    assert!(
+        matches!(
+            err,
+            ConfigError::UnknownReference {
+                kind: "Agent version",
+                ..
+            }
+        ),
+        "unexpected: {err}"
+    );
+
+    let conflicting = VALID_SOURCE.replacen(
+        r#""agents": ["#,
+        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"]},"#,
+        1,
+    );
+    let err = compile(&conflicting).expect_err("two current versions are invalid");
+    assert!(
+        matches!(err, ConfigError::IncompatibleCombination { ref detail } if detail.contains("more than one current")),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn compiled_agent_declarations_reject_unknown_or_empty_manifest_fields() {
+    let unknown = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"], "unexpected": true"#,
+    );
+    let err = compile(&unknown).expect_err("unknown Agent fields are not authority");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref detail, .. } if detail.contains("unknown field")),
+        "unexpected: {err}"
+    );
+
+    let empty = variant(r#""accepts": ["code-change"]"#, r#""accepts": []"#);
+    let err = compile(&empty).expect_err("an Agent must declare applicability");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref path, .. } if path == "agents[0].accepts"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn agent_membership_order_does_not_change_compiled_identity() {
+    let reference = compile(VALID_SOURCE).expect("reference compiles");
+    let reordered = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["filesystem.write", "shell.execute", "filesystem.read"]"#,
+    );
+    let other = compile(&reordered).expect("reordered Agent compiles");
+    assert_eq!(
+        reference.component_digests().agents,
+        other.component_digests().agents
+    );
+    assert_eq!(reference.revision_digest(), other.revision_digest());
+}
+
+#[test]
+fn a_repeated_entry_in_a_set_valued_list_is_rejected() {
+    // These lists canonicalize as sorted sets, so a repeated entry would
+    // change the component digest without changing what the configuration
+    // means. Rejecting it keeps source and compiled identity in step, and
+    // matches the `uniqueItems` the Agent manifest schema already declares.
+    let source = variant(
+        r#""actions": ["shell.execute", "filesystem.read", "filesystem.write"]"#,
+        r#""actions": ["shell.execute", "filesystem.read", "shell.execute"]"#,
+    );
+    match compile(&source).expect_err("a repeated action is not a set") {
+        ConfigError::DuplicateIdentity { kind, id } => {
+            assert_eq!(kind, "agent action");
+            assert_eq!(id, "shell.execute");
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+}
+
+#[test]
+fn a_route_preference_key_outside_the_vocabulary_is_rejected_at_activation() {
+    // `featureMatch` is the specific key this rejects, and it is not an
+    // arbitrary example: candidate validation already fails closed on a
+    // missing required execution feature, so counting the matched ones can
+    // only restate how many the Agent asked for. A preference key that cannot
+    // express a preference has to fail at activation rather than quietly
+    // ordering nothing.
+    let source = variant(
+        r#""ordering": ["contextCapacity"]"#,
+        r#""ordering": ["featureMatch"]"#,
+    );
+    match compile(&source).expect_err("an unusable preference key is refused") {
+        ConfigError::InvalidValue { path, detail } => {
+            assert!(path.ends_with("ordering"), "unexpected path {path:?}");
+            assert!(
+                detail.contains("featureMatch"),
+                "unexpected detail {detail:?}"
+            );
+        }
+        other => panic!("unexpected rejection: {other:?}"),
+    }
+}
+
+#[test]
+fn the_compiler_version_is_part_of_revision_identity() {
+    // The constant exists so that a change to how Pantheon compiles
+    // configuration produces a different identity instead of two incompatible
+    // compilations both claiming one version. That only holds if the version
+    // actually reaches the digest.
+    let components = compile(VALID_SOURCE).expect("compiles").component_digests();
+
+    assert_ne!(
+        components.revision_digest("pantheon-config-v1"),
+        components.revision_digest(COMPILER_VERSION),
+        "the compiler version must reach the revision identity: a digest that \
+         ignores it lets two incompatible compilations claim one version"
     );
 }

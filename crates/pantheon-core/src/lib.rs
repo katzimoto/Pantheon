@@ -19,12 +19,15 @@
 //!
 //! [`config`] holds the configuration vocabulary: the canonical value form and
 //! its deterministic encoding, content [`config::Digest`]s, and the immutable
-//! compiled components a ConfigurationRevision is built from. Compiling a
-//! revision from source and activating it are effects and belong to
-//! `pantheon-engine`; storing one belongs to `pantheon-store`.
+//! compiled components a ConfigurationRevision is built from. [`execution`]
+//! holds pure Agent eligibility, provider-neutral requests/offers and
+//! pre-Run candidate selection. Compiling a revision from source and
+//! activating it are effects and belong to `pantheon-engine`; storing one
+//! belongs to `pantheon-store`.
 //!
 //! The crate map, the allowed dependency graph and the rule for when a new
 //! crate is justified are in `docs/development/implementation.md`.
 
 pub mod config;
+pub mod execution;
 pub mod planning;

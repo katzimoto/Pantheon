@@ -30,7 +30,7 @@
 
 use crate::config::compile::{CONTROL_PLANE_ACTIONS, CONTROL_PLANE_GUARANTEE};
 use crate::config::error::ConfigError;
-use crate::config::model::IsolationClass;
+use crate::config::model::{IsolationClass, LogicalAgentVersion};
 use crate::config::revision::CompiledConfiguration;
 
 /// Checks every cross-component reference in a compiled candidate.
@@ -48,7 +48,29 @@ pub fn cross_references(compiled: &CompiledConfiguration) -> Result<(), ConfigEr
         .map(|policy| policy.name.as_str())
         .collect();
 
+    let mut declared_agents = Vec::new();
+    let mut current_names = Vec::new();
     for agent in &compiled.agents().agents {
+        let identity = agent.identity();
+        if declared_agents.contains(&identity) {
+            return Err(ConfigError::DuplicateIdentity {
+                kind: "Agent version",
+                id: format!("{}@{}", identity.name, identity.version),
+            });
+        }
+        declared_agents.push(identity);
+        if agent.current {
+            if current_names.iter().any(|name| name == &agent.name) {
+                return Err(ConfigError::IncompatibleCombination {
+                    detail: format!(
+                        "Logical Agent {:?} declares more than one current version",
+                        agent.name
+                    ),
+                });
+            }
+            current_names.push(agent.name.clone());
+        }
+
         // Rule 1: the Agent's route policy must exist.
         if !route_policies.contains(&agent.route_policy.as_str()) {
             return Err(ConfigError::UnknownReference {
@@ -115,6 +137,28 @@ pub fn cross_references(compiled: &CompiledConfiguration) -> Result<(), ConfigEr
         }
     }
 
+    validate_agent_references(&declared_agents, &compiled.routing().agent_pins, "pin")?;
+    validate_agent_references(
+        &declared_agents,
+        &compiled.routing().agent_exclusions,
+        "exclusion",
+    )?;
+    for pin in &compiled.routing().agent_pins {
+        if compiled
+            .routing()
+            .agent_exclusions
+            .iter()
+            .any(|exclusion| exclusion == pin)
+        {
+            return Err(ConfigError::IncompatibleCombination {
+                detail: format!(
+                    "Agent {:?}@{} is both pinned and excluded",
+                    pin.name, pin.version
+                ),
+            });
+        }
+    }
+
     // Rule 4: every evaluator version's sandbox profile must exist.
     for version in &compiled.evaluators().versions {
         if !compiled
@@ -172,6 +216,23 @@ pub fn cross_references(compiled: &CompiledConfiguration) -> Result<(), ConfigEr
         }
     }
 
+    Ok(())
+}
+
+fn validate_agent_references(
+    declared: &[LogicalAgentVersion],
+    references: &[LogicalAgentVersion],
+    kind: &'static str,
+) -> Result<(), ConfigError> {
+    for reference in references {
+        if !declared.contains(reference) {
+            return Err(ConfigError::UnknownReference {
+                from: format!("routing Agent {kind}"),
+                kind: "Agent version",
+                id: format!("{}@{}", reference.name, reference.version),
+            });
+        }
+    }
     Ok(())
 }
 

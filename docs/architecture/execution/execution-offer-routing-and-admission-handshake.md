@@ -149,6 +149,22 @@ V1 ranking should remain deterministic/simple. Adaptive quality/scarcity learnin
 
 RoutePolicy is an immutable ConfigurationRevision component. Binding stores exact `routePolicyDigest`; it never uses an ambiguous generic `policyHash`.
 
+V1 RoutePolicy fields are compiled into the routing component and digested with
+it:
+
+```text
+priority          integer, higher preferred first, default 0
+ordering          list of preference keys from the closed v0.1.0 vocabulary
+                  (currently: contextCapacity)
+tieBreak          backendId | agentId
+requiresKeyedLaunch  boolean, default true
+```
+
+`requiresKeyedLaunch: true` (the default) demands `KEYED_IDEMPOTENT` offers;
+`false` admits `OBSERVATIONAL` offers only when the controller supplies outer
+duplicate-prevention evidence. Unknown preference or tie-break keys are
+rejected at activation rather than silently ignored by selection.
+
 ## Configuration fence
 
 Entire routing cycle captures one `configRevision` from Scheduler eligibility through T3.

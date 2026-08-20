@@ -18,8 +18,8 @@ use crate::config::error::ConfigError;
 use crate::config::model::{
     Agent, AgentComponent, AuthorizationComponent, AuthorizationRule, BackendRegistration,
     ContextComponent, EvaluatorComponent, EvaluatorKind, EvaluatorRef, EvaluatorVersion,
-    ExecutionComponent, IsolationClass, NetworkMode, RoutePolicy, RoutingComponent, RuleEffect,
-    SandboxProfile,
+    ExecutionComponent, IsolationClass, LogicalAgentVersion, NetworkMode, RoutePolicy,
+    RoutingComponent, RuleEffect, SandboxProfile,
 };
 use crate::config::parse;
 use crate::config::reader::{
@@ -71,6 +71,18 @@ pub const ACTIONS: &[&str] = &[
 /// policy denies `secret.read` non-approvably."
 pub const HARD_DENIED_ACTION: &str = "secret.read";
 
+/// The v0.1.0 route preference vocabulary. Unknown keys are rejected at
+/// activation rather than being silently ignored by selection.
+///
+/// `featureMatch` is deliberately absent: after the fail-closed feature
+/// checks every validated candidate already supports every required feature,
+/// so a match count cannot discriminate and would be a preference key with no
+/// semantics.
+pub const ROUTE_PREFERENCE_KEYS: &[&str] = &["contextCapacity"];
+
+/// The stable candidate identity keys accepted as route tie-breaks.
+pub const ROUTE_TIE_BREAK_KEYS: &[&str] = &["backendId", "agentId"];
+
 /// Compiles configuration source text.
 ///
 /// # Errors
@@ -106,12 +118,31 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
     let mut agents = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let prefix = format!("agents[{index}]");
+        reject_unknown_fields(
+            entry,
+            &prefix,
+            &[
+                "name",
+                "version",
+                "enabled",
+                "current",
+                "accepts",
+                "competencies",
+                "routePolicy",
+                "executionFeatures",
+                "minContextTokens",
+                "sandboxProfile",
+                "sandboxRequirements",
+                "actions",
+            ],
+        )?;
         let name = as_str(field(entry, &prefix, "name")?, &path(&prefix, "name"))?.to_string();
         non_empty(&name, &path(&prefix, "name"))?;
-        unique(&mut seen, "agent", &name)?;
 
         let version = as_i64(field(entry, &prefix, "version")?, &path(&prefix, "version"))?;
         positive(version, &path(&prefix, "version"))?;
+        let identity = format!("{name}@{version}");
+        unique(&mut seen, "Agent version", &identity)?;
         let min_context_tokens = as_i64(
             field(entry, &prefix, "minContextTokens")?,
             &path(&prefix, "minContextTokens"),
@@ -119,6 +150,7 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
         positive(min_context_tokens, &path(&prefix, "minContextTokens"))?;
 
         let actions = string_list(entry, &prefix, "actions")?;
+        unique_list(&actions, "agent action")?;
         for action in &actions {
             if !ACTIONS.contains(&action.as_str()) {
                 return Err(ConfigError::InvalidValue {
@@ -138,27 +170,44 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
             }
         }
 
+        let accepts = string_list(entry, &prefix, "accepts")?;
+        non_empty_list(&accepts, &path(&prefix, "accepts"))?;
+        unique_list(&accepts, "accepts entry")?;
+        let competencies = string_list(entry, &prefix, "competencies")?;
+        non_empty_list(&competencies, &path(&prefix, "competencies"))?;
+        unique_list(&competencies, "competency")?;
+
         agents.push(Agent {
             name,
             version: u32::try_from(version).map_err(|_| ConfigError::InvalidValue {
                 path: path(&prefix, "version"),
                 detail: "does not fit a 32-bit version".to_string(),
             })?,
-            accepts: string_list(entry, &prefix, "accepts")?,
-            competencies: string_list(entry, &prefix, "competencies")?,
+            enabled: optional_bool(entry, &prefix, "enabled", true)?,
+            current: optional_bool(entry, &prefix, "current", true)?,
+            accepts,
+            competencies,
             route_policy: as_str(
                 field(entry, &prefix, "routePolicy")?,
                 &path(&prefix, "routePolicy"),
             )?
             .to_string(),
-            execution_features: string_list(entry, &prefix, "executionFeatures")?,
+            execution_features: {
+                let features = string_list(entry, &prefix, "executionFeatures")?;
+                unique_list(&features, "execution feature")?;
+                features
+            },
             min_context_tokens,
             sandbox_profile: as_str(
                 field(entry, &prefix, "sandboxProfile")?,
                 &path(&prefix, "sandboxProfile"),
             )?
             .to_string(),
-            sandbox_requirements: string_list(entry, &prefix, "sandboxRequirements")?,
+            sandbox_requirements: {
+                let requirements = string_list(entry, &prefix, "sandboxRequirements")?;
+                unique_list(&requirements, "sandbox requirement")?;
+                requirements
+            },
             actions,
         });
     }
@@ -174,19 +223,41 @@ fn routing(value: &Value) -> Result<RoutingComponent, ConfigError> {
         let name = as_str(field(entry, &prefix, "name")?, &path(&prefix, "name"))?.to_string();
         non_empty(&name, &path(&prefix, "name"))?;
         unique(&mut seen, "route policy", &name)?;
+        let priority = optional_i64(entry, &prefix, "priority", 0)?;
+        let ordering = string_list(entry, &prefix, "ordering")?;
+        for key in &ordering {
+            if !ROUTE_PREFERENCE_KEYS.contains(&key.as_str()) {
+                return Err(ConfigError::InvalidValue {
+                    path: path(&prefix, "ordering"),
+                    detail: format!("unknown route preference key {key:?}"),
+                });
+            }
+        }
         let tie_break = as_str(
             field(entry, &prefix, "tieBreak")?,
             &path(&prefix, "tieBreak"),
         )?
         .to_string();
         non_empty(&tie_break, &path(&prefix, "tieBreak"))?;
+        if !ROUTE_TIE_BREAK_KEYS.contains(&tie_break.as_str()) {
+            return Err(ConfigError::InvalidValue {
+                path: path(&prefix, "tieBreak"),
+                detail: format!("unknown route tie-break key {tie_break:?}"),
+            });
+        }
         policies.push(RoutePolicy {
             name,
-            ordering: string_list(entry, &prefix, "ordering")?,
+            priority,
+            ordering,
             tie_break,
+            requires_keyed_launch: optional_bool(entry, &prefix, "requiresKeyedLaunch", true)?,
         });
     }
-    Ok(RoutingComponent { policies })
+    Ok(RoutingComponent {
+        policies,
+        agent_pins: agent_references(value, "agentPins")?,
+        agent_exclusions: agent_references(value, "agentExclusions")?,
+    })
 }
 
 fn execution(value: &Value) -> Result<ExecutionComponent, ConfigError> {
@@ -228,10 +299,13 @@ fn execution(value: &Value) -> Result<ExecutionComponent, ConfigError> {
         .to_string();
         non_empty(&environment_identity, &path(&prefix, "environmentIdentity"))?;
 
+        let guarantees = string_list(entry, &prefix, "guarantees")?;
+        unique_list(&guarantees, "sandbox guarantee")?;
+
         profiles.push(SandboxProfile {
             name,
             isolation_class,
-            guarantees: string_list(entry, &prefix, "guarantees")?,
+            guarantees,
             network_mode,
             environment_identity,
         });
@@ -438,4 +512,82 @@ fn authorization(value: &Value) -> Result<AuthorizationComponent, ConfigError> {
         })?,
         rules,
     })
+}
+
+fn optional_bool(
+    parent: &Value,
+    prefix: &str,
+    key: &str,
+    default: bool,
+) -> Result<bool, ConfigError> {
+    parent
+        .get(key)
+        .map_or(Ok(default), |value| as_bool(value, &path(prefix, key)))
+}
+
+fn optional_i64(parent: &Value, prefix: &str, key: &str, default: i64) -> Result<i64, ConfigError> {
+    parent
+        .get(key)
+        .map_or(Ok(default), |value| as_i64(value, &path(prefix, key)))
+}
+
+fn non_empty_list(values: &[String], at: &str) -> Result<(), ConfigError> {
+    if values.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            path: at.to_string(),
+            detail: "must contain at least one value".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Rejects duplicate entries in one set-valued list.
+///
+/// The set-semantics fields canonicalize as sorted sets for the component
+/// digest, and the manifest schema declares them `uniqueItems`, so a repeated
+/// entry is a malformed declaration, not a set with multiplicity.
+fn unique_list(values: &[String], kind: &'static str) -> Result<(), ConfigError> {
+    let mut seen = Vec::new();
+    for value in values {
+        unique(&mut seen, kind, value)?;
+    }
+    Ok(())
+}
+
+fn reject_unknown_fields(value: &Value, prefix: &str, allowed: &[&str]) -> Result<(), ConfigError> {
+    let Value::Object(fields) = value else {
+        return Ok(());
+    };
+    if let Some(unknown) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ConfigError::InvalidValue {
+            path: prefix.to_string(),
+            detail: format!("unknown field {unknown:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn agent_references(value: &Value, key: &str) -> Result<Vec<LogicalAgentVersion>, ConfigError> {
+    let at = path("routing", key);
+    let Some(raw) = value.get(key) else {
+        return Ok(Vec::new());
+    };
+    let entries = as_array(raw, &at)?;
+    let mut seen = Vec::new();
+    let mut references = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let prefix = format!("routing.{key}[{index}]");
+        let name = as_str(field(entry, &prefix, "name")?, &path(&prefix, "name"))?.to_string();
+        non_empty(&name, &path(&prefix, "name"))?;
+        let version = as_i64(field(entry, &prefix, "version")?, &path(&prefix, "version"))?;
+        positive(version, &path(&prefix, "version"))?;
+        let version = u32::try_from(version).map_err(|_| ConfigError::InvalidValue {
+            path: path(&prefix, "version"),
+            detail: "does not fit a 32-bit version".to_string(),
+        })?;
+        let identity = format!("{name}@{version}");
+        unique(&mut seen, "agent reference", &identity)?;
+        references.push(LogicalAgentVersion::new(name, version));
+    }
+    Ok(references)
 }

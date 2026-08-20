@@ -13,7 +13,11 @@
 #   - #24's scope-escalation test used a fixture that satisfied two rules at
 #     once, so either rule alone could rot unnoticed;
 #   - #26 had four survivors, including a permission test that compared each
-#     mode constant with itself.
+#     mode constant with itself;
+#   - #28's review fixes shipped with no tests at all, so three new fail-closed
+#     configuration rules had nothing that would notice if they stopped
+#     holding. Those entries were written from the fix rather than from a
+#     survivor, which is the cheaper order to discover the same thing in.
 #
 # Format: blank-line-separated records of `key: value`. Required keys are
 # name, file, find, replace, scope and test; `runs` (default 3) repeats a
@@ -182,3 +186,31 @@ find: .ok_or_else(|| OperatorError::CursorGone(format!("{text} is not a journal 
 replace: .map_or_else(head, Ok),
 scope: -p pantheond --test operator_control
 test: an_unreachable_journal_position_is_reported_rather_than_restarted_from_the_head
+
+name: agent-action-duplicates-accepted
+file: crates/pantheon-core/src/config/compile.rs
+find: unique_list(&actions, "agent action")?;
+replace: let _ = &actions;
+scope: -p pantheon-core --test configuration
+test: a_repeated_entry_in_a_set_valued_list_is_rejected
+
+name: route-preference-vocabulary-reopened
+file: crates/pantheon-core/src/config/compile.rs
+find: = &["contextCapacity"];
+replace: = &["contextCapacity", "featureMatch"];
+scope: -p pantheon-core --test configuration
+test: a_route_preference_key_outside_the_vocabulary_is_rejected_at_activation
+
+name: compiler-version-not-in-revision-identity
+file: crates/pantheon-core/src/config/revision.rs
+find: ("compilerVersion", Value::string(compiler_version)),
+replace: ("compilerVersion", Value::string("pinned")),
+scope: -p pantheon-core --test configuration
+test: the_compiler_version_is_part_of_revision_identity
+
+name: configuration-fence-compares-a-subset
+file: crates/pantheon-core/src/execution.rs
+find: && self.component_digests == other.component_digests
+replace: && other.component_digests == other.component_digests
+scope: -p pantheon-core --test execution
+test: configuration_binding_compares_every_component_not_a_chosen_few

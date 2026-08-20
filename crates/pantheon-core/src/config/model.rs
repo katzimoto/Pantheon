@@ -42,11 +42,34 @@ pub struct AgentComponent {
     pub agents: Vec<Agent>,
 }
 
+/// The immutable semantic identity of one Logical Agent version.
+///
+/// This identity deliberately contains no execution-fabric or provider data.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LogicalAgentVersion {
+    pub name: String,
+    pub version: u32,
+}
+
+impl LogicalAgentVersion {
+    #[must_use]
+    pub fn new(name: impl Into<String>, version: u32) -> Self {
+        Self {
+            name: name.into(),
+            version,
+        }
+    }
+}
+
 /// One Logical Agent, provider-neutral.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
     pub name: String,
     pub version: u32,
+    /// Whether this immutable version may be considered for new Tasks.
+    pub enabled: bool,
+    /// Whether this is the configured current version for its Logical Agent.
+    pub current: bool,
     /// Task types this Agent accepts — a hard eligibility input.
     pub accepts: Vec<String>,
     pub competencies: Vec<String>,
@@ -63,22 +86,36 @@ pub struct Agent {
     pub actions: Vec<String>,
 }
 
+impl Agent {
+    #[must_use]
+    pub fn identity(&self) -> LogicalAgentVersion {
+        LogicalAgentVersion::new(&self.name, self.version)
+    }
+}
+
 impl Component for AgentComponent {
     fn to_value(&self) -> Value {
+        let mut agents = self.agents.clone();
+        agents.sort_by_key(Agent::identity);
         Value::object([(
             "agents",
-            Value::array(self.agents.iter().map(|agent| {
+            Value::array(agents.iter().map(|agent| {
                 Value::object([
                     ("name", Value::string(&agent.name)),
                     ("version", Value::Integer(i64::from(agent.version))),
-                    ("accepts", strings(&agent.accepts)),
-                    ("competencies", strings(&agent.competencies)),
+                    ("enabled", Value::Bool(agent.enabled)),
+                    ("current", Value::Bool(agent.current)),
+                    ("accepts", set_strings(&agent.accepts)),
+                    ("competencies", set_strings(&agent.competencies)),
                     ("routePolicy", Value::string(&agent.route_policy)),
-                    ("executionFeatures", strings(&agent.execution_features)),
+                    ("executionFeatures", set_strings(&agent.execution_features)),
                     ("minContextTokens", Value::Integer(agent.min_context_tokens)),
                     ("sandboxProfile", Value::string(&agent.sandbox_profile)),
-                    ("sandboxRequirements", strings(&agent.sandbox_requirements)),
-                    ("actions", strings(&agent.actions)),
+                    (
+                        "sandboxRequirements",
+                        set_strings(&agent.sandbox_requirements),
+                    ),
+                    ("actions", set_strings(&agent.actions)),
                 ])
             })),
         )])
@@ -89,6 +126,10 @@ impl Component for AgentComponent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingComponent {
     pub policies: Vec<RoutePolicy>,
+    /// If non-empty, only these immutable current Agent versions are eligible.
+    pub agent_pins: Vec<LogicalAgentVersion>,
+    /// These immutable Agent versions are never eligible.
+    pub agent_exclusions: Vec<LogicalAgentVersion>,
 }
 
 /// One named route policy.
@@ -98,22 +139,48 @@ pub struct RoutingComponent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutePolicy {
     pub name: String,
+    /// Higher values are preferred before per-offer preference keys.
+    pub priority: i64,
     pub ordering: Vec<String>,
     pub tie_break: String,
+    /// Whether ambiguous external contact must be prevented by the later
+    /// execution layer for this route.
+    pub requires_keyed_launch: bool,
+}
+
+impl RoutePolicy {
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("name", Value::string(&self.name)),
+            ("priority", Value::Integer(self.priority)),
+            ("ordering", strings(&self.ordering)),
+            ("tieBreak", Value::string(&self.tie_break)),
+            (
+                "requiresKeyedLaunch",
+                Value::Bool(self.requires_keyed_launch),
+            ),
+        ])
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Digest {
+        self.to_value().digest()
+    }
 }
 
 impl Component for RoutingComponent {
     fn to_value(&self) -> Value {
-        Value::object([(
-            "policies",
-            Value::array(self.policies.iter().map(|policy| {
-                Value::object([
-                    ("name", Value::string(&policy.name)),
-                    ("ordering", strings(&policy.ordering)),
-                    ("tieBreak", Value::string(&policy.tie_break)),
-                ])
-            })),
-        )])
+        let mut policies = self.policies.clone();
+        policies.sort_by(|left, right| left.name.cmp(&right.name));
+        Value::object([
+            (
+                "policies",
+                Value::array(policies.iter().map(RoutePolicy::to_value)),
+            ),
+            ("agentPins", agent_references(&self.agent_pins)),
+            ("agentExclusions", agent_references(&self.agent_exclusions)),
+        ])
     }
 }
 
@@ -187,6 +254,30 @@ pub struct SandboxProfile {
     pub environment_identity: String,
 }
 
+impl SandboxProfile {
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("name", Value::string(&self.name)),
+            (
+                "isolationClass",
+                Value::string(self.isolation_class.as_str()),
+            ),
+            ("guarantees", set_strings(&self.guarantees)),
+            ("networkMode", Value::string(self.network_mode.as_str())),
+            (
+                "environmentIdentity",
+                Value::string(&self.environment_identity),
+            ),
+        ])
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Digest {
+        self.to_value().digest()
+    }
+}
+
 /// A registered execution backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendRegistration {
@@ -202,21 +293,7 @@ impl Component for ExecutionComponent {
         Value::object([
             (
                 "profiles",
-                Value::array(self.profiles.iter().map(|profile| {
-                    Value::object([
-                        ("name", Value::string(&profile.name)),
-                        (
-                            "isolationClass",
-                            Value::string(profile.isolation_class.as_str()),
-                        ),
-                        ("guarantees", strings(&profile.guarantees)),
-                        ("networkMode", Value::string(profile.network_mode.as_str())),
-                        (
-                            "environmentIdentity",
-                            Value::string(&profile.environment_identity),
-                        ),
-                    ])
-                })),
+                Value::array(self.profiles.iter().map(SandboxProfile::to_value)),
             ),
             (
                 "backends",
@@ -411,4 +488,21 @@ impl Component for AuthorizationComponent {
 
 fn strings(values: &[String]) -> Value {
     Value::array(values.iter().map(Value::string))
+}
+
+fn set_strings(values: &[String]) -> Value {
+    let mut values = values.to_vec();
+    values.sort();
+    Value::array(values.into_iter().map(Value::string))
+}
+
+fn agent_references(values: &[LogicalAgentVersion]) -> Value {
+    let mut values = values.to_vec();
+    values.sort();
+    Value::array(values.into_iter().map(|reference| {
+        Value::object([
+            ("name", Value::string(reference.name)),
+            ("version", Value::Integer(i64::from(reference.version))),
+        ])
+    }))
 }

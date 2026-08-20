@@ -12,7 +12,7 @@ use crate::config::model::{
 /// It participates in the revision digest, so a future change to how Pantheon
 /// compiles configuration produces a different identity rather than silently
 /// reinterpreting an existing one.
-pub const COMPILER_VERSION: &str = "pantheon-config-v1";
+pub const COMPILER_VERSION: &str = "pantheon-config-v2";
 
 /// The distinct component digests an immutable decision may bind.
 ///

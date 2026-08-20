@@ -40,6 +40,22 @@ impl Digest {
         Self(bytes)
     }
 
+    /// Parses the stable `sha256:<hex>` display form.
+    #[must_use]
+    pub fn from_display(text: &str) -> Option<Self> {
+        let hex = text.strip_prefix("sha256:")?;
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let high = hex.as_bytes()[index * 2];
+            let low = hex.as_bytes()[index * 2 + 1];
+            *byte = (hex_nibble(high)? << 4) | hex_nibble(low)?;
+        }
+        Some(Self(bytes))
+    }
+
     /// The lowercase hexadecimal form, without the algorithm prefix.
     #[must_use]
     pub fn to_hex(self) -> String {
@@ -51,6 +67,15 @@ impl Digest {
             out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
         }
         out
+    }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

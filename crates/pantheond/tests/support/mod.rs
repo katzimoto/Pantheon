@@ -26,7 +26,7 @@ pub const CONFIGURATION: &str = r#"{
     "routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
     "actions":["filesystem.read"]}],
-  "routing": {"policies":[{"name":"default","ordering":["featureMatch"],"tieBreak":"backendId"}]},
+  "routing": {"policies":[{"name":"default","ordering":["contextCapacity"],"tieBreak":"backendId"}]},
   "execution": {
     "profiles":[{"name":"strict","isolationClass":"CONTAINER",
       "guarantees":["isolation.control-plane"],"networkMode":"NONE",
