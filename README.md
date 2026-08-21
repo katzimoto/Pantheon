@@ -34,10 +34,12 @@ routes into the documentation above rather than restating it.
 
 ## Status
 
-The v1 architecture is specified subsystem-by-subsystem, and the Rust
-implementation foundation is in place: a workspace under `crates/` whose crate
-boundaries and dependency directions are mechanically enforced. The crates are
-scaffolding — none implements Pantheon behaviour yet.
+The v1 architecture is specified subsystem-by-subsystem, and the Rust workspace
+under `crates/` has mechanically enforced crate boundaries and dependency
+directions. Several crates now carry real behaviour while later product stages
+remain scaffolding. The maintained implementation status lives in
+[the implementation map](docs/development/implementation.md); this summary does
+not duplicate that changing boundary.
 
 Run `./scripts/verify.sh` to validate a change. See
 [docs/development/implementation.md](docs/development/implementation.md) for the
