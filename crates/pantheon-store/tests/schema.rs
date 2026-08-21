@@ -28,10 +28,10 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         .map(Result::unwrap)
         .collect();
 
-    // The durable command ledger, Event Journal and journal epoch/sequence
-    // state this behaviour needs — and nothing else. No revisioned fixture
-    // table, and none of the future domain schema (Goal, Task, Run,
-    // scheduler) that later missions own.
+    // The durable state this behaviour needs — and nothing else. No
+    // revisioned fixture table, and none of the future domain schema
+    // (Attempt, Sandbox, ContextPlan, reservation, budget) that later
+    // missions own.
     assert_eq!(
         tables,
         vec![
@@ -42,16 +42,23 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "commands".to_string(),
             "configuration_components".to_string(),
             "configuration_revisions".to_string(),
+            "context_source_snapshots".to_string(),
             "event_journal".to_string(),
+            "execution_bindings".to_string(),
             "goal_revisions".to_string(),
+            "goal_scheduling_state".to_string(),
             "goals".to_string(),
             "journal_epochs".to_string(),
             "planning_operations".to_string(),
             "planning_records".to_string(),
+            "run_status".to_string(),
+            "runs".to_string(),
+            "scheduler_state".to_string(),
             "schema_migrations".to_string(),
             "system_state".to_string(),
             "task_graph_edges".to_string(),
             "task_graphs".to_string(),
+            "task_scheduling_state".to_string(),
             "task_specs".to_string(),
             "tasks".to_string(),
             "workspace_revisions".to_string(),
@@ -191,6 +198,94 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
     // attempt lineage — those columns arrive with the behaviour that needs
     // them, and `planning_attempts` does not exist at all.
     assert_eq!(
+        columns(&dir.db_path(), "scheduler_state"),
+        [
+            "dispatch_mode",
+            "id",
+            "next_service_sequence",
+            "revision",
+            "updated_at"
+        ],
+        "the scheduler singleton is desired state plus the fairness counter only"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "goal_scheduling_state"),
+        [
+            "created_at",
+            "goal_id",
+            "last_served_sequence",
+            "revision",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "task_scheduling_state"),
+        [
+            "eligible_since",
+            "last_failure_code",
+            "last_failure_detail_json",
+            "next_attempt_at",
+            "revision",
+            "task_id",
+            "updated_at"
+        ],
+        "backoff is suppression metadata; it never becomes Task lifecycle"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "execution_bindings"),
+        [
+            "canonical_json",
+            "configuration_activation_sequence",
+            "configuration_content_digest",
+            "created_at",
+            "digest",
+            "task_id"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "context_source_snapshots"),
+        [
+            "agent_name",
+            "agent_version",
+            "canonical_json",
+            "configuration_activation_sequence",
+            "context_policy_digest",
+            "created_at",
+            "digest",
+            "goal_id",
+            "goal_revision",
+            "graph_revision",
+            "task_spec_digest",
+            "workspace_id",
+            "workspace_resolved_base"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "runs"),
+        [
+            "binding_digest",
+            "context_source_snapshot_digest",
+            "created_at",
+            "id",
+            "task_id"
+        ],
+        "the immutable Run row names its frozen strategy and source universe"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "run_status"),
+        [
+            "active_slot",
+            "phase",
+            "revision",
+            "run_id",
+            "task_id",
+            "terminal_target",
+            "updated_at"
+        ],
+        "no Attempt, lease or Candidate column exists before its behaviour does"
+    );
+
+    assert_eq!(
         columns(&dir.db_path(), "planning_operations"),
         [
             "configuration_activation_sequence",
@@ -268,5 +363,32 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
     assert!(
         index.contains("UNIQUE") && index.contains("phase != 'Released'"),
         "the one-current-workspace index must stay a partial unique index: {index}"
+    );
+
+    // The one-live-Run rule and the v0.1.0 single execution slot are both
+    // database constraints, not controller promises.
+    let one_run: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'one_nonterminal_run_per_task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the one-nonterminal-run index exists");
+    assert!(
+        one_run.contains("UNIQUE") && one_run.contains("phase IN ('Active', 'Finalizing')"),
+        "one nonterminal Run per Task must stay a partial unique index: {one_run}"
+    );
+    let slot: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'one_active_execution_slot'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the single-slot index exists");
+    assert!(
+        slot.contains("UNIQUE") && slot.contains("active_slot IS NOT NULL"),
+        "the single global execution slot must stay a partial unique index: {slot}"
     );
 }

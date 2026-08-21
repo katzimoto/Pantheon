@@ -29,6 +29,7 @@
 //! the `snapshotCursor` field, the `after` query parameter and the SSE `id`
 //! line alike, so a client can round-trip a cursor without parsing it.
 
+pub mod dispatch;
 pub mod events;
 pub mod goals;
 pub mod problem;

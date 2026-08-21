@@ -472,6 +472,117 @@
           }
         }
       }
+    },
+    "/api/v1/dispatch": {
+      "get": {
+        "operationId": "getDispatch",
+        "summary": "Report dispatch desired state and effective dispatchability",
+        "description": "desiredMode is the operator's durable intent; effectiveCanDispatch is the current factual ability to commit new Run intents. They are deliberately different: desiredMode RUNNING can coexist with effectiveCanDispatch false while configuration is unusable, and desiredMode PAUSED stays paused even after every other gate is healthy. blockedBy is a normalized set of current factual gates, never a second desired-state field.",
+        "responses": {
+          "200": {
+            "description": "The current dispatch view.",
+            "headers": {
+              "ETag": {
+                "description": "Opaque strong validator over the scheduler singleton revision: \"dispatch-<revision>\". Pause/resume must carry it as If-Match.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dispatch/actions/pause": {
+      "post": {
+        "operationId": "pauseDispatch",
+        "summary": "Pause new Run-intent commits",
+        "description": "Commits PAUSED as the durable operator desired state through the normal command envelope. Pausing fences new Scheduler T3 commits only: it does not cancel or stop already-committed Runs, revoke execution authority, release resources, or pretend existing external work stopped. Ordinary daemon restart preserves the durable pause.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CommandEpochHeader"
+          },
+          {
+            "$ref": "#/components/parameters/CommandIdHeader"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          },
+          "412": {
+            "$ref": "#/components/responses/StaleRevision"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
+    },
+    "/api/v1/dispatch/actions/resume": {
+      "post": {
+        "operationId": "resumeDispatch",
+        "summary": "Resume new Run-intent commits",
+        "description": "Commits RUNNING as the durable operator desired state. Resuming re-opens T3 commits subject to the remaining factual gates (configuration readiness); it creates nothing by itself.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CommandEpochHeader"
+          },
+          {
+            "$ref": "#/components/parameters/CommandIdHeader"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          },
+          "412": {
+            "$ref": "#/components/responses/StaleRevision"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -934,6 +1045,58 @@
           "nextCursor": {
             "type": "string",
             "description": "Where to resume. Equal to the requested cursor when the page is empty, so a polling client cannot skip forward past Events it never saw."
+          }
+        }
+      },
+      "Dispatch": {
+        "type": "object",
+        "required": [
+          "desiredMode",
+          "revision",
+          "effectiveCanDispatch",
+          "blockedBy"
+        ],
+        "properties": {
+          "desiredMode": {
+            "type": "string",
+            "enum": [
+              "RUNNING",
+              "PAUSED"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "effectiveCanDispatch": {
+            "type": "boolean"
+          },
+          "blockedBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "StaleRevision": {
+        "description": "The request carried an If-Match that no longer matches the resource revision.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "PreconditionRequired": {
+        "description": "A mandatory precondition header was not supplied.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       }

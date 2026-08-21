@@ -1,5 +1,6 @@
 //! Running one operator command.
 
+mod dispatch;
 mod events;
 mod goals;
 
@@ -51,6 +52,9 @@ pub(crate) async fn run(invocation: &Invocation) -> Result<(), Failure> {
         Command::GoalGet { id } => goals::get(invocation, &client, id).await,
         Command::GoalList => goals::list(invocation, &client).await,
         Command::GoalCancel { id } => goals::cancel(invocation, &client, id).await,
+        Command::DispatchStatus => dispatch::status(invocation, &client).await,
+        Command::DispatchPause => dispatch::pause(invocation, &client).await,
+        Command::DispatchResume => dispatch::resume(invocation, &client).await,
         Command::EventsList { after, limit } => {
             events::list(invocation, &client, after.as_deref(), *limit).await
         }

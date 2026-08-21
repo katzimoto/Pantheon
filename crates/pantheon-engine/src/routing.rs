@@ -190,17 +190,23 @@ impl From<SelectionError> for RoutingError {
 }
 
 /// Orchestrates one recomputable route attempt against current authority.
+///
+/// Generic over how the store is held, exactly like
+/// `ConfigurationAuthority` is generic over how the store is held: a test
+/// borrows the store, a long-lived server shares an owner, and the controller
+/// is the same type at different lifetimes either way. See
+/// [`crate::configuration::ConfigurationAuthority`].
 #[derive(Debug)]
-pub struct RoutingController<'store, 'authority> {
+pub struct RoutingController<'store, 'authority, S: std::borrow::Borrow<Store>> {
     store: &'store Store,
-    configuration: &'authority ConfigurationAuthority<&'store Store>,
+    configuration: &'authority ConfigurationAuthority<S>,
 }
 
-impl<'store, 'authority> RoutingController<'store, 'authority> {
+impl<'store, 'authority, S: std::borrow::Borrow<Store>> RoutingController<'store, 'authority, S> {
     #[must_use]
     pub const fn new(
         store: &'store Store,
-        configuration: &'authority ConfigurationAuthority<&'store Store>,
+        configuration: &'authority ConfigurationAuthority<S>,
     ) -> Self {
         Self {
             store,

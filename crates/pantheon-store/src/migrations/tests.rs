@@ -15,7 +15,7 @@ fn applies_migrations_in_order_and_records_bookkeeping() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 9);
+    assert_eq!(user_version, 11);
 
     let mut stmt = conn
         .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
@@ -36,7 +36,9 @@ fn applies_migrations_in_order_and_records_bookkeeping() {
             (6, "bootstrap_active_configuration_pointer".to_string()),
             (7, "create_goal_planning_and_task_graph".to_string()),
             (8, "create_task_workspaces".to_string()),
-            (9, "create_artifacts_and_workspace_revisions".to_string()),
+            (9, "create_scheduling_and_run_intent".to_string()),
+            (10, "bootstrap_scheduler_state".to_string()),
+            (11, "create_artifacts_and_workspace_revisions".to_string()),
         ]
     );
 
@@ -151,7 +153,7 @@ fn unsupported_newer_schema_version_fails_closed() {
         err,
         StoreError::UnsupportedSchemaVersion {
             found: 999,
-            max_known: 9
+            max_known: 11
         }
     ));
 }

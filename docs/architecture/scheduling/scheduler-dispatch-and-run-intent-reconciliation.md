@@ -54,6 +54,7 @@ The ContextSourceSnapshot binds the exact Task/Goal/Graph revisions, Agent/sourc
 
 T3 freezes **source eligibility**, not the ContextPlan. It performs no Memory retrieval, arbitrary repository exploration, prompt rendering, model call, backend call, or other context-selection side effect.
 
+
 Immediately before T3 commit, Pantheon revalidates at least:
 
 ```text
@@ -68,6 +69,8 @@ route/admission/resource/budget decisions still valid
 ContextSourceSnapshot source identities valid for commit
 expected scheduler/fairness state revisions current
 ```
+
+Implementation status (v0.1.0): the single-writer MVP evaluates every entry above except two. The SchedulingClaim is not acquired because route attempts are in-process and side-effect-free; exclusion comes from the serialized authoritative writer plus the expected scheduler-state revision fence. The recovery barrier does not exist yet, and readiness reports it unimplemented rather than asserting it. Both entries become load-bearing with the missions that introduce expensive resolution and startup recovery.
 
 Immutable source/version refs must still be valid/available according to their domain contract. A source whose required view cannot be named by a stable/reconstructable identity cannot participate in frozen v1 context.
 

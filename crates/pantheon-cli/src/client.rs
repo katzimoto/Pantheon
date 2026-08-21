@@ -12,7 +12,7 @@ use std::path::Path;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONTENT_TYPE, HeaderValue};
+use hyper::header::{CONTENT_TYPE, HeaderValue, IF_MATCH};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use pantheon_operator_protocol::problem::Problem;
@@ -70,12 +70,16 @@ impl<'a> Client<'a> {
         path: &str,
         epoch: &str,
         command_id: &str,
+        if_match: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> Result<T, ClientError> {
         let mut builder = self
             .request("POST", path)
             .header(COMMAND_EPOCH_HEADER, header(epoch)?)
             .header(COMMAND_ID_HEADER, header(command_id)?);
+        if let Some(expected) = if_match {
+            builder = builder.header(IF_MATCH, header(expected)?);
+        }
         let body = match body {
             Some(bytes) => {
                 builder =

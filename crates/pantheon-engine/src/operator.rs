@@ -34,11 +34,13 @@ use crate::configuration::ConfigurationAuthority;
 /// conversion away from disagreeing with it.
 pub use pantheon_store::Cursor;
 
+mod dispatch;
 mod goals;
 mod system;
 
 mod events;
 
+pub use dispatch::{DispatchView, ScheduleOutcome};
 pub use events::{EventPage, EventView, MAX_EVENTS};
 pub use goals::{GoalSummary, GoalView, GoalsPage, TaskView};
 pub use system::{
@@ -169,6 +171,9 @@ pub enum OperatorError {
     NotReady(String),
     /// The request itself is unacceptable.
     Invalid(String),
+    /// A state-dependent mutation carried an expectation that lost to a
+    /// concurrent commit: the resource moved since the caller observed it.
+    StaleRevision { detail: String },
     /// Something failed that the operator can do nothing about.
     Internal(String),
 }
@@ -186,9 +191,10 @@ impl std::fmt::Display for OperatorError {
                 f,
                 "command {command_id} was already used for a different request"
             ),
-            Self::NotReady(detail) | Self::Invalid(detail) | Self::Internal(detail) => {
-                f.write_str(detail)
-            }
+            Self::NotReady(detail)
+            | Self::Invalid(detail)
+            | Self::StaleRevision { detail }
+            | Self::Internal(detail) => f.write_str(detail),
         }
     }
 }

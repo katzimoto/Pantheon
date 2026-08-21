@@ -32,4 +32,5 @@ pub mod artifact;
 pub mod config;
 pub mod execution;
 pub mod planning;
+pub mod scheduling;
 pub mod workspace;

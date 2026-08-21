@@ -52,6 +52,20 @@ ordering between durable state and external effect, together with the abstract
 implementation behind one of the engine's ports, materializing a Workspace as
 an independent local Git repository under a sterile execution profile.
 
+On top of that the four crates carry the single-slot scheduler and the durable
+Run-intent boundary: `pantheon-core` holds the dispatch-mode vocabulary, the
+pure Goal-fairness ordering decision, and the immutable `ExecutionBinding` /
+`ContextSourceSnapshot` identities; `pantheon-store` owns the scheduler state,
+Run-intent and Run/`run_status` families — including the T3 transaction that
+commits Binding + source snapshot + Run + Task activation + the one global
+execution slot + the fairness charge atomically, with partial unique indexes as
+the database backstop for one-Run-per-Task and the single slot — plus durable
+dispatch pause/resume through the command envelope; `pantheon-engine` keeps the
+four scheduling stages distinct (eligibility read → deterministic ordering →
+admission/routing via the side-effect-free `RoutingController` → T3) in
+`SchedulingController`, and serves dispatch status/pause/resume on the Operator
+surface; `pantheond` supervises the tick loop that calls it.
+
 On top of that the same crates carry authoritative Workspace capture and
 `code.changeset` sealing (#32): `pantheon-core` holds the Artifact vocabulary —
 lossless repository paths, canonical entry kinds, the deterministic
@@ -63,20 +77,19 @@ fence, and the single-transaction seal publication that revalidates authority;
 publication, trusted-base preimages, scope enforcement) and the three ports it
 needs; `pantheon-git` implements root-confined no-follow capture and sterile
 base reads; and `pantheon-cas` is the concrete local content-addressed store
-behind the CAS port. There is still no scheduler, Run, Candidate or dispatch:
-sealing produces durable output, and what accepts it is a later boundary.
+behind the CAS port. There is still no Candidate and no acceptance: sealing
+produces durable output, and what accepts it is a later boundary.
 
-There is no scheduler and no endpoint yet, and no concrete execution backend.
-`pantheon-core` and `pantheon-engine` implement the pre-Run Agent-resolution
-and side-effect-free ExecutionOffer path; nothing creates a Run, an Attempt, a
-Sandbox or a WorkspaceRevision. The store's schema is limited to
+There is still no endpoint surface beyond Goals/dispatch/events, no Attempt,
+no Sandbox, no ContextPlan and no concrete execution backend: T3 creates
+durable responsibility, not execution. The store's schema is limited to
 migration bookkeeping, installation identity, the command ledger, Event
 Journal and journal epoch/sequence state, the configuration
 component/revision/active-pointer families, the Goal, planning, TaskGraph
-and Task families that path requires, and the `workspaces` family; the future
-conceptual production schema is not implemented ahead of the behaviour that
-needs it. Revisioned mutation and the command envelope are exercised against
-test-only fixture tables for that reason.
+and Task families, the `workspaces` family, the scheduler/Run-intent families
+that path requires, and the `blobs`/`artifacts`/`artifact_members`/
+`workspace_revisions` families sealing publishes into; the future conceptual
+production schema is not implemented ahead of the behaviour that needs it.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite), `pantheon-core`
 depends on `sha2` for the SHA-256 digests identity requires, and
