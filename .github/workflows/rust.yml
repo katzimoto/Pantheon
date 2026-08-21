@@ -25,8 +25,8 @@ concurrency:
 # channel and components, and the rustup preinstalled on the hosted images
 # honours it, so CI and a developer's machine resolve the same compiler with no
 # `curl | sh` bootstrap and no third-party setup action to trust. That leaves
-# `actions/checkout` as the only action in either job, pinned to a full-length
-# commit SHA — the only way to reference an action immutably.
+# two actions in either job, each pinned to a full-length commit SHA — the only
+# way to reference an action immutably.
 jobs:
   verify:
     name: Verify (Linux)
@@ -36,8 +36,26 @@ jobs:
 
       # Recorded so a toolchain that has drifted from rust-toolchain.toml is
       # visible in the log rather than inferred from a confusing failure.
+      # Running it here also installs the pinned toolchain through rustup
+      # before the cache step below reads the installed versions into its key.
       - name: Show pinned toolchain
         run: rustc --version && cargo --version
+
+      # Dependency cache. Keyed automatically on the committed dependency
+      # graph (Cargo.lock plus rust-toolchain.toml bytes), the installed
+      # toolchain versions, the runner OS and architecture, and the job name,
+      # so Linux and macOS, and these two jobs, can never restore each other's
+      # artifacts. Only dependencies are cached; workspace crates rebuild
+      # every run, exactly as they do locally.
+      #
+      # Saves are restricted to pushes to main, so pull-request runs are
+      # restore-only. GitHub already scopes a cache written during a
+      # `pull_request` run to that one PR (it can never reach the default
+      # branch); `save-if` additionally avoids writing a full cache entry per
+      # PR that nothing else could ever read.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Exactly the command a developer runs locally. Docs checks, crate
       # boundary checks, formatting, Clippy with warnings denied, tests and
@@ -54,6 +72,13 @@ jobs:
 
       - name: Show pinned toolchain
         run: rustc --version && cargo --version
+
+      # Same cache design as the Linux job; the key embeds the OS, the
+      # architecture and the job name, so this restores only macOS arm64
+      # artifacts, and saves stay restricted to pushes to main.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `macos-latest` is arm64, so this is a different OS and a different
       # architecture from the Linux job. Building and running the tests is the
