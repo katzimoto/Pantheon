@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 
+use pantheon_operator_protocol::dispatch::DispatchResponse;
 use pantheon_operator_protocol::events::{EventListResponse, EventResponse};
 use pantheon_operator_protocol::goals::{GoalListResponse, GoalResponse};
 use pantheon_operator_protocol::problem::Problem;
@@ -143,4 +144,22 @@ pub(crate) fn event(event: &EventResponse) -> String {
         _ => String::new(),
     };
     format!("{:<24} {}{}", event.cursor, event.event_type, cause)
+}
+
+/// The dispatch view: desired state first, then the factual gates.
+#[must_use]
+pub(crate) fn dispatch(dispatch: &DispatchResponse) -> String {
+    let mut text = format!(
+        "dispatch {} (revision {})\n",
+        dispatch.desired_mode, dispatch.revision
+    );
+    if dispatch.effective_can_dispatch {
+        text.push_str("  new Run intents: permitted\n");
+    } else {
+        text.push_str("  new Run intents: blocked by\n");
+        for gate in &dispatch.blocked_by {
+            text.push_str(&format!("    {gate}\n"));
+        }
+    }
+    text
 }

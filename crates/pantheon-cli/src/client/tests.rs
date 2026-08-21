@@ -97,6 +97,7 @@ async fn a_mutation_carries_the_command_identity_headers_it_was_given() {
             "/api/v1/goals",
             "epoch-1",
             "command-1",
+            None,
             Some(b"{}".to_vec()),
         )
         .await

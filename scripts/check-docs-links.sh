@@ -53,8 +53,34 @@ report() {
 # broken references in files nobody wrote, and would make the result depend on
 # whether the tree had been built — `scripts/verify.sh` runs this check and then
 # `cargo doc`, so the next run would be inspecting the previous run's output.
-files=$(find . -path ./.git -prune -o -path ./target -prune -o -name '*.md' -print |
+# Other hidden directories are pruned for the same reason: tooling that lives
+# in dot-directories (editor state, local agent installs and their vendored
+# node_modules) is not repository documentation. `.agents` and `.github` are
+# held out of that prune because they ARE tracked repository content — the
+# skills and the PR template are dense with checked references — and the
+# coverage assertion below fails closed if a future edit narrows the scan past
+# any tracked file.
+files=$(find . -path './.git' -prune -o -path './target' -prune \
+	-o -path './.*' ! -path './.agents' ! -path './.agents/*' \
+	! -path './.github' ! -path './.github/*' -prune \
+	-o -name '*.md' -print |
 	sed 's|^\./||' | sort)
+
+# The scan must cover every tracked Markdown file exactly. This is the fence
+# that keeps a future pruning change from silently dropping tracked files from
+# validation: coverage is compared against git, which is the definition of
+# "tracked", not against this script's own idea of what matters.
+tracked=$(mktemp)
+scanned=$(mktemp)
+trap 'rm -f "$tracked" "$scanned"' EXIT
+git ls-files '*.md' | sort > "$tracked"
+printf '%s\n' "$files" | sort > "$scanned"
+uncovered=$(comm -23 "$tracked" "$scanned")
+if [ -n "$uncovered" ]; then
+	printf 'docs link check: tracked files outside the scan:\n%s\n' \
+		"$uncovered" >&2
+	exit 1
+fi
 
 # 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`,
 #    `scripts/check.sh` or `.github/.../file.yml`. Covering scripts/ means a

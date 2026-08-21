@@ -362,3 +362,28 @@ fn the_materialized_task_pins_the_evaluator_version_durably() {
         "a Task may not embed an executable command"
     );
 }
+
+#[test]
+fn materializing_a_ready_task_opens_its_first_eligibility_interval() {
+    // The durable interval start is what deterministic ordering survives
+    // restart on, so it must be written with the Ready transition itself —
+    // never lazily by a queue rebuild, which would make waiting age depend on
+    // restart timing.
+    let (_dir, store, sequence) = store_with_configuration("materialize-eligible");
+    create_goal(&store, "goal-1", "cmd-goal");
+    let op = plan_and_record(&store, "goal-1", sequence, "op-1");
+    let registry = store
+        .configuration_pointer()
+        .expect("pointer")
+        .active
+        .expect("active")
+        .components
+        .evaluator_registry;
+    let plan = validated(sequence, registry, "unit-v1");
+    materialize(&store, &op, "task-1", &plan, "cmd-materialize").expect("materializes");
+
+    let row = crate::scheduling::TaskSchedulingRowForTest::read(&store, "task-1")
+        .expect("the interval row exists");
+    assert!(row.eligible_since.is_some(), "Ready opens the interval");
+    assert_eq!(row.next_attempt_at, None);
+}

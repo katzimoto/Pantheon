@@ -178,8 +178,8 @@ impl<S: Borrow<Store>> OperatorService<'_, S> {
             configuration,
             ReadinessComponent {
                 name: "dispatch",
-                state: ComponentState::Unimplemented,
-                detail: Some("no scheduler or dispatch surface exists in this build".to_string()),
+                state: ComponentState::Satisfied,
+                detail: None,
             },
         ];
 

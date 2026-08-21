@@ -402,6 +402,161 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX workspaces_one_current_per_task
             ON workspaces (task_id) WHERE phase != 'Released';",
     },
+    Migration {
+        version: 9,
+        name: "create_scheduling_and_run_intent",
+        // Table names follow the canonical persistence contract's "Durable
+        // scheduler state", "ExecutionBinding", "Context source snapshot and
+        // ContextPlan attachment" and "Run status" sections, which sit in the
+        // SCHEDULING / EXECUTION table family. Only the columns this mission's
+        // behaviour writes exist: lease/attempt/candidate columns arrive with
+        // the behaviour that needs them, as every other family here has.
+        //
+        // One deliberate deviation from the contract's sketch is recorded
+        // here rather than silently made: the composite foreign key from
+        // `tasks.active_run_id` to `runs(id, task_id)` is not added, because
+        // SQLite cannot add a constraint to the existing `tasks` table
+        // without rebuilding it. Holder safety is carried instead by
+        // `run_status`'s own composite FK plus the T3 transaction that writes
+        // both rows atomically; a later migration that legitimately rebuilds
+        // `tasks` should add it then.
+        sql: "CREATE TABLE scheduler_state (
+            id                    TEXT    NOT NULL PRIMARY KEY CHECK (id = 'singleton'),
+            -- Operator desired state only. It is never rewritten to stand for
+            -- recovery or configuration readiness.
+            dispatch_mode         TEXT    NOT NULL CHECK (dispatch_mode IN ('RUNNING', 'PAUSED')),
+            -- Logical fairness counter. Advances only inside a successful T3,
+            -- never from MAX()+1 or a wall clock.
+            next_service_sequence INTEGER NOT NULL CHECK (next_service_sequence >= 1),
+            revision              INTEGER NOT NULL CHECK (revision > 0),
+            updated_at            INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE goal_scheduling_state (
+            goal_id              TEXT    NOT NULL PRIMARY KEY REFERENCES goals(id),
+            -- NULL means this Goal has never successfully received service.
+            last_served_sequence INTEGER CHECK (
+                last_served_sequence IS NULL OR last_served_sequence >= 1),
+            revision             INTEGER NOT NULL CHECK (revision > 0),
+            created_at           INTEGER NOT NULL,
+            updated_at           INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE task_scheduling_state (
+            task_id                  TEXT    NOT NULL PRIMARY KEY REFERENCES tasks(id),
+            -- Start of the current SchedulingEligible interval. NULL exactly
+            -- when the Task is not currently eligible; written with the
+            -- transition that changes eligibility, not by queue rebuilds.
+            eligible_since           INTEGER,
+            -- Temporary backoff suppression point. Never mutates Task
+            -- lifecycle and never resets eligible_since.
+            next_attempt_at          INTEGER,
+            last_failure_code        TEXT,
+            last_failure_detail_json TEXT,
+            revision                 INTEGER NOT NULL CHECK (revision > 0),
+            updated_at               INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE execution_bindings (
+            -- Content-addressed and immutable: the same frozen strategy is
+            -- the same row, reached twice or not.
+            digest                            BLOB NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            task_id                           TEXT NOT NULL REFERENCES tasks(id),
+            configuration_activation_sequence INTEGER NOT NULL,
+            configuration_content_digest      BLOB NOT NULL CHECK (length(configuration_content_digest) = 32),
+            canonical_json                    TEXT NOT NULL,
+            created_at                        INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE context_source_snapshots (
+            digest                            BLOB NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            configuration_activation_sequence INTEGER NOT NULL,
+            context_policy_digest             BLOB NOT NULL CHECK (length(context_policy_digest) = 32),
+            task_spec_digest                  BLOB NOT NULL CHECK (length(task_spec_digest) = 32),
+            goal_id                           TEXT NOT NULL REFERENCES goals(id),
+            goal_revision                     INTEGER NOT NULL,
+            graph_revision                    INTEGER NOT NULL,
+            agent_name                        TEXT NOT NULL,
+            agent_version                     INTEGER NOT NULL,
+            workspace_id                      TEXT NOT NULL REFERENCES workspaces(id),
+            workspace_resolved_base           TEXT NOT NULL,
+            canonical_json                    TEXT NOT NULL,
+            created_at                        INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE runs (
+            id                             TEXT    NOT NULL PRIMARY KEY,
+            task_id                        TEXT    NOT NULL REFERENCES tasks(id),
+            binding_digest                 BLOB    NOT NULL REFERENCES execution_bindings(digest),
+            context_source_snapshot_digest BLOB    NOT NULL REFERENCES context_source_snapshots(digest),
+            created_at                     INTEGER NOT NULL,
+            -- The composite parent key the holder-safe FKs below require.
+            UNIQUE (id, task_id)
+        ) STRICT;
+
+        CREATE TABLE run_status (
+            run_id          TEXT    NOT NULL PRIMARY KEY,
+            -- Immutable copy of runs.task_id, constrained to agree through
+            -- the composite FK: run holder identity cannot drift.
+            task_id         TEXT    NOT NULL,
+            phase           TEXT    NOT NULL CHECK (phase IN (
+                'Active', 'Finalizing', 'Completed', 'Failed',
+                'Cancelled', 'Yielded')),
+            terminal_target TEXT,
+            revision        INTEGER NOT NULL CHECK (revision > 0),
+            -- The v0.1.0 single global execution slot. A nonterminal Run holds
+            -- it installation-wide; reaching a terminal phase releases it.
+            active_slot     TEXT,
+            updated_at      INTEGER NOT NULL,
+            FOREIGN KEY (run_id, task_id) REFERENCES runs(id, task_id),
+            CHECK (
+                phase != 'Finalizing' OR terminal_target IS NOT NULL
+            ),
+            CHECK (
+                (phase IN ('Active', 'Finalizing') AND active_slot = 'global')
+                OR (phase NOT IN ('Active', 'Finalizing') AND active_slot IS NULL)
+            )
+        ) STRICT;
+
+        -- At most one nonterminal Run per Task: the canonical one-live-Run
+        -- rule as a real database backstop, not controller discipline.
+        CREATE UNIQUE INDEX one_nonterminal_run_per_task
+            ON run_status (task_id) WHERE phase IN ('Active', 'Finalizing');
+
+        -- The MVP's one deliberate global active-execution slot: at most one
+        -- nonterminal Run installation-wide. Two concurrent T3 commits under
+        -- different command identities therefore cannot both succeed even if
+        -- every other fence were removed.
+        CREATE UNIQUE INDEX one_active_execution_slot
+            ON run_status (active_slot) WHERE active_slot IS NOT NULL;",
+    },
+    Migration {
+        version: 10,
+        name: "bootstrap_scheduler_state",
+        // Same idempotent shape as the other bootstrap migrations. Dispatch
+        // defaults to RUNNING because nothing canonical names a paused
+        // default; an operator pause is a deliberate durable act that then
+        // survives restart.
+        //
+        // The second statement backfills eligibility state for Tasks that are
+        // already Ready on an upgraded database: materialization begins
+        // recording `eligible_since` only from this schema version onward, and
+        // an existing Ready Task's current eligibility interval is taken to
+        // have started at migration time — the earliest instant this build can
+        // honestly name.
+        sql: "INSERT INTO scheduler_state (id, dispatch_mode, next_service_sequence, revision, updated_at)
+            SELECT 'singleton', 'RUNNING', 1, 1, unixepoch()
+            WHERE NOT EXISTS (SELECT 1 FROM scheduler_state WHERE id = 'singleton');
+
+        INSERT INTO task_scheduling_state (task_id, eligible_since, next_attempt_at,
+                                           last_failure_code, last_failure_detail_json,
+                                           revision, updated_at)
+            SELECT t.id, unixepoch(), NULL, NULL, NULL, 1, unixepoch()
+            FROM tasks t
+            WHERE t.phase = 'Ready'
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_scheduling_state s WHERE s.task_id = t.id);",
+    },
 ];
 
 /// Runs the production migration set against `conn`.

@@ -250,9 +250,10 @@ async fn an_unknown_goal_and_an_unknown_route_are_both_ordinary_refusals() {
     assert_eq!(missing.code(), "not-found");
 
     // A route the mission does not serve answers 404 rather than something
-    // that looks like an unimplemented feature.
+    // that looks like an unimplemented feature. (/api/v1/dispatch is a
+    // #29 resource now; this names one no mission serves.)
     assert_eq!(
-        get(socket, "/api/v1/dispatch").await.status,
+        get(socket, "/api/v1/runs").await.status,
         StatusCode::NOT_FOUND
     );
 

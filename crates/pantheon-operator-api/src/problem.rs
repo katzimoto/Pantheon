@@ -42,6 +42,7 @@ impl From<OperatorError> for ProblemResponse {
         let (code, detail) = match &err {
             OperatorError::NotFound { .. } => (ProblemCode::NotFound, err.to_string()),
             OperatorError::Conflict(_) => (ProblemCode::Conflict, err.to_string()),
+            OperatorError::StaleRevision { detail } => (ProblemCode::StaleRevision, detail.clone()),
             OperatorError::StaleCommandEpoch { .. } => {
                 (ProblemCode::StaleCommandEpoch, err.to_string())
             }

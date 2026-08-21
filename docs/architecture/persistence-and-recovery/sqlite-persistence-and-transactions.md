@@ -310,6 +310,8 @@ FOREIGN KEY (active_run_id, id)
 
 When `active_run_id` is non-NULL, that Run therefore belongs to the same Task. Pointer/currentness semantics still belong to Task lifecycle transactions; the FK proves holder identity only.
 
+Implementation status (v0.1.0): the `tasks.active_run_id` composite foreign key is deferred, because SQLite cannot extend the existing `tasks` table without a rebuild migration and no behaviour has yet justified one. Holder safety is carried meanwhile by `run_status`'s composite FK and by the T3 transaction that writes both rows atomically. The rebuild that adds this FK belongs to the first mission that legitimately rewrites `tasks`; it is a recorded deviation, not an impossibility claim.
+
 Because `run_status` now contains both `task_id` and `phase`, v1 can enforce at most one nonterminal Run per Task with a real partial unique index:
 
 ```sql

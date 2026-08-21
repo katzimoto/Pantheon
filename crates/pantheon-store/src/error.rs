@@ -129,6 +129,44 @@ pub enum StoreError {
         workspace_id: String,
         phase: &'static str,
     },
+    /// A T3 Run-intent commit was refused because the operator's durable
+    /// desired dispatch state is `PAUSED`.
+    ///
+    /// Typed rather than a generic conflict because the remedy differs: a
+    /// stale revision is retried against fresh state, while a paused
+    /// dispatcher is not retried at all until an authorized resume changes
+    /// durable state.
+    DispatchPaused,
+    /// A T3 Run-intent commit was refused because the single global execution
+    /// slot is durably held by a nonterminal Run.
+    ///
+    /// Typed rather than a generic conflict because it is an ordinary,
+    /// expected concurrent outcome under the v0.1.0 product envelope: the
+    /// losing caller defers cleanly instead of retrying blindly. The partial
+    /// unique index on `run_status.active_slot` is the database backstop that
+    /// makes this refusal race-proof; this variant is the readable form.
+    DispatchSlotUnavailable {
+        held_by_run: String,
+        held_for_task: String,
+    },
+    /// The Task named for a T3 Run-intent commit is not dispatchable: it does
+    /// not exist, is not `Ready`, or already names a responsible Run.
+    ///
+    /// Typed so a scheduler cycle can distinguish "this Task cannot be
+    /// dispatched" from "the world moved underneath a once-valid decision".
+    TaskNotDispatchable {
+        task_id: String,
+        phase: &'static str,
+        active_run_id: Option<String>,
+    },
+    /// The Goal owning the Task fences new Runs: it is Finalizing or terminal.
+    ///
+    /// This is a semantic Goal condition, not temporary suppression: it ends
+    /// the Task's scheduling eligibility rather than merely deferring it.
+    GoalNotDispatchable {
+        goal_id: String,
+        phase: &'static str,
+    },
     /// The identity a materializer established on disk is not the immutable
     /// base the Workspace is durably bound to.
     ///
@@ -241,6 +279,32 @@ impl fmt::Display for StoreError {
                 "workspace {workspace_id} is bound to base {bound} but \
                  materialization established {verified}"
             ),
+            Self::DispatchPaused => write!(
+                f,
+                "dispatch is durably paused; new Run intents are fenced until resume"
+            ),
+            Self::DispatchSlotUnavailable {
+                held_by_run,
+                held_for_task,
+            } => write!(
+                f,
+                "the single execution slot is held by run {held_by_run} (task {held_for_task})"
+            ),
+            Self::TaskNotDispatchable {
+                task_id,
+                phase,
+                active_run_id,
+            } => match active_run_id {
+                Some(run) => write!(
+                    f,
+                    "task {task_id} is {phase} with responsible run {run} and cannot dispatch"
+                ),
+                None => write!(f, "task {task_id} is {phase} and cannot dispatch"),
+            },
+            Self::GoalNotDispatchable { goal_id, phase } => write!(
+                f,
+                "goal {goal_id} is {phase}; its Tasks are not dispatchable"
+            ),
             Self::ConnectionUnavailable(detail) => {
                 write!(f, "store connection unavailable: {detail}")
             }
@@ -265,6 +329,10 @@ impl std::error::Error for StoreError {
             | Self::WorkspaceAlreadyCurrent { .. }
             | Self::WorkspaceNotRematerializable { .. }
             | Self::WorkspaceBaseMismatch { .. }
+            | Self::DispatchPaused
+            | Self::DispatchSlotUnavailable { .. }
+            | Self::TaskNotDispatchable { .. }
+            | Self::GoalNotDispatchable { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }
