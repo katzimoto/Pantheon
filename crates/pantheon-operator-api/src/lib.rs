@@ -55,27 +55,25 @@ use pantheon_operator_protocol::API_PREFIX;
 /// through `tower::Service` without binding a socket — and so the socket code
 /// below has nothing to do with what any route means.
 pub fn router(runtime: Arc<OperatorRuntime>) -> Router {
-    // Health is served both unversioned and under the version prefix. The
-    // canonical contract writes it both ways — `/health/live` in its
-    // health section, `/api/v1/health/live` in its read-endpoint list — and
-    // that internal disagreement is a documentation defect to report, not one
-    // for this crate to settle by picking a winner. Both paths resolve to the
-    // same handler, so neither spelling is made canonical here.
-    let health = Router::new()
+    // Health probes are process-level endpoints, deliberately outside the
+    // version prefix: `docs/architecture/operations/public-daemon-api-and-cli.md`
+    // ("Health/readiness") makes `/health/live` and `/health/ready` canonical
+    // so probe and supervisor configuration survives a future `/api/v2`
+    // transition, and — Pantheon being unreleased — no `/api/v1/health/...`
+    // alias is kept.
+    let unversioned = Router::new()
         .route("/health/live", get(system::live))
         .route("/health/ready", get(system::ready));
 
     let versioned = Router::new()
         .route("/system", get(system::system))
-        .route("/health/live", get(system::live))
-        .route("/health/ready", get(system::ready))
         .route("/goals", get(goals::list).post(goals::create))
         .route("/goals/{goalId}", get(goals::get))
         .route("/goals/{goalId}/actions/cancel", post(goals::cancel))
         .route("/events", get(events::list))
         .route("/events/watch", get(events::watch));
 
-    health
+    unversioned
         .merge(Router::new().nest(API_PREFIX, versioned))
         .with_state(runtime)
 }

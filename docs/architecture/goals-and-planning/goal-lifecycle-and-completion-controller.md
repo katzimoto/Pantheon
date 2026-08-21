@@ -197,18 +197,32 @@ Residual auxiliary Tasks are cancelled with reason `GoalSatisfied`; they are not
 
 ## Cancellation
 
-Goal cancellation is a desired-state transition:
+Goal cancellation is a desired-state transition, and it remains available in every nonterminal phase:
 
 ```text
 Planning/Active/Evaluating
   -> Finalizing / terminalTarget=Cancelled
+
+Finalizing / terminalTarget=Succeeded
+Finalizing / terminalTarget=Failed
+  -> Finalizing / terminalTarget=Cancelled    retarget
+
+Finalizing / terminalTarget=Cancelled
+  -> unchanged                                idempotent
+
+Succeeded | Failed | Cancelled
+  -> refused                                  conflict
 ```
 
-It immediately fences creation of new Goal work, stops pending Goal evaluation where safe, and requests cancellation/finalization of all nonterminal Goal Tasks.
+The principle beneath the table: **Finalizing means the terminal outcome has not yet become immutable terminal history.** Cancellation can still win while finalization is running — including against a Goal whose accepted completion said `Succeeded`, or whose recovery policy had targeted `Failed` — by retargeting that same finalization to `Cancelled`. A retarget revises `terminal_target` through the normal authoritative CAS and nothing else: the Goal stays in `Finalizing` and takes no shortcut around finalization. The obligation set finalization must satisfy follows the target now in force, not the one it replaced.
 
-Completed Evidence/AcceptanceResult may remain immutable history but cannot cause Goal success after cancellation because Goal Completion Controller rechecks current Goal authority before applying it.
+A retarget never unwinds what the prior target already durably committed. Deliverable bindings accepted under the prior target remain valid history, and required-deliverable retention pins already established stay in force: a retarget neither releases nor creates pins. Whether a Goal terminalizing toward `Cancelled` must additionally establish pins for accepted deliverables that were never pinned is owned by the Goal Completion Controller with terminalization and is deliberately not decided here. Once terminal state commits, history is immutable (invariant 18), and cancellation can no longer reopen or rewrite it.
 
-Goal becomes Cancelled only when those obligations are safely finalized.
+Cancellation immediately fences creation of new Goal work, stops pending Goal evaluation where safe, and requests cancellation/finalization of all nonterminal Goal Tasks — whether it fenced the Goal itself or retargeted one already finalizing.
+
+Completed Evidence/AcceptanceResult may remain immutable history but cannot cause Goal success after cancellation because Goal Completion Controller rechecks current Goal authority before applying it. The same recheck makes the opposite race safe: a PASS applying `Evaluating -> Finalizing/Succeeded` loses if cancellation won first.
+
+Goal becomes Cancelled only when those obligations are safely finalized under the target now in force.
 
 ## Failure
 
@@ -228,7 +242,7 @@ Failure also passes through Finalizing.
 
 Normal Goal revisions may be created while Planning, Active, or Evaluating. A revision during Evaluating invalidates the current completion candidate for terminalization and therefore invalidates its EvaluationRound/AcceptanceResult as current Goal authority, while retaining all immutable history.
 
-Once Goal Finalizing begins, normal semantic revision is rejected. Cancellation remains available. After terminalization, changed requirements become a new Goal, optionally related by provenance.
+Once Goal Finalizing begins, normal semantic revision is rejected. Cancellation remains available exactly as the Cancellation section defines: it retargets a finalization aimed elsewhere toward `Cancelled`, changes nothing when `Cancelled` is already the target, and is refused once the Goal is terminal. After terminalization, changed requirements become a new Goal, optionally related by provenance.
 
 ## Planning failure
 
@@ -319,3 +333,4 @@ External cleanup/reconciliation never occurs inside the SQLite transaction.
 16. Accepted Goal deliverables are Artifact-retention roots.
 17. Goal success never implicitly performs Git integration/deployment.
 18. Terminal Goals never reopen.
+19. Cancellation is available in every nonterminal phase; while Finalizing it retargets the pending outcome to Cancelled rather than bypassing finalization, and a terminal Goal refuses it.

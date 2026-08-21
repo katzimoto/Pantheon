@@ -285,6 +285,36 @@ async fn cancelling_a_goal_that_is_already_cancelling_stays_accepted_and_changes
 }
 
 #[tokio::test]
+async fn health_probes_are_unversioned_and_the_versioned_spelling_is_gone() {
+    // The contract settles the spelling #26 had to serve both ways: the
+    // canonical probes are `/health/live` and `/health/ready`, outside the
+    // version prefix, and — Pantheon being unreleased — no
+    // `/api/v1/health/...` alias is kept. An operator still carrying the old
+    // document must get a plain 404, not a silently working second spelling.
+    let installation = Installation::new("health");
+    let daemon = installation.start().await;
+    let socket = daemon.socket();
+
+    let live = get(socket, "/health/live").await;
+    assert_eq!(live.status, StatusCode::OK);
+    assert_eq!(live.json()["live"], serde_json::json!(true));
+
+    let ready = get(socket, "/health/ready").await;
+    assert_eq!(ready.status, StatusCode::OK);
+    assert_eq!(ready.json()["ready"], serde_json::json!(true));
+
+    for alias in ["/api/v1/health/live", "/api/v1/health/ready"] {
+        assert_eq!(
+            get(socket, alias).await.status,
+            StatusCode::NOT_FOUND,
+            "{alias} must not be served"
+        );
+    }
+
+    daemon.stop();
+}
+
+#[tokio::test]
 async fn every_described_operation_actually_routes() {
     // The direction the API description's own tests cannot prove: that each
     // documented operation reaches a handler over the real transport rather
@@ -332,7 +362,10 @@ async fn every_described_operation_actually_routes() {
             checked += 1;
         }
     }
-    assert!(checked >= 10, "the sweep must actually have run: {checked}");
+    // Nine: two health probes, system, goals (list/create/get/cancel), and
+    // events (list/watch). The versioned health aliases the contract once
+    // served both ways are gone, so this is one fewer operation per spelling.
+    assert!(checked >= 9, "the sweep must actually have run: {checked}");
 
     daemon.stop();
 }
