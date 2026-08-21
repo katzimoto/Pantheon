@@ -591,15 +591,16 @@ fn a_change_outside_declared_scope_is_refused_and_publishes_nothing() {
     let error = sealer(&store, &capture, &cas, &workspace_root)
         .seal(&seal_command(epoch.as_str(), "cmd-scope"), &seal_request())
         .expect_err("out-of-scope change must be refused");
-    // Either changed path may surface first — both are outside docs/ — but
-    // the refusal must be a scope refusal. Payload bytes already staged
-    // during capture are orphans (GC-able by design); what must not exist
-    // is any authoritative claim.
+    // Either changed path may surface first — both are outside docs/ — and
+    // the refusal is a scope refusal raised at the capture sink, so no
+    // out-of-authority byte ever reaches CAS, not even as an orphan.
     assert!(
         matches!(error, SealError::ScopeViolated { ref path }
             if path.contains("new.txt") || path.contains("app.txt")),
         "{error}"
     );
+    assert!(!cas.contains(b"brand new"), "out-of-scope content in CAS");
+    assert!(!cas.contains(b"fixed"), "out-of-scope content in CAS");
 }
 
 #[test]
@@ -614,6 +615,10 @@ fn an_empty_scope_authorizes_nothing_at_all() {
         .seal(&seal_command(epoch.as_str(), "cmd-none"), &seal_request())
         .expect_err("an empty ceiling authorizes no output");
     assert!(matches!(error, SealError::ScopeViolated { .. }), "{error}");
+    assert!(
+        cas.objects.borrow().is_empty(),
+        "an empty scope publishes nothing at all"
+    );
 }
 
 #[test]
@@ -714,4 +719,146 @@ fn operation_kinds_follow_the_logical_diff_not_git_metadata() {
     assert!(json.contains(r#""mode":"executable""#), "{json}");
     // A delete entry exists for every base file absent from capture.
     assert!(json.contains(r#""operation":"delete""#), "{json}");
+}
+
+#[test]
+fn non_utf8_paths_seal_through_the_lossless_encoding_when_authorized() {
+    // The encoding settled into artifact-model.md is reachable end to end:
+    // a raw-byte name under an authorized wildcard captures, passes the
+    // byte-exact scope check, and appears in the manifest only as its
+    // lossless spelling.
+    let (_dir, store, workspace_root) = prepared("non-utf8", &["workspace://src/**"]);
+    let _repo = worker_repo(&workspace_root);
+    let mut raw_path = b"src/".to_vec();
+    raw_path.push(0xE9);
+    raw_path.extend_from_slice(b".txt");
+    // The base's app.txt is present and unchanged, so the only changed
+    // path is the raw-byte one.
+    let capture = ScriptedCapture::new(
+        &store,
+        vec![
+            (
+                b"app.txt".to_vec(),
+                EntryKind::Regular,
+                b"original".to_vec(),
+            ),
+            (raw_path.clone(), EntryKind::Regular, b"raw bytes".to_vec()),
+        ],
+    );
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+
+    let sealed = sealer(&store, &capture, &cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-raw"), &seal_request())
+        .expect("a non-UTF-8 authorized path seals");
+    assert!(cas.contains(b"raw bytes"));
+
+    let json = store
+        .artifact(sealed.artifact_digest)
+        .expect("read")
+        .expect("exists")
+        .canonical_json;
+    let expected_spelling = RepositoryPath::from_bytes(&raw_path)
+        .expect("representable")
+        .to_manifest_string();
+    assert!(
+        json.contains(&expected_spelling),
+        "manifest carries the lossless spelling {expected_spelling}: {json}"
+    );
+}
+
+/// A trusted base with one extra root-level file, for delete-side scope
+/// evidence.
+struct BaseWithRootOnly;
+
+impl TrustedBaseReader for BaseWithRootOnly {
+    fn base_tree(
+        &self,
+        _source: &Path,
+        _base: &ResolvedBase,
+    ) -> Result<BTreeMap<Vec<u8>, BaseObject>, ExternalFault> {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            b"app.txt".to_vec(),
+            BaseObject {
+                kind: EntryKind::Regular,
+                oid: APP_OID.to_string(),
+                size: b"original".len() as u64,
+            },
+        );
+        tree.insert(
+            b"outside.txt".to_vec(),
+            BaseObject {
+                kind: EntryKind::Regular,
+                oid: APP_OID.to_string(),
+                size: b"original".len() as u64,
+            },
+        );
+        Ok(tree)
+    }
+
+    fn blob_bytes(&self, _source: &Path, _oid: &str) -> Result<Vec<u8>, ExternalFault> {
+        Ok(b"original".to_vec())
+    }
+}
+
+#[test]
+fn an_added_path_outside_scope_is_refused_at_its_own_gate() {
+    // Isolates the Add-arm enforcement: the only changed path is an added
+    // file outside the declared scope.
+    let (_dir, store, workspace_root) = prepared("scope-add", &["workspace://docs/**"]);
+    let _repo = worker_repo(&workspace_root);
+    let capture = ScriptedCapture::new(
+        &store,
+        vec![
+            (
+                b"docs/ok.txt".to_vec(),
+                EntryKind::Regular,
+                b"in scope".to_vec(),
+            ),
+            (
+                b"evil.txt".to_vec(),
+                EntryKind::Regular,
+                b"out of scope".to_vec(),
+            ),
+        ],
+    );
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+
+    let error = sealer(&store, &capture, &cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-add"), &seal_request())
+        .expect_err("an added out-of-scope path must be refused");
+    assert!(
+        matches!(error, SealError::ScopeViolated { ref path } if path.contains("evil.txt")),
+        "{error}"
+    );
+    assert!(!cas.contains(b"out of scope"));
+}
+
+#[test]
+fn a_deleted_path_outside_scope_is_refused_at_its_own_gate() {
+    // Isolates the delete-arm enforcement: the only changed path is a base
+    // file outside the declared scope that the worker removed.
+    let (_dir, store, workspace_root) = prepared("scope-delete", &["workspace://src/**"]);
+    let _repo = worker_repo(&workspace_root);
+    let capture = ScriptedCapture::new(
+        &store,
+        vec![(
+            b"app.txt".to_vec(),
+            EntryKind::Regular,
+            b"original".to_vec(),
+        )],
+    );
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+    let sealer = ChangesetSealer::new(&store, &capture, &BaseWithRootOnly, &cas, &workspace_root);
+
+    let error = sealer
+        .seal(&seal_command(epoch.as_str(), "cmd-del"), &seal_request())
+        .expect_err("a deleted out-of-scope path must be refused");
+    assert!(
+        matches!(error, SealError::ScopeViolated { ref path } if path.contains("outside.txt")),
+        "{error}"
+    );
 }

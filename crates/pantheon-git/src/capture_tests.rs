@@ -72,19 +72,15 @@ type Captured = (String, EntryKind, Vec<u8>);
 
 fn capture(root: &Path) -> (Vec<Captured>, Option<String>) {
     let mut entries = Vec::new();
+    // On failure the list holds whatever was captured before the refusal;
+    // individual tests assert what must be absent. The seal as a whole
+    // fails, which is what makes a partial list harmless.
     match ConfinedCapture.capture_tree(root, &mut |entry| {
         entries.push((entry.path.to_manifest_string(), entry.kind, entry.bytes));
         Ok(())
     }) {
         Ok(()) => (entries, None),
-        Err(fault) => {
-            assert!(
-                entries.is_empty() || fault.code != code::HOSTILE_FILESYSTEM,
-                "a partial payload list may only accompany ordinary failures, \
-                 and {fault:?} is a security failure"
-            );
-            (entries, Some(fault.code))
-        }
+        Err(fault) => (entries, Some(fault.code)),
     }
 }
 
@@ -468,4 +464,97 @@ fn a_base_that_no_longer_exists_fails_as_unavailable() {
         .base_tree(&source, &base)
         .expect_err("an absent base cannot yield preimages");
     assert_eq!(fault.code, code::BASE_UNAVAILABLE);
+}
+
+#[test]
+fn a_nested_repository_gitfile_fails_closed_like_a_nested_git_directory() {
+    // Modern `git submodule add` leaves `sub/.git` as a *regular file*
+    // carrying `gitdir: ...` indirection. The refusal is type-independent:
+    // directory, gitfile, and symlink spellings all mean nested-repository
+    // semantics v1 does not support.
+    let dir = TempDir::new("gitfile");
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(root.join("sub")).expect("sub");
+    std::fs::write(root.join("sub/.git"), "gitdir: ../.git/modules/sub\n").expect("gitfile");
+    std::fs::write(root.join("sub/inner.rs"), b"submodule interior").expect("interior");
+    std::fs::write(root.join("app.txt"), b"app").expect("app");
+
+    let (entries, fault) = capture(&root);
+    assert_eq!(
+        fault.as_deref(),
+        Some(code::HOSTILE_FILESYSTEM),
+        "a gitfile below the root must fail closed"
+    );
+    assert!(
+        !entries.iter().any(|(name, _, _)| name.contains("inner.rs")),
+        "submodule interior must never become payload"
+    );
+}
+
+#[test]
+fn an_open_swapped_to_a_fifo_cannot_block_and_still_fails_identity() {
+    // Deterministic evidence for the NONBLOCK guard: opening a FIFO with
+    // O_RDONLY|NONBLOCK returns immediately where a blocking open would
+    // hang until a writer appears — so a swap between inspection and open
+    // reaches verify_identity and is refused instead of freezing capture
+    // while it holds the freeze.
+    let dir = TempDir::new("fifo-nonblock");
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).expect("root");
+    let fifo = root.join("pipe");
+    let status = Process::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+    assert!(status.success());
+
+    // "Inspected" stat from a real regular file; the descriptor opened is
+    // the FIFO's. Exactly the post-swap shape.
+    let regular = root.join("real.txt");
+    std::fs::write(&regular, b"inspected object").expect("write");
+    let inspected_fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        &regular,
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+    )
+    .expect("open inspected");
+    let inspected = rustix::fs::fstat(&inspected_fd).expect("fstat");
+
+    let opened = rustix::fs::openat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .expect("NONBLOCK open of a FIFO returns without a writer");
+    let path = RepositoryPath::from_bytes(b"pipe").expect("path");
+    let err = super::capture::verify_identity(&opened, &inspected, &path)
+        .expect_err("the FIFO is not the inspected object");
+    assert_eq!(err.code, code::HOSTILE_FILESYSTEM);
+}
+
+#[test]
+fn bounded_reads_refuse_growth_shrink_and_ceiling_exactly() {
+    use super::capture::{ReadFault, read_bounded};
+    let mut cursor: &[u8] = b"exact";
+    assert_eq!(read_bounded(&mut cursor, 5, 512).expect("exact"), b"exact");
+
+    // Grown past the validated size: refused, not silently truncated.
+    let mut grown: &[u8] = b"now-longer";
+    assert!(matches!(
+        read_bounded(&mut grown, 5, 512),
+        Err(ReadFault::Grew)
+    ));
+
+    // Shrunk: same refusal.
+    let mut shrunk: &[u8] = b"ab";
+    assert!(matches!(
+        read_bounded(&mut shrunk, 5, 512),
+        Err(ReadFault::Grew)
+    ));
+
+    // Over ceiling: refused at max+1 bytes read, whatever was expected.
+    let mut huge: &[u8] = &[0u8; 64];
+    assert!(matches!(
+        read_bounded(&mut huge, 64, 8),
+        Err(ReadFault::OverCeiling)
+    ));
 }

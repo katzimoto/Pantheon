@@ -363,13 +363,20 @@ replace: entries.sort_by(|a, b| std::cmp::Ordering::Equal);
 scope: -p pantheon-core --lib
 test: artifact::tests::revision_state_identity_is_order_independent_and_content_determined
 
-name: changed-path-scope-ceiling-removed
+name: changed-path-scope-retention-gate-disabled
+file: crates/pantheon-engine/src/sealing.rs
+find: if unpublished.contains(path_bytes) {
+replace: if false {
+scope: -p pantheon-engine --lib
+test: sealing::tests::an_added_path_outside_scope_is_refused_at_its_own_gate
+
+name: deleted-path-scope-ceiling-removed
 file: crates/pantheon-engine/src/sealing.rs
 find: if !scope.authorizes(&path) {
 replace: if false {
 occurrence: 1
 scope: -p pantheon-engine --lib
-test: sealing::tests::a_change_outside_declared_scope_is_refused_and_publishes_nothing
+test: sealing::tests::a_deleted_path_outside_scope_is_refused_at_its_own_gate
 
 name: seal-before-derived-from-empty-bytes
 file: crates/pantheon-engine/src/sealing.rs

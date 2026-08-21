@@ -147,11 +147,17 @@ impl WorkspaceTreeCapture for ConfinedCapture {
             // same thing here: the trusted root is filesystem indirection.
             rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => fault(
                 code::HOSTILE_FILESYSTEM,
-                format!("{} is a symlink or not a directory, not the trusted                          capture root", root.display()),
+                format!(
+                    "{} is a symlink or not a directory, not the trusted capture root",
+                    root.display()
+                ),
             ),
             other => fault(
                 code::CAPTURE_IO,
-                format!("could not open the capture root {}: {other}", root.display()),
+                format!(
+                    "could not open the capture root {}: {other}",
+                    root.display()
+                ),
             ),
         })?;
 
@@ -271,6 +277,23 @@ impl ConfinedCapture {
                 )
             })?;
 
+            // A nested repository is submodule semantics v1 does not
+            // support, whatever filesystem type the `.git` entry has: a
+            // directory for `git submodule add` in old layouts, a *gitfile*
+            // (`gitdir: ...`) in modern ones, or a symlink. Silently
+            // flattening any of them would publish one repository's
+            // interior — or its indirection target's identity — as plain
+            // content of another.
+            if component == b".git" {
+                return Err(fault(
+                    code::HOSTILE_FILESYSTEM,
+                    format!(
+                        "{} nests a repository below the Workspace root",
+                        path.to_manifest_string()
+                    ),
+                ));
+            }
+
             match file_type_field(stat.st_mode) {
                 FT_DIRECTORY => {
                     // An undeclared mount boundary: crossing onto another
@@ -281,18 +304,6 @@ impl ConfinedCapture {
                             code::HOSTILE_FILESYSTEM,
                             format!(
                                 "{} crosses onto another filesystem",
-                                path.to_manifest_string()
-                            ),
-                        ));
-                    }
-                    // A nested repository is submodule semantics v1 does not
-                    // support; silently flattening it would publish one
-                    // repository's interior as plain content.
-                    if component == b".git" {
-                        return Err(fault(
-                            code::HOSTILE_FILESYSTEM,
-                            format!(
-                                "{} nests a repository below the Workspace root",
                                 path.to_manifest_string()
                             ),
                         ));
@@ -359,10 +370,18 @@ impl ConfinedCapture {
                             ),
                         ));
                     }
+                    // NONBLOCK is load-bearing in the race case: an entry
+                    // swapped for a FIFO between inspection and open would
+                    // otherwise block this open until a writer appears —
+                    // before verify_identity can reject it. On a FIFO,
+                    // O_RDONLY|NONBLOCK returns immediately; on a regular
+                    // file it is a no-op.
                     let file_fd = rustix::fs::openat(
                         &dir_fd,
                         &name_cstr,
-                        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+                        rustix::fs::OFlags::RDONLY
+                            | rustix::fs::OFlags::NOFOLLOW
+                            | rustix::fs::OFlags::NONBLOCK,
                         rustix::fs::Mode::empty(),
                     )
                     .map_err(|errno| match errno {
@@ -384,22 +403,28 @@ impl ConfinedCapture {
                     // inspected object — never a second pathname lookup.
                     verify_identity(&file_fd, &stat, &path)?;
                     let mut file = std::fs::File::from(file_fd);
-                    let mut bytes = Vec::with_capacity(stat.st_size as usize);
-                    file.read_to_end(&mut bytes).map_err(|errno_like| {
-                        fault(
-                            code::CAPTURE_IO,
-                            format!("could not read {}: {errno_like}", path.to_manifest_string()),
-                        )
-                    })?;
-                    if bytes.len() as u64 != stat.st_size.max(0) as u64 {
-                        return Err(fault(
-                            code::HOSTILE_FILESYSTEM,
-                            format!(
-                                "{} changed size while being captured",
-                                path.to_manifest_string()
-                            ),
-                        ));
-                    }
+                    let bytes =
+                        read_bounded(&mut file, stat.st_size.max(0) as u64, MAX_OBJECT_BYTES)
+                            .map_err(|fault_kind| match fault_kind {
+                                ReadFault::Io(err) => fault(
+                                    code::CAPTURE_IO,
+                                    format!("could not read {}: {err}", path.to_manifest_string()),
+                                ),
+                                ReadFault::Grew => fault(
+                                    code::HOSTILE_FILESYSTEM,
+                                    format!(
+                                        "{} changed size while being captured",
+                                        path.to_manifest_string()
+                                    ),
+                                ),
+                                ReadFault::OverCeiling => fault(
+                                    code::CEILING,
+                                    format!(
+                                        "{} exceeds the per-object ceiling",
+                                        path.to_manifest_string()
+                                    ),
+                                ),
+                            })?;
                     let kind = if stat.st_mode & 0o111 != 0 {
                         EntryKind::Executable
                     } else {
@@ -636,4 +661,41 @@ impl TrustedBaseReader for GitBaseReader {
             ],
         )
     }
+}
+
+/// Why a bounded payload read refused.
+#[derive(Debug)]
+pub(crate) enum ReadFault {
+    /// The descriptor could not be read.
+    Io(std::io::Error),
+    /// The object's byte count no longer matches what its validated
+    /// descriptor reported: it changed while being captured.
+    Grew,
+    /// The read exceeded the per-object ceiling before reaching the
+    /// expected end — bounds allocation regardless of what the writer does.
+    OverCeiling,
+}
+
+/// Reads exactly `expected` bytes, refusing to buffer more than `max`.
+///
+/// The ceiling check at inspection time is not enough on its own: a file
+/// grown after `fstat` would otherwise be read to EOF in full before any
+/// size comparison runs. Reading through a `Take` limited to `max + 1`
+/// keeps the allocation bound real; the one extra byte distinguishes "at
+/// the ceiling" from "over it".
+pub(crate) fn read_bounded(
+    file: &mut impl std::io::Read,
+    expected: u64,
+    max: u64,
+) -> Result<Vec<u8>, ReadFault> {
+    let mut bytes = Vec::with_capacity(expected.min(max + 1) as usize);
+    let mut limited = file.take(max.saturating_add(1));
+    limited.read_to_end(&mut bytes).map_err(ReadFault::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(ReadFault::OverCeiling);
+    }
+    if bytes.len() as u64 != expected {
+        return Err(ReadFault::Grew);
+    }
+    Ok(bytes)
 }

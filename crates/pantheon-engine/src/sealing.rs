@@ -339,6 +339,11 @@ pub struct SealedArtifact {
 const MAX_ENTRIES: usize = 100_000;
 const MAX_TOTAL_BYTES: u64 = 1 << 30;
 
+/// The fault code the capture sink uses to report an out-of-scope path, so
+/// the controller can surface it as the typed [`SealError::ScopeViolated`]
+/// rather than a generic capture failure.
+const SCOPE_FAULT_CODE: &str = "workspace.scope-violated";
+
 /// Seals the Task's settled Workspace state into a CAS-complete
 /// `code.changeset`.
 pub struct ChangesetSealer<'a> {
@@ -537,9 +542,23 @@ impl<'a> ChangesetSealer<'a> {
         // one object, and every payload is durable before anything
         // references it.
         let mut final_state: BTreeMap<Vec<u8>, (EntryKind, Digest, u64)> = BTreeMap::new();
+        // Captured paths whose bytes were deliberately not retained because
+        // they sit outside the declared scope. If any of them turns out to
+        // have changed, the diff refuses the seal: an out-of-authority path
+        // can never become changeset output.
+        let mut unpublished: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         let mut total_bytes: u64 = 0;
         self.capture
             .capture_tree(&capture_root, &mut |entry: CapturedEntry| {
+                // Scope decides RETENTION, not existence. Every captured
+                // entry is hashed — the diff needs content identity for the
+                // whole tree — but bytes are made durable in CAS only for
+                // in-scope paths, so content outside the Task's authority
+                // is never written into Pantheon's CAS, not even as an
+                // orphan. Whether an out-of-scope path actually changed is
+                // only known at the diff below; if it did, that is an
+                // authority violation and the seal fails there, before any
+                // manifest or database row exists.
                 if final_state.len() >= MAX_ENTRIES {
                     return Err(ExternalFault {
                         code: "workspace.capture-ceiling".to_string(),
@@ -553,24 +572,32 @@ impl<'a> ChangesetSealer<'a> {
                         detail: format!("more than {MAX_TOTAL_BYTES} captured bytes"),
                     });
                 }
-                let published = self.objects.publish(&entry.bytes)?;
-                if published.size != entry.bytes.len() as u64 {
-                    return Err(ExternalFault {
-                        code: "cas.verify-failed".to_string(),
-                        detail: format!(
-                            "published {} bytes but the store reports {}",
-                            entry.bytes.len(),
-                            published.size
-                        ),
-                    });
+                let digest = Digest::of(&entry.bytes);
+                let size = entry.bytes.len() as u64;
+                if scope.authorizes(&entry.path) {
+                    let published = self.objects.publish(&entry.bytes)?;
+                    if published.size != size || published.digest != digest {
+                        return Err(ExternalFault {
+                            code: "cas.verify-failed".to_string(),
+                            detail: format!(
+                                "published {} bytes as {}, expected {} as {}",
+                                published.size, published.digest, size, digest
+                            ),
+                        });
+                    }
+                } else {
+                    unpublished.insert(entry.path.sort_key().to_vec());
                 }
-                final_state.insert(
-                    entry.path.sort_key().to_vec(),
-                    (entry.kind, published.digest, published.size),
-                );
+                final_state.insert(entry.path.sort_key().to_vec(), (entry.kind, digest, size));
                 Ok(())
             })
-            .map_err(SealError::Capture)?;
+            .map_err(|fault| {
+                if fault.code == SCOPE_FAULT_CODE {
+                    SealError::ScopeViolated { path: fault.detail }
+                } else {
+                    SealError::Capture(fault)
+                }
+            })?;
 
         // Authoritative before-state: the trusted immutable base, never the
         // worker's index/objects.
@@ -585,11 +612,6 @@ impl<'a> ChangesetSealer<'a> {
         let mut entries: Vec<ChangesetEntry> = Vec::new();
         for (path_bytes, after) in &final_state {
             let path = RepositoryPath::from_bytes(path_bytes)?;
-            if !scope.authorizes(&path) {
-                return Err(SealError::ScopeViolated {
-                    path: path.to_manifest_string(),
-                });
-            }
             let (after_kind, after_digest, after_size) = after;
             let after_state = EntryState::Present {
                 kind: *after_kind,
@@ -597,7 +619,16 @@ impl<'a> ChangesetSealer<'a> {
                 size: *after_size,
             };
             let entry = match base_tree.get(path_bytes) {
-                None => ChangesetEntry::new(path, Operation::Add, EntryState::Absent, after_state)?,
+                None => {
+                    // Scope gates changeset output. An unchanged
+                    // out-of-scope file is preexisting tree content, not an
+                    // attempt to produce output, so the refusal lands only
+                    // on entries that would actually enter the changeset —
+                    // via the retention gate below, which is the single
+                    // authority check for added and modified paths.
+                    refuse_unpublished_change(path_bytes, &unpublished)?;
+                    ChangesetEntry::new(path, Operation::Add, EntryState::Absent, after_state)?
+                }
                 Some(before) => {
                     let unchanged = before.kind == *after_kind
                         && before.size == *after_size
@@ -605,6 +636,7 @@ impl<'a> ChangesetSealer<'a> {
                     if unchanged {
                         continue;
                     }
+                    refuse_unpublished_change(path_bytes, &unpublished)?;
                     let before_state = self.before_state(&source, before)?;
                     ChangesetEntry::new(path, Operation::Modify, before_state, after_state)?
                 }
@@ -832,3 +864,20 @@ impl<'a> ChangesetSealer<'a> {
 
 #[cfg(test)]
 mod tests;
+
+/// Refuses a changed path whose bytes were deliberately not retained
+/// because they sit outside the declared scope: an attempt to produce
+/// output the Task was never authorized to produce.
+fn refuse_unpublished_change(
+    path_bytes: &[u8],
+    unpublished: &std::collections::HashSet<Vec<u8>>,
+) -> Result<(), SealError> {
+    if unpublished.contains(path_bytes) {
+        return Err(SealError::ScopeViolated {
+            path: RepositoryPath::from_bytes(path_bytes)
+                .map(|p| p.to_manifest_string())
+                .unwrap_or_else(|_| "(unrepresentable)".to_string()),
+        });
+    }
+    Ok(())
+}

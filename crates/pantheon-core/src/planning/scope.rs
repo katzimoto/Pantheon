@@ -132,28 +132,30 @@ impl WorkspaceScope {
     /// never `src/a/b.txt`, and `src/**` authorizes everything beneath
     /// `src/` — including `src/` itself matching the zero-segment reading.
     ///
-    /// A path whose bytes are not valid UTF-8 cannot appear in a UTF-8
-    /// pattern, so it is refused: fail closed, not lossily compared.
+    /// Matching is byte-exact per component. Patterns are UTF-8 strings by
+    /// way of the Task spec's canonical JSON, but paths are raw bytes: a
+    /// non-UTF-8 component compares byte-wise against literal segments
+    /// (and can only ever match a wildcard), which is what makes the
+    /// lossless manifest encoding reachable for authorized trees instead
+    /// of dead on arrival. No comparison ever decodes or normalizes.
     #[must_use]
     pub fn authorizes(&self, path: &RepositoryPath) -> bool {
-        let Some(text) = std::str::from_utf8(path.as_bytes()).ok() else {
-            return false;
-        };
-        let components: Vec<&str> = text.split('/').collect();
+        let components: Vec<&[u8]> = path.as_bytes().split(|byte| *byte == b'/').collect();
         self.patterns
             .iter()
             .any(|pattern| matches_from(&pattern.segments, &components))
     }
 }
 
-/// Matches `pattern` against `path`, both as whole segments.
-fn matches_from(pattern: &[Segment], path: &[&str]) -> bool {
+/// Matches `pattern` against `path`, both as whole segments. Components are
+/// raw bytes; literals compare through their UTF-8 bytes exactly.
+fn matches_from(pattern: &[Segment], path: &[&[u8]]) -> bool {
     match (pattern.split_first(), path.split_first()) {
         (None, None) => true,
         // A literal or `*` consumes exactly one component; literals compare
-        // byte-exactly through their string form.
+        // byte-exactly.
         (Some((Segment::Literal(literal), prest)), Some((component, crest))) => {
-            *component == literal && matches_from(prest, crest)
+            *component == literal.as_bytes() && matches_from(prest, crest)
         }
         (Some((Segment::One, prest)), Some((_component, crest))) => matches_from(prest, crest),
         // `**` matches zero components here, or one component and retries

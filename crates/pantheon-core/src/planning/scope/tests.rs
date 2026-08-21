@@ -65,11 +65,33 @@ fn any_declared_pattern_authorizes_and_empty_authorizes_nothing() {
 }
 
 #[test]
-fn non_utf8_paths_fail_closed_rather_than_lossily_matching() {
+fn non_utf8_paths_match_bytes_exactly_where_wildcards_authorize_them() {
+    // Matching is byte-exact per component, never a lossy decode: a
+    // non-UTF-8 name under an authorized subtree is authorized (and its
+    // manifest spelling is the lossless encoding), while the same bytes
+    // outside every pattern are refused. Either way nothing decodes.
     let s = scope(&["workspace://src/**"]);
     let raw = [b's', b'r', b'c', b'/', 0xE9];
     let p = RepositoryPath::from_bytes(&raw).expect("representable");
-    assert!(!s.authorizes(&p), "an inexpressible path must not match");
+    assert!(s.authorizes(&p), "wildcards match raw-byte components");
+
+    let docs = scope(&["workspace://docs/**"]);
+    assert!(!docs.authorizes(&p), "no literal matches foreign bytes");
+
+    // A literal segment never equals a non-UTF-8 component, by bytes —
+    // and the same valid-UTF-8 spelling does match, proving the comparison
+    // is exact rather than lossy in either direction.
+    let literal = scope(&["workspace://src/\u{00e9}.txt"]);
+    let invalid = [b's', b'r', b'c', b'/', 0xE9, b'.', b't', b'x', b't'];
+    assert!(
+        !literal.authorizes(&RepositoryPath::from_bytes(&invalid).expect("representable")),
+        "lone 0xE9 is not the UTF-8 spelling of the pattern's segment"
+    );
+    let valid = [b's', b'r', b'c', b'/', 0xC3, 0xA9, b'.', b't', b'x', b't'];
+    assert!(
+        literal.authorizes(&RepositoryPath::from_bytes(&valid).expect("representable")),
+        "the UTF-8 encoding of the same name matches exactly"
+    );
 }
 
 #[test]

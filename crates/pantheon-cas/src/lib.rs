@@ -33,7 +33,7 @@
 //! stage under a private O_EXCL name     never touch a live object path
 //! fsync the staged file                 the bytes survive before they exist
 //! hard-link into the digest namespace   atomic; EEXIST means prior/concurrent publish
-//! verify whatever sits at that path     pre-existing objects are verified, not trusted
+//! on collision, verify what's there     pre-existing objects are proven, never trusted by name
 //! unlink the staged name                one namespace entry per digest
 //! fsync the directory                   the linkage survives crashes too
 //! ```
@@ -89,8 +89,11 @@ impl LocalFsCas {
         }
     }
 
-    /// Reads back and hashes an object file, checking size and digest.
-    fn verify_at(&self, path: &Path, reference: &ObjectRef) -> Result<(), ExternalFault> {
+    /// Reads an object file back once, checking size and digest, and
+    /// returns the verified bytes. Every read path goes through here, so a
+    /// caller that needs the bytes never reads a second time — and never
+    /// risks a second read differing from the one that was verified.
+    fn read_verified(&self, path: &Path, reference: &ObjectRef) -> Result<Vec<u8>, ExternalFault> {
         let bytes = std::fs::read(path).map_err(|err| {
             Self::fault(
                 "cas.object-unavailable",
@@ -119,7 +122,7 @@ impl LocalFsCas {
                 ),
             ));
         }
-        Ok(())
+        Ok(bytes)
     }
 
     /// Durably links verified staged bytes into the digest namespace.
@@ -135,7 +138,7 @@ impl LocalFsCas {
             // but their bytes must prove themselves; a filename proves
             // nothing.
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.verify_at(final_path, reference)?;
+                self.read_verified(final_path, reference)?;
                 discard_staged(staged)?;
                 return Ok(());
             }
@@ -163,7 +166,7 @@ impl ContentObjectStore for LocalFsCas {
         // Already present? Verify rather than trust, then done: publication
         // of one digest is idempotent however many callers race it.
         if final_path.exists() {
-            self.verify_at(&final_path, &reference)?;
+            self.read_verified(&final_path, &reference)?;
             return Ok(reference);
         }
 
@@ -211,18 +214,13 @@ impl ContentObjectStore for LocalFsCas {
     }
 
     fn verify(&self, reference: &ObjectRef) -> Result<(), ExternalFault> {
-        self.verify_at(&self.path_of(&reference.digest), reference)
+        self.read_verified(&self.path_of(&reference.digest), reference)
+            .map(|_| ())
     }
 
     fn read(&self, reference: &ObjectRef) -> Result<Vec<u8>, ExternalFault> {
         let path = self.path_of(&reference.digest);
-        self.verify_at(&path, reference)?;
-        std::fs::read(&path).map_err(|err| {
-            Self::fault(
-                "cas.object-unavailable",
-                format!("could not read {}: {err}", path.display()),
-            )
-        })
+        self.read_verified(&path, reference)
     }
 }
 
