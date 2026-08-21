@@ -205,8 +205,10 @@ pub enum StoreError {
     },
     /// A sealing publication failed an authority revalidation inside the
     /// final transaction: the Workspace is no longer frozen at the fenced
-    /// revision, no longer owned by the named Task, or the owning Task has
-    /// moved past the phase that authorized capture.
+    /// revision, no longer owned by the named Task, or the Run named by the
+    /// seal authority is no longer the Task's current, nonterminal,
+    /// revision-current responsible Run bound to exactly this Workspace at
+    /// its immutable base under a ceiling permitting this seal.
     ///
     /// Distinct from [`StoreError::RevisionConflict`] so a caller can tell
     /// "retry with fresh state" (a conflict) from "this seal's authority is

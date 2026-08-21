@@ -67,14 +67,21 @@ admission/routing via the side-effect-free `RoutingController` → T3) in
 surface; `pantheond` supervises the tick loop that calls it.
 
 On top of that the same crates carry authoritative Workspace capture and
-`code.changeset` sealing (#32): `pantheon-core` holds the Artifact vocabulary —
-lossless repository paths, canonical entry kinds, the deterministic
-revision-state digest and the canonical changeset manifest — plus the Task
+`code.changeset` sealing (#32, #76): `pantheon-core` holds the Artifact
+vocabulary — lossless repository paths, canonical entry kinds, the
+deterministic revision-state digest and the canonical changeset manifest — plus the Task
 scope matcher; `pantheon-store` owns the `blobs`, `artifacts`,
 `artifact_members` and `workspace_revisions` families, the `Ready -> Frozen`
-fence, and the single-transaction seal publication that revalidates authority;
-`pantheon-engine` owns the sealing order (freeze, confined capture, CAS-first
-publication, trusted-base preimages, scope enforcement) and the three ports it
+fence, and the single-transaction seal publication that revalidates authority.
+Since #76 every seal runs under a Run-backed authority: the freeze, the
+already-frozen revalidation, and the publication each re-prove inside their own
+transaction that the claimed Run is the Task's current responsible Run —
+nonterminal, at the claimed revision, bound to exactly this Workspace at its
+immutable base, under a specification whose requested output slot permits a
+`code.changeset`. There is no zero-Run seal authority: a Ready Task has no
+execution owner, so nothing settled exists to seal. `pantheon-engine` owns the
+sealing order (freeze or revalidate under Run authority, confined capture,
+CAS-first publication, trusted-base preimages, scope enforcement) and the three ports it
 needs; `pantheon-git` implements root-confined no-follow capture and sterile
 base reads; and `pantheon-cas` is the concrete local content-addressed store
 behind the CAS port. There is still no Candidate and no acceptance: sealing

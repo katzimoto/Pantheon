@@ -32,11 +32,11 @@
 
 use pantheon_core::artifact::CODE_CHANGESET_KIND;
 use pantheon_core::config::Digest;
-use pantheon_core::planning::TaskPhase;
 use pantheon_core::workspace::WorkspacePhase;
 
 use crate::command::{Command, Committed};
 use crate::error::StoreError;
+use crate::seal::{SealAuthority, validate_seal_authority};
 use crate::store::Store;
 use crate::transaction::{Revision, Value, Writer};
 
@@ -49,11 +49,17 @@ use crate::transaction::{Revision, Value, Writer};
 pub struct SealedChangeset<'a> {
     /// The Workspace whose state was captured.
     pub workspace_id: &'a str,
-    /// The Task the Workspace must still belong to, still in the phase that
-    /// authorized capture.
+    /// The Task the Workspace must still belong to, still executing under
+    /// the claimed Run authority.
     pub task_id: &'a str,
     /// The post-freeze Workspace revision the seal fence holds.
     pub fence_revision: Revision,
+    /// The execution authority claimed for this seal, re-proven inside the
+    /// publication transaction exactly as at the freeze boundary.
+    pub authority: &'a SealAuthority,
+    /// The TaskSpec output slot this seal produces, re-checked against the
+    /// frozen specification inside the transaction.
+    pub output_slot: &'a str,
     /// The repository identity recorded on the checkpoint.
     pub repository: &'a str,
     /// The resolved immutable base the before-state was derived from.
@@ -100,16 +106,25 @@ impl Store {
     /// forbids external effects inside a transaction, and every byte this
     /// claims was already made durable before the call.
     ///
+    /// Authority is re-read *inside this transaction*, independently of the
+    /// validation that preceded filesystem capture: the claimed Run must
+    /// still be the Task's current, nonterminal, revision-current
+    /// responsible Run bound to exactly this Workspace at its immutable
+    /// base, and the frozen specification must still permit a
+    /// `code.changeset` on the requested slot. Validation performed before
+    /// capture says nothing about now.
+    ///
     /// # Errors
     ///
     /// [`StoreError::SealAuthorityInvalid`] when the Workspace is no longer
-    /// frozen at `fence_revision`, no longer owned by `task_id`, or the Task
-    /// has left the phase that authorized capture; [`StoreError::
-    /// RevisionConflict`] when the Workspace row is gone outright;
-    /// [`StoreError::ContentIdentityConflict`] when a computed digest names
-    /// an existing row holding different content — corruption or a broken
-    /// hash, never overwritten; plus the command envelope's failures.
-    /// Nothing is written in any failure case.
+    /// frozen at `fence_revision`, no longer owned by `task_id`, or the
+    /// claimed Run authority no longer holds (see the crate-private
+    /// `validate_seal_authority`);
+    /// [`StoreError::RevisionConflict`] when the Workspace row is gone
+    /// outright; [`StoreError::ContentIdentityConflict`] when a computed
+    /// digest names an existing row holding different content — corruption
+    /// or a broken hash, never overwritten; plus the command envelope's
+    /// failures. Nothing is written in any failure case.
     #[allow(clippy::too_many_lines)]
     pub fn commit_changeset_seal(
         &self,
@@ -160,23 +175,15 @@ impl Store {
                 });
             }
 
-            let task_phase: Option<String> = writer.query_optional(
-                "SELECT phase FROM tasks WHERE id = ?1",
-                &[Value::from(seal.task_id)],
-                |row| row.get(0),
+            // The same Run facts validated before capture are re-proven here,
+            // inside this publication's own transaction.
+            validate_seal_authority(
+                writer,
+                seal.authority,
+                seal.task_id,
+                seal.output_slot,
+                seal.workspace_id,
             )?;
-            let Some(task_phase) = task_phase else {
-                return writer.fail(StoreError::SealAuthorityInvalid {
-                    workspace_id: seal.workspace_id.to_string(),
-                    detail: format!("task {} no longer exists", seal.task_id),
-                });
-            };
-            if task_phase != TaskPhase::Ready.as_str() {
-                return writer.fail(StoreError::SealAuthorityInvalid {
-                    workspace_id: seal.workspace_id.to_string(),
-                    detail: format!("task {} is {task_phase}, not Ready", seal.task_id),
-                });
-            }
 
             // ---- Immutable rows: reuse verified, create once. ----
 
