@@ -4,7 +4,7 @@
 //! trustworthy, and nothing else decides it:
 //!
 //! ```text
-//! re-read Task + Workspace authority            (durable truth, not caller claims)
+//! re-read Task + Run + Workspace authority      (durable truth, not caller claims)
 //!   ↓ freeze the Workspace                      Ready -> Frozen, under the command envelope
 //!   ↓ pin the capture root                      derived from durable identity + controller root
 //!   ↓ confined no-follow capture                (port: platform crate)
@@ -13,8 +13,26 @@
 //!                                                 (port: platform crate)
 //!   ↓ diff logical states, scope-check every changed path
 //!   ↓ build the canonical manifest              (pantheon-core, pure)
-//!   ↓ ONE authoritative transaction             re-read fence + ownership, commit rows
+//!   ↓ ONE authoritative transaction             re-read fence + Run authority, commit rows
 //! ```
+//!
+//! # Authority, stated truthfully
+//!
+//! Since #29 a coding Task does its work under a durable Run: T3 commits
+//! the Task to `Active` with a single nonterminal responsible Run, freezing
+//! the exact Binding, source snapshot, Workspace identity and immutable
+//! base the Run operates against. Canonical sealing happens on
+//! `task.submit_result`, under that same Run. The [`SealAuthority`] a
+//! caller presents names that Run plus the `run_status` revision its proof
+//! was read at, and it is a claim, never a fact: the freeze transaction,
+//! the already-frozen revalidation, and the final publication each re-read
+//! every fact inside their own authoritative transaction and refuse the
+//! seal unless the named Run is still the Task's current responsible Run,
+//! nonterminal, at the claimed revision, bound to exactly this Workspace
+//! at its immutable base, and operating under a specification whose
+//! requested output slot permits a `code.changeset`. There is deliberately
+//! no zero-Run authority left: a Task with zero nonterminal Runs has no
+//! execution owner, so nothing settled exists to seal.
 //!
 //! # Quiescence, stated truthfully
 //!
@@ -22,16 +40,12 @@
 //! Pantheon-visible mutation path is serialized behind the single
 //! authoritative writer and the Workspace row says `Frozen`. The other half
 //! — that no execution owner is running — is *proved*, not assumed: the
-//! freeze transaction re-reads the owning Task inside the authoritative
-//! transaction and requires the phase whose schema constraint forbids an
-//! `active_run_id` at all. On this substrate no scheduler, Run or Sandbox
-//! exists, so a `Ready` Task provably has zero execution owners, and there
-//! is no process to stop because none was ever authorized to start. What
-//! freezing deliberately does NOT claim is that some out-of-band writer has
-//! stopped touching the filesystem; that risk is answered by the confined
-//! capture boundary (fail-closed races), not by the database, and a later
-//! mission that introduces real execution owners will extend this step to
-//! stop them — the [`SealAuthority`] input is the seam it will join.
+//! freeze transaction requires the owning Task to be `Active` under the
+//! claimed current Run, so the fence and the responsibility relation are
+//! established by the same authoritative commit. What freezing deliberately
+//! does NOT claim is that some out-of-band writer has stopped touching the
+//! filesystem; that risk is answered by the confined capture boundary
+//! (fail-closed races), not by the database.
 //!
 //! # Failure shape
 //!
@@ -41,6 +55,16 @@
 //! knows what the failure touched; rematerializing would destroy
 //! worker-writable state that may be unsealed work. Recovery decides later,
 //! from evidence.
+//!
+//! # Command identity under replay
+//!
+//! Every inner command identity is derived from the outer command id *and*
+//! the authority facts (`run_id @ expected revision`) plus the observed
+//! fence revision. A retry of the same request therefore replays the prior
+//! outcome legitimately, while a retry presenting different authority
+//! derives a different identity, executes afresh, and is refused by the
+//! in-transaction revalidation — no ledger entry from an earlier decision
+//! can authorize a later, different claim.
 //!
 //! # What this controller does not do
 //!
@@ -59,7 +83,7 @@ use pantheon_core::artifact::{
 use pantheon_core::config::Digest;
 use pantheon_core::planning::{TaskDecodeError, TaskPhase, TaskSpec};
 use pantheon_core::workspace::{Materialization, WorkspacePhase};
-use pantheon_store::{Committed, SealedChangeset, Store, StoreError};
+use pantheon_store::{Committed, SealAuthority, SealedChangeset, Store, StoreError};
 
 use crate::workspace::MAX_COMMAND_ID;
 
@@ -194,21 +218,6 @@ pub trait ContentObjectStore {
     fn read(&self, reference: &ObjectRef) -> Result<Vec<u8>, ExternalFault>;
 }
 
-/// The execution authority a seal runs under.
-///
-/// Deliberately narrow: on this substrate the only truthful authority is a
-/// Task checkpoint, whose proof (Task `Ready`, hence provably zero Runs) is
-/// re-established inside the freeze transaction rather than accepted from
-/// the caller. When #29 introduces real Run ownership, a new variant joins
-/// here carrying the Run identity, and the freeze transaction extends to
-/// require it current — the capture subsystem does not redesign around
-/// scheduler internals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SealAuthority {
-    /// The Task's own durable checkpoint boundary.
-    TaskCheckpoint,
-}
-
 /// The durable command identity a sealing operation runs under.
 #[derive(Debug, Clone, Copy)]
 pub struct SealCommand<'a> {
@@ -218,11 +227,13 @@ pub struct SealCommand<'a> {
 }
 
 /// What is asked to be sealed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SealRequest<'a> {
     pub task_id: &'a str,
     /// The TaskSpec output slot this seal produces.
     pub output_slot: &'a str,
+    /// The Run authority claimed for this seal. A claim, never a fact:
+    /// every authoritative boundary re-reads and re-proves it.
     pub authority: SealAuthority,
 }
 
@@ -384,24 +395,28 @@ impl<'a> ChangesetSealer<'a> {
 
     /// Runs the whole sealing order for one Task output slot.
     ///
-    /// Idempotent under retry: the freeze replays, CAS publication is
-    /// digest-idempotent, and the final publication replays or converges on
-    /// existing content. Two different commands capturing identical state
-    /// converge on one Artifact identity.
+    /// Idempotent under retry: the freeze or its revalidation replays, CAS
+    /// publication is digest-idempotent, and the final publication replays
+    /// or converges on existing content. Two different commands capturing
+    /// identical state converge on one Artifact identity. Command identity
+    /// is bound to the claimed authority facts, so a retry presenting a
+    /// different Run revision derives a different command, executes afresh,
+    /// and is refused by the in-transaction revalidation rather than
+    /// inheriting an earlier decision's outcome.
     ///
     /// # Errors
     ///
     /// [`SealError`] as documented per variant. On every failure the
-    /// Workspace stays frozen and no complete Artifact claim exists.
+    /// Workspace stays frozen (or unfrozen-but-untouched) and no complete
+    /// Artifact claim exists.
     pub fn seal(
         &self,
         command: &SealCommand<'_>,
         request: &SealRequest<'_>,
     ) -> Result<SealedArtifact, SealError> {
-        // The authority variant carries no data today; its proof is
-        // established inside the freeze transaction (a `Ready` Task
-        // provably owns zero Runs), never from caller-supplied claims.
-        let _ = request.authority;
+        // The claimed authority is never trusted here; each authoritative
+        // boundary below re-reads durable state inside its own transaction
+        // and refuses the seal unless the named Run is still current.
 
         // ---- Authority, read fresh from durable state. ----
         let spec = self.load_spec(request.task_id)?;
@@ -450,10 +465,20 @@ impl<'a> ChangesetSealer<'a> {
             });
         }
 
-        // ---- Quiesce: establish and durably record the fence. ----
+        // ---- Quiesce: establish or revalidate the fence under the
+        // claimed Run authority. Both arms are authoritative validation
+        // boundaries: capture never runs against a Workspace whose seal
+        // authority was not proven inside a serialized transaction. ----
         let fence_revision = match workspace.phase {
             WorkspacePhase::Ready => {
-                let id = self.derive(command.id, "freeze", Some(workspace.revision.get()))?;
+                let id = self.derive(
+                    command.id,
+                    &format!(
+                        "freeze:{}:{}",
+                        workspace.revision.get(),
+                        authority_tag(&request.authority)
+                    ),
+                )?;
                 let committed = self.store.freeze_workspace(
                     &pantheon_store::Command {
                         epoch: command.epoch,
@@ -461,6 +486,9 @@ impl<'a> ChangesetSealer<'a> {
                         request_hash: command.request_hash,
                         event_type: "workspace.frozen",
                     },
+                    &request.authority,
+                    request.task_id,
+                    request.output_slot,
                     &workspace.id,
                     workspace.revision,
                 );
@@ -477,6 +505,30 @@ impl<'a> ChangesetSealer<'a> {
                             .to_string(),
                     });
                 }
+                // An already-fenced Workspace must not bypass current Run
+                // authorization merely because its fence exists.
+                let id = self.derive(
+                    command.id,
+                    &format!(
+                        "validated:{}:{}",
+                        workspace.revision.get(),
+                        authority_tag(&request.authority)
+                    ),
+                )?;
+                let committed = self.store.validate_seal_authority_command(
+                    &pantheon_store::Command {
+                        epoch: command.epoch,
+                        id: &id,
+                        request_hash: command.request_hash,
+                        event_type: "workspace.seal-authority.validated",
+                    },
+                    &request.authority,
+                    request.task_id,
+                    request.output_slot,
+                    &workspace.id,
+                    workspace.revision,
+                );
+                self.settle(committed)?;
                 workspace.revision
             }
             phase => {
@@ -509,7 +561,10 @@ impl<'a> ChangesetSealer<'a> {
                 // failure to record evidence must not mask the original
                 // cause, but must also not pass unnoticed: it surfaces as
                 // the store error instead.
-                let id = self.derive(command.id, "capture-failed", Some(fence_revision.get()))?;
+                let id = self.derive(
+                    command.id,
+                    &format!("capture-failed:{}", fence_revision.get()),
+                )?;
                 self.store
                     .record_capture_failure(
                         &pantheon_store::Command {
@@ -531,7 +586,7 @@ impl<'a> ChangesetSealer<'a> {
     fn capture_and_seal(
         &self,
         command: &SealCommand<'_>,
-        _request: &SealRequest<'_>,
+        request: &SealRequest<'_>,
         workspace: &pantheon_store::WorkspaceRecord,
         fence_revision: pantheon_store::Revision,
         scope: &pantheon_core::planning::scope::WorkspaceScope,
@@ -701,7 +756,14 @@ impl<'a> ChangesetSealer<'a> {
             }
         }
 
-        let id = self.derive(command.id, "sealed", Some(fence_revision.get()))?;
+        let id = self.derive(
+            command.id,
+            &format!(
+                "sealed:{}:{}",
+                fence_revision.get(),
+                authority_tag(&request.authority)
+            ),
+        )?;
         let committed = self.store.commit_changeset_seal(
             &pantheon_store::Command {
                 epoch: command.epoch,
@@ -713,6 +775,8 @@ impl<'a> ChangesetSealer<'a> {
                 workspace_id: &workspace.id,
                 task_id: &workspace.task_id,
                 fence_revision,
+                authority: &request.authority,
+                output_slot: request.output_slot,
                 repository: &workspace.repository,
                 resolved_base: workspace.resolved_base.as_str(),
                 revision_state_digest: revision_state.digest(),
@@ -813,6 +877,10 @@ impl<'a> ChangesetSealer<'a> {
     }
 
     /// Loads and digest-verifies the Task's immutable specification.
+    ///
+    /// Sealing runs under a responsible Run, so the Task must be `Active`;
+    /// the deeper Run facts (currency, ownership, ceiling) are re-proven
+    /// inside the authoritative transactions, not here.
     fn load_spec(&self, task_id: &str) -> Result<TaskSpec, SealError> {
         let task = self
             .store
@@ -821,10 +889,13 @@ impl<'a> ChangesetSealer<'a> {
                 task_id: task_id.to_string(),
                 detail: "no such task".to_string(),
             })?;
-        if task.phase != TaskPhase::Ready {
+        if task.phase != TaskPhase::Active {
             return Err(SealError::TaskUnusable {
                 task_id: task_id.to_string(),
-                detail: format!("the task is {}", task.phase.as_str()),
+                detail: format!(
+                    "the task is {}; sealing runs under its current Run",
+                    task.phase.as_str()
+                ),
             });
         }
         let canonical = self
@@ -850,16 +921,27 @@ impl<'a> ChangesetSealer<'a> {
         Ok(spec)
     }
 
-    fn derive(&self, base: &str, suffix: &str, from: Option<i64>) -> Result<String, SealError> {
-        let id = match from {
-            Some(revision) => format!("{base}:seal:{suffix}:{revision}"),
-            None => format!("{base}:seal:{suffix}"),
-        };
+    /// Derives an inner command identity from the outer command id and the
+    /// step's facts. Authority-bearing steps embed the authority tag, so a
+    /// retry claiming different authority derives a genuinely new command
+    /// and is validated afresh instead of replaying a prior outcome.
+    fn derive(&self, base: &str, suffix: &str) -> Result<String, SealError> {
+        let id = format!("{base}:seal:{suffix}");
         if id.len() > MAX_COMMAND_ID {
             return Err(SealError::CommandIdentityTooLong { id });
         }
         Ok(id)
     }
+}
+
+/// The compact identity of a claimed seal authority: which Run, at which
+/// observed status revision.
+fn authority_tag(authority: &SealAuthority) -> String {
+    format!(
+        "{}@{}",
+        authority.run_id,
+        authority.expected_run_revision.get()
+    )
 }
 
 #[cfg(test)]

@@ -448,12 +448,75 @@ replace: if false {
 scope: -p pantheon-store --lib
 test: workspace::tests::only_a_verified_ready_workspace_can_be_frozen
 
-name: seal-publication-skips-task-authority
-file: crates/pantheon-store/src/artifacts.rs
-find: if task_phase != TaskPhase::Ready.as_str() {
+name: seal-authority-task-phase-requirement-removed
+file: crates/pantheon-store/src/seal.rs
+find: if phase_text != TaskPhase::Active.as_str() {
 replace: if false {
 scope: -p pantheon-store --lib
 test: artifacts::tests::an_owner_or_task_authority_mismatch_fails_closed
+
+name: seal-authority-not-current-pointer-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if active_run_id.as_deref() != Some(authority.run_id.as_str()) {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::a_superseded_run_that_is_not_the_current_responsible_run_cannot_authorize
+
+name: seal-authority-foreign-holder-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if run_task_id != task_id {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::a_run_owned_by_another_task_cannot_authorize_a_seal
+
+name: seal-authority-terminal-run-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if run_phase != "Active" && run_phase != "Finalizing" {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::a_terminal_run_cannot_authorize_publication
+
+name: seal-authority-stale-run-revision-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if Revision::new(run_revision) != authority.expected_run_revision {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::a_stale_run_revision_is_refused_at_publication
+
+name: seal-authority-spec-drift-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if frozen_spec_digest.as_slice() != spec_digest.as_slice() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::drift_between_what_the_run_froze_and_current_state_refuses_publication
+
+name: seal-authority-workspace-identity-drift-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if frozen_workspace_id != workspace_id {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::drift_between_what_the_run_froze_and_current_state_refuses_publication
+
+name: seal-authority-resolved-base-drift-accepted
+file: crates/pantheon-store/src/seal.rs
+find: if workspace_base != frozen_base {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::drift_between_what_the_run_froze_and_current_state_refuses_publication
+
+name: seal-authority-slot-name-ignored
+file: crates/pantheon-store/src/seal.rs
+find: .find(|output| output.name == output_slot);
+replace: .last();
+scope: -p pantheon-store --lib
+test: artifacts::tests::an_output_ceiling_outside_the_frozen_specification_refuses_publication
+
+name: seal-authority-slot-kind-ceiling-removed
+file: crates/pantheon-store/src/seal.rs
+find: if slot.kind != CODE_CHANGESET_KIND {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::an_output_ceiling_outside_the_frozen_specification_refuses_publication
 
 name: artifact-members-truncated
 file: crates/pantheon-store/src/artifacts.rs

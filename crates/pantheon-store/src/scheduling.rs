@@ -1061,4 +1061,4 @@ fn count(conn: &rusqlite::Connection, table: &str) -> Result<i64, StoreError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

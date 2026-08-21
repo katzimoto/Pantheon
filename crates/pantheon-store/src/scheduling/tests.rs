@@ -334,6 +334,41 @@ fn commit_first(
     )
 }
 
+/// Dispatches one Ready Task through T3, reading every expectation fresh
+/// from durable authority. This is the shared fixture behind the sealing
+/// tests: it produces exactly the post-#29 state a seal runs under — an
+/// `Active` Task whose current responsible Run holds the slot.
+pub(crate) fn dispatch_ready_task(
+    store: &Store,
+    goal_id: &'static str,
+    task_id: &'static str,
+    ws_id: &str,
+    resolved_base: &str,
+    run_id: &'static str,
+    command_id: &'static str,
+) -> RunIntentCommit {
+    let pointer = store.configuration_pointer().expect("pointer");
+    let active = pointer.active.as_ref().expect("active configuration");
+    let frozen = frozen_for(store, active, resolved_base, goal_id, task_id, ws_id);
+    let snap = store.scheduling_snapshot().expect("snapshot");
+    let candidate = snap
+        .candidates
+        .iter()
+        .find(|candidate| candidate.task_id == task_id)
+        .unwrap_or_else(|| panic!("task {task_id} is dispatchable"))
+        .clone();
+    let mut intent = frozen.intent(&candidate, run_id);
+    intent.expected_scheduler_revision = snap.state.revision;
+    let epoch = store.restore_generation().expect("generation");
+    match store.commit_run_intent(
+        &command(epoch.as_str(), command_id, &[11u8; 32], "run.committed"),
+        &intent,
+    ) {
+        Ok(Committed::Executed { value, .. }) => value,
+        other => panic!("fixture dispatch commits cleanly: {other:?}"),
+    }
+}
+
 #[test]
 fn a_fresh_installation_dispatches_by_default() {
     let dir = TempDir::new("sched-bootstrap");

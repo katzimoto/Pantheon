@@ -49,6 +49,7 @@ use pantheon_core::workspace::{Materialization, RequestedBase, ResolvedBase, Wor
 
 use crate::command::{Command, Committed};
 use crate::error::StoreError;
+use crate::seal::{SealAuthority, validate_seal_authority};
 use crate::store::Store;
 use crate::transaction::{Revision, Value, Writer};
 
@@ -313,10 +314,14 @@ impl Store {
     /// This is the durable half of capture quiescence (see the sealing
     /// controller for the whole story): it CASes `Ready -> Frozen` under the
     /// normal command envelope, and inside the same transaction it re-reads
-    /// the owning Task and requires the phase that authorizes no execution
-    /// owner — on this substrate a `Ready` Task provably has zero Runs, so a
-    /// committed freeze means every Pantheon-visible mutation path is closed
-    /// behind the serialized writer.
+    /// and requires the seal's execution authority — the Run named by
+    /// [`SealAuthority`] must be the Task's current, nonterminal,
+    /// revision-current responsible Run, bound to exactly this Workspace at
+    /// its immutable base, under a specification whose requested output slot
+    /// permits a `code.changeset`. A committed freeze therefore means both
+    /// that every Pantheon-visible mutation path is closed behind the
+    /// serialized writer *and* that a live Run relation authorized this
+    /// exact capture.
     ///
     /// Materialization stays exactly what it was (`Present` for a frozen
     /// Ready Workspace). A freeze is a control-plane fence, not an
@@ -325,21 +330,28 @@ impl Store {
     /// # Errors
     ///
     /// [`StoreError::WorkspaceNotFreezable`] when the Workspace is not in the
-    /// verified-mutable state; [`StoreError::RevisionConflict`] when it has
-    /// moved or does not exist; plus the command envelope's failures.
+    /// verified-mutable state; [`StoreError::SealAuthorityInvalid`] when the
+    /// claimed Run authority does not hold (see the crate-private
+    /// `validate_seal_authority`);
+    /// [`StoreError::RevisionConflict`] when it has moved or does not exist;
+    /// plus the command envelope's failures. Nothing is written in any of
+    /// those cases.
     pub fn freeze_workspace(
         &self,
         command: &Command<'_>,
+        authority: &SealAuthority,
+        task_id: &str,
+        output_slot: &str,
         workspace_id: &str,
         expected: Revision,
     ) -> Result<Committed<WorkspaceRecord>, StoreError> {
         self.execute_command(command, |writer| {
-            let row: Option<(String, String)> = writer.query_optional(
-                "SELECT phase, materialization FROM workspaces WHERE id = ?1",
+            let row: Option<(String, String, String)> = writer.query_optional(
+                "SELECT task_id, phase, materialization FROM workspaces WHERE id = ?1",
                 &[Value::from(workspace_id)],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-            let Some((phase_text, materialization_text)) = row else {
+            let Some((owner, phase_text, materialization_text)) = row else {
                 return writer.fail(StoreError::RevisionConflict {
                     table: TABLE,
                     id: workspace_id.to_string(),
@@ -347,6 +359,12 @@ impl Store {
                     actual: None,
                 });
             };
+            if owner != task_id {
+                return writer.fail(StoreError::SealAuthorityInvalid {
+                    workspace_id: workspace_id.to_string(),
+                    detail: format!("the workspace is owned by {owner}, not {task_id}"),
+                });
+            }
             let phase = WorkspacePhase::parse(&phase_text).ok_or_else(|| {
                 StoreError::InvariantViolated(format!(
                     "workspace {workspace_id} has unknown phase {phase_text}"
@@ -366,6 +384,9 @@ impl Store {
                     materialization: materialization.as_str(),
                 });
             }
+            // The freeze is the authorization act: prove the Run relation
+            // before committing it.
+            validate_seal_authority(writer, authority, task_id, output_slot, workspace_id)?;
             transition(
                 writer,
                 workspace_id,
@@ -373,6 +394,65 @@ impl Store {
                 WorkspacePhase::Frozen,
                 Materialization::Present,
             )
+        })
+    }
+
+    /// Revalidates the seal's execution authority against current durable
+    /// state, writing nothing.
+    ///
+    /// This is the boundary an already-frozen retry runs before capture: a
+    /// Workspace whose fence was established by an earlier attempt must not
+    /// bypass current Run authorization merely because that fence exists.
+    /// It takes the authoritative transaction through the normal command
+    /// envelope — so the check is serialized against every other writer and
+    /// its outcome is durably recorded as an Event — but performs no
+    /// lifecycle mutation on purpose.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::SealAuthorityInvalid`] when the claimed Run authority
+    /// does not hold or the Workspace no longer matches the claim;
+    /// [`StoreError::RevisionConflict`] when the Workspace has moved or does
+    /// not exist; plus the command envelope's failures.
+    pub fn validate_seal_authority_command(
+        &self,
+        command: &Command<'_>,
+        authority: &SealAuthority,
+        task_id: &str,
+        output_slot: &str,
+        workspace_id: &str,
+        expected: Revision,
+    ) -> Result<Committed<WorkspaceRecord>, StoreError> {
+        self.execute_command(command, |writer| {
+            let record = read_in_transaction(writer, workspace_id)?;
+            if record.revision != expected {
+                return writer.fail(StoreError::RevisionConflict {
+                    table: TABLE,
+                    id: workspace_id.to_string(),
+                    expected: expected.get(),
+                    actual: Some(record.revision.get()),
+                });
+            }
+            if record.task_id != task_id {
+                return writer.fail(StoreError::SealAuthorityInvalid {
+                    workspace_id: workspace_id.to_string(),
+                    detail: format!(
+                        "the workspace is owned by {}, not {task_id}",
+                        record.task_id
+                    ),
+                });
+            }
+            if record.phase != WorkspacePhase::Frozen
+                || record.materialization != Materialization::Present
+            {
+                return writer.fail(StoreError::WorkspaceNotFreezable {
+                    workspace_id: workspace_id.to_string(),
+                    phase: record.phase.as_str(),
+                    materialization: record.materialization.as_str(),
+                });
+            }
+            validate_seal_authority(writer, authority, task_id, output_slot, workspace_id)?;
+            Ok(record)
         })
     }
 
