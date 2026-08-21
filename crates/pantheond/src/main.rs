@@ -124,7 +124,9 @@ async fn scheduler_loop(runtime: Arc<OperatorRuntime>) {
         let outcome =
             tokio::task::spawn_blocking(move || runtime.service().schedule_once(&[])).await;
         match outcome {
-            Ok(Ok(ScheduleOutcome::Idle)) => {}
+            // Idle and Suppressed are steady states: printing them every tick
+            // would be noise, not observability.
+            Ok(Ok(ScheduleOutcome::Idle)) | Ok(Ok(ScheduleOutcome::Suppressed(_))) => {}
             Ok(Ok(outcome)) => println!("pantheond: scheduler: {outcome:?}"),
             Ok(Err(err)) => eprintln!("pantheond: scheduler cycle failed: {err}"),
             Err(err) => eprintln!("pantheond: scheduler task failed: {err}"),

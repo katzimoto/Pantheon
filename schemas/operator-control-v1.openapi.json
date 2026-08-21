@@ -1,1105 +1,1105 @@
 {
- "openapi": "3.1.0",
- "info": {
-  "title": "Pantheon Operator Control",
-  "version": "v1",
-  "summary": "The local operator surface pantheond serves over a Unix-domain socket.",
-  "description": "This document describes the surface implemented by pantheon-operator-api. It is subordinate to the canonical architecture in docs/architecture/operations/public-daemon-api-and-cli.md: where the two disagree, the architecture is authoritative and this document is the defect.\n\nThe API is served over a Unix-domain socket only. There is no host, no port and no TLS, so the `servers` entry below names the socket path rather than a URL authority. Reaching the socket is not authentication: it establishes only that the caller shares the daemon's uid, and it is not the Agent/operator trust boundary.\n\nOnly the operations Issue #26 delivers are described. Endpoints the architecture lists but this build does not serve are deliberately absent: documenting an operation that returns 404 would be worse than omitting it."
- },
- "servers": [
-  {
-   "url": "http://localhost",
-   "description": "Placeholder authority. Requests travel over the Unix socket at $PANTHEON_SOCKET (default <data-dir>/run/pantheond.sock); the Host header names nothing routable."
-  }
- ],
- "paths": {
-  "/health/live": {
-   "get": {
-    "operationId": "getLiveness",
-    "summary": "Whether the daemon process is functioning",
-    "description": "Canonical and unversioned: health probes are process-level endpoints, not versioned semantic resources, so probe configuration survives an Operator API version transition. No /api/v1/health alias is served. Touches no durable state and cannot fail. An unreachable database is a readiness fact, not a reason to restart a daemon that is still serving.",
-    "responses": {
-     "200": {
-      "description": "The process is serving.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Liveness"
-        }
-       }
-      }
-     }
-    }
-   }
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pantheon Operator Control",
+    "version": "v1",
+    "summary": "The local operator surface pantheond serves over a Unix-domain socket.",
+    "description": "This document describes the surface implemented by pantheon-operator-api. It is subordinate to the canonical architecture in docs/architecture/operations/public-daemon-api-and-cli.md: where the two disagree, the architecture is authoritative and this document is the defect.\n\nThe API is served over a Unix-domain socket only. There is no host, no port and no TLS, so the `servers` entry below names the socket path rather than a URL authority. Reaching the socket is not authentication: it establishes only that the caller shares the daemon's uid, and it is not the Agent/operator trust boundary.\n\nOnly the operations Issue #26 delivers are described. Endpoints the architecture lists but this build does not serve are deliberately absent: documenting an operation that returns 404 would be worse than omitting it."
   },
-  "/health/ready": {
-   "get": {
-    "operationId": "getReadiness",
-    "summary": "Whether new authority-bearing work could be admitted",
-    "description": "Canonical and unversioned, like /health/live. 503 while the control plane could not safely admit work. Components the architecture requires but this build does not establish are reported with state `unimplemented` rather than asserted.",
-    "responses": {
-     "200": {
-      "description": "The control plane could admit work.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Readiness"
-        }
-       }
-      }
-     },
-     "503": {
-      "description": "The control plane could not admit work.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Readiness"
-        }
-       }
-      }
-     }
+  "servers": [
+    {
+      "url": "http://localhost",
+      "description": "Placeholder authority. Requests travel over the Unix socket at $PANTHEON_SOCKET (default <data-dir>/run/pantheond.sock); the Host header names nothing routable."
     }
-   }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "summary": "Whether the daemon process is functioning",
+        "description": "Canonical and unversioned: health probes are process-level endpoints, not versioned semantic resources, so probe configuration survives an Operator API version transition. No /api/v1/health alias is served. Touches no durable state and cannot fail. An unreachable database is a readiness fact, not a reason to restart a daemon that is still serving.",
+        "responses": {
+          "200": {
+            "description": "The process is serving.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Liveness"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Whether new authority-bearing work could be admitted",
+        "description": "Canonical and unversioned, like /health/live. 503 while the control plane could not safely admit work. Components the architecture requires but this build does not establish are reported with state `unimplemented` rather than asserted.",
+        "responses": {
+          "200": {
+            "description": "The control plane could admit work.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The control plane could not admit work.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system": {
+      "get": {
+        "operationId": "getSystem",
+        "summary": "Daemon identity, journal position, configuration and readiness",
+        "description": "A client reads commandEpoch here immediately before issuing a mutation. No installation identity is reported: the only installation-scoped identifier Pantheon durably holds is the RestoreGeneration, and it rotates on disaster restore.",
+        "responses": {
+          "200": {
+            "description": "System metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/System"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/goals": {
+      "get": {
+        "operationId": "listGoals",
+        "summary": "Every Goal, with the journal position the list corresponds to",
+        "description": "The snapshotCursor is read from the same durable snapshot as the list. Starting an Event watch strictly after it cannot miss an Event that changed what the list showed.",
+        "responses": {
+          "200": {
+            "description": "The Goal list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createGoal",
+        "summary": "Create a Goal, plan it, and materialize its Ready Task",
+        "description": "Returns 201 because the resource is created synchronously: the response is not sent until the Goal exists, its planning decision is recorded and its Task is materialized.\n\nThree authoritative transactions run under command identities derived from the caller's (commandEpoch, commandId), so a retry with the same identity reconciles the prior outcome rather than creating a second Goal. The Goal id is derived from the same identity, which is what lets a retry find what the first attempt created.",
+        "parameters": [
+          {
+            "name": "pantheon-command-epoch",
+            "in": "header",
+            "required": true,
+            "description": "The commandEpoch the client believes is current, read from GET /api/v1/system. A request carrying a superseded epoch fails closed as stale-command-epoch; the daemon never substitutes the current one.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "pantheon-command-id",
+            "in": "header",
+            "required": true,
+            "description": "Single-use command identity within its epoch. Repeating a request with the same id reconciles the prior outcome; reusing it for a different request fails closed as conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGoalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Goal, with its Ready Task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Goal"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation \u2014 the request is not a Goal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale-command-epoch, or conflict when the command id was already used for a different request.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "precondition-required \u2014 a command identity header is missing.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "temporarily-unavailable \u2014 there is no usable active configuration to plan against.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/goals/{goalId}": {
+      "get": {
+        "operationId": "getGoal",
+        "summary": "One Goal, with its Tasks",
+        "description": "Tasks are embedded because this API version exposes no Task resource.",
+        "parameters": [
+          {
+            "name": "goalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Goal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Goal"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not-found.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/goals/{goalId}/actions/cancel": {
+      "post": {
+        "operationId": "cancelGoal",
+        "summary": "Drive a Goal toward Cancelled",
+        "description": "Returns 202, not 200: the durable intent is accepted while processing continues. The transaction commits Finalizing with terminalTarget Cancelled for the Goal and for every nonterminal Task it owns; the Goal reaches Cancelled only once its obligations are safely finalized.\n\nNo If-Match. Cancel-if-nonterminal is state-independent and idempotent, so it does not require a client-supplied prior revision. Cancellation stays available while the Goal is Finalizing: a Goal finalizing toward Succeeded or Failed is retargeted to Cancelled in place and still returns 202, and one already finalizing toward Cancelled changes nothing further. Only a terminal Goal refuses, because terminal history never reopens.",
+        "parameters": [
+          {
+            "name": "goalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pantheon-command-epoch",
+            "in": "header",
+            "required": true,
+            "description": "The commandEpoch the client believes is current, read from GET /api/v1/system. A request carrying a superseded epoch fails closed as stale-command-epoch; the daemon never substitutes the current one.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "pantheon-command-id",
+            "in": "header",
+            "required": true,
+            "description": "Single-use command identity within its epoch. Repeating a request with the same id reconciles the prior outcome; reusing it for a different request fails closed as conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation accepted; the Goal is Finalizing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Goal"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not-found.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict when the Goal is terminal \u2014 terminal history never reopens \u2014 or stale-command-epoch.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "precondition-required \u2014 a command identity header is missing.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "A page of durable Events",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Read strictly after this cursor. An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Absent means the current journal head. A cursor naming another journal history, a position past the head, or text that is not a cursor at all fails closed as cursor-gone; it is never quietly replaced with the head.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum Events to return. Clamped to the server's page cap.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Event page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "cursor-gone.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/watch": {
+      "get": {
+        "operationId": "watchEvents",
+        "summary": "Follow durable Events as they commit",
+        "description": "A Server-Sent Events stream. The SSE `id` line is the resumable journal cursor and the Event's own identity stays inside the payload, so a dropped stream resumes by passing the last id back as `after`.\n\nThe starting cursor is validated before the stream opens, because a 200 has already been committed by the time the first event is written.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Read strictly after this cursor. An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Absent means the current journal head. A cursor naming another journal history, a position past the head, or text that is not a cursor at all fails closed as cursor-gone; it is never quietly replaced with the head.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Event stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "SSE messages. Each carries `id` (the journal cursor), `event` (the Event type) and `data` (an Event object)."
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "cursor-gone.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dispatch": {
+      "get": {
+        "operationId": "getDispatch",
+        "summary": "Report dispatch desired state and effective dispatchability",
+        "description": "desiredMode is the operator's durable intent; effectiveCanDispatch is the current factual ability to commit new Run intents. They are deliberately different: desiredMode RUNNING can coexist with effectiveCanDispatch false while configuration is unusable, and desiredMode PAUSED stays paused even after every other gate is healthy. blockedBy is a normalized set of current factual gates, never a second desired-state field.",
+        "responses": {
+          "200": {
+            "description": "The current dispatch view.",
+            "headers": {
+              "ETag": {
+                "description": "Opaque strong validator over the scheduler singleton revision: \"dispatch-<revision>\". Pause/resume must carry it as If-Match.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dispatch/actions/pause": {
+      "post": {
+        "operationId": "pauseDispatch",
+        "summary": "Pause new Run-intent commits",
+        "description": "Commits PAUSED as the durable operator desired state through the normal command envelope. Pausing fences new Scheduler T3 commits only: it does not cancel or stop already-committed Runs, revoke execution authority, release resources, or pretend existing external work stopped. Ordinary daemon restart preserves the durable pause.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CommandEpochHeader"
+          },
+          {
+            "$ref": "#/components/parameters/CommandIdHeader"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          },
+          "412": {
+            "$ref": "#/components/responses/StaleRevision"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
+    },
+    "/api/v1/dispatch/actions/resume": {
+      "post": {
+        "operationId": "resumeDispatch",
+        "summary": "Resume new Run-intent commits",
+        "description": "Commits RUNNING as the durable operator desired state. Resuming re-opens T3 commits subject to the remaining factual gates (configuration readiness); it creates nothing by itself.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CommandEpochHeader"
+          },
+          {
+            "$ref": "#/components/parameters/CommandIdHeader"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dispatch"
+                }
+              }
+            }
+          },
+          "412": {
+            "$ref": "#/components/responses/StaleRevision"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
+    }
   },
-  "/api/v1/system": {
-   "get": {
-    "operationId": "getSystem",
-    "summary": "Daemon identity, journal position, configuration and readiness",
-    "description": "A client reads commandEpoch here immediately before issuing a mutation. No installation identity is reported: the only installation-scoped identifier Pantheon durably holds is the RestoreGeneration, and it rotates on disaster restore.",
-    "responses": {
-     "200": {
-      "description": "System metadata.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/System"
+  "components": {
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem details. Clients branch on `code` and must not parse `detail`.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Stable identifier, spelled urn:pantheon:problem:<code>. A URN rather than an https URL: RFC 9457 wants a stable identifier, not a dereferenceable one."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable. Not machine-readable, and not stable."
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "conflict",
+              "cursor-gone",
+              "internal",
+              "not-found",
+              "precondition-required",
+              "stale-command-epoch",
+              "stale-revision",
+              "temporarily-unavailable",
+              "validation"
+            ]
+          }
         }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/goals": {
-   "get": {
-    "operationId": "listGoals",
-    "summary": "Every Goal, with the journal position the list corresponds to",
-    "description": "The snapshotCursor is read from the same durable snapshot as the list. Starting an Event watch strictly after it cannot miss an Event that changed what the list showed.",
-    "responses": {
-     "200": {
-      "description": "The Goal list.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/GoalList"
+      },
+      "Liveness": {
+        "type": "object",
+        "required": [
+          "live"
+        ],
+        "properties": {
+          "live": {
+            "type": "boolean"
+          }
         }
-       }
+      },
+      "ReadinessComponent": {
+        "type": "object",
+        "required": [
+          "name",
+          "state"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "satisfied",
+              "unsatisfied",
+              "unimplemented"
+            ],
+            "description": "`unimplemented` means the architecture requires this conjunct and no code in this build establishes it. It neither satisfies nor blocks readiness; it keeps the altitude of the `ready` flag visible."
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "Readiness": {
+        "type": "object",
+        "required": [
+          "ready",
+          "components"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessComponent"
+            }
+          }
+        }
+      },
+      "Journal": {
+        "type": "object",
+        "required": [
+          "epoch"
+        ],
+        "description": "Event Journal continuity. Rotates independently of commandEpoch; both may rotate during disaster restore for different reasons.",
+        "properties": {
+          "epoch": {
+            "type": "string"
+          },
+          "latestSequence": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The last committed sequence, or null when nothing has been committed in this history. Sequences start at 1."
+          }
+        }
+      },
+      "ActiveConfiguration": {
+        "type": "object",
+        "required": [
+          "activationSequence",
+          "contentDigest",
+          "semanticsLoaded"
+        ],
+        "properties": {
+          "activationSequence": {
+            "type": "integer"
+          },
+          "contentDigest": {
+            "type": "string"
+          },
+          "semanticsLoaded": {
+            "type": "boolean",
+            "description": "false means the durable revision is active but its source drifted, so identity governs and nothing can be planned against it."
+          }
+        }
+      },
+      "System": {
+        "type": "object",
+        "required": [
+          "daemonVersion",
+          "apiVersions",
+          "schemaVersion",
+          "commandEpoch",
+          "journal",
+          "readiness"
+        ],
+        "properties": {
+          "daemonVersion": {
+            "type": "string"
+          },
+          "apiVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "schemaVersion": {
+            "type": "integer"
+          },
+          "commandEpoch": {
+            "type": "string",
+            "description": "The current RestoreGeneration. A mutation must carry this."
+          },
+          "journal": {
+            "$ref": "#/components/schemas/Journal"
+          },
+          "activeConfiguration": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActiveConfiguration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/Readiness"
+          }
+        }
+      },
+      "GoalInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "reference"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string",
+            "description": "An opaque URI-shaped reference. Pantheon does not interpret it."
+          }
+        }
+      },
+      "Deliverable": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "required"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GoalConstraints": {
+        "type": "object",
+        "description": "The authority ceiling for every Task planned from this Goal. A Task may tighten it and never widen it.",
+        "properties": {
+          "permittedEffects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "forbiddenEffects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permittedResources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "GoalSpec": {
+        "type": "object",
+        "required": [
+          "objective",
+          "constraints"
+        ],
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "The desired outcome, stated without prescribing an implementation."
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoalInput"
+            }
+          },
+          "deliverables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Deliverable"
+            }
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/GoalConstraints"
+          }
+        }
+      },
+      "CreateGoalRequest": {
+        "type": "object",
+        "required": [
+          "goal"
+        ],
+        "properties": {
+          "goal": {
+            "$ref": "#/components/schemas/GoalSpec"
+          }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "required": [
+          "id",
+          "phase",
+          "createdGraphRevision",
+          "specDigest"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Pending",
+              "Ready",
+              "Active",
+              "Waiting",
+              "Evaluating",
+              "Finalizing",
+              "Succeeded",
+              "Failed",
+              "Cancelled",
+              "Superseded"
+            ]
+          },
+          "createdGraphRevision": {
+            "type": "integer"
+          },
+          "specDigest": {
+            "type": "string",
+            "description": "Hex identity of the immutable Task specification. Not the specification itself: this API version exposes no Task resource."
+          }
+        }
+      },
+      "Goal": {
+        "type": "object",
+        "required": [
+          "id",
+          "phase",
+          "goalRevision",
+          "revision",
+          "goal",
+          "tasks"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Planning",
+              "Active",
+              "Evaluating",
+              "Finalizing",
+              "Succeeded",
+              "Failed",
+              "Cancelled"
+            ]
+          },
+          "goalRevision": {
+            "type": "integer",
+            "description": "The semantic GoalRevision currently being pursued."
+          },
+          "revision": {
+            "type": "integer",
+            "description": "The authoritative row revision the ETag is derived from. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision alone."
+          },
+          "goal": {
+            "$ref": "#/components/schemas/GoalSpec"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            }
+          }
+        }
+      },
+      "GoalSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "phase",
+          "goalRevision",
+          "revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Planning",
+              "Active",
+              "Evaluating",
+              "Finalizing",
+              "Succeeded",
+              "Failed",
+              "Cancelled"
+            ]
+          },
+          "goalRevision": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        }
+      },
+      "GoalList": {
+        "type": "object",
+        "required": [
+          "goals",
+          "snapshotCursor"
+        ],
+        "properties": {
+          "goals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoalSummary"
+            }
+          },
+          "snapshotCursor": {
+            "type": "string",
+            "description": "An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Read from the same durable snapshot as the list."
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "eventId",
+          "cursor",
+          "eventType",
+          "recordedAt"
+        ],
+        "description": "Identity, type, ordering and command causality. No payload: this API version defines no Event body schema, and emitting an unspecified one would be a compatibility commitment by accident.",
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "description": "Stable across retries and re-delivery. Use it to deduplicate."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line."
+          },
+          "eventType": {
+            "type": "string"
+          },
+          "recordedAt": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "commandEpoch": {
+            "type": "string",
+            "description": "The causing command's RestoreGeneration, never the journal epoch."
+          },
+          "commandId": {
+            "type": "string"
+          }
+        }
+      },
+      "EventList": {
+        "type": "object",
+        "required": [
+          "events",
+          "nextCursor"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Where to resume. Equal to the requested cursor when the page is empty, so a polling client cannot skip forward past Events it never saw."
+          }
+        }
+      },
+      "Dispatch": {
+        "type": "object",
+        "required": [
+          "desiredMode",
+          "revision",
+          "effectiveCanDispatch",
+          "blockedBy"
+        ],
+        "properties": {
+          "desiredMode": {
+            "type": "string",
+            "enum": [
+              "RUNNING",
+              "PAUSED"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "effectiveCanDispatch": {
+            "type": "boolean"
+          },
+          "blockedBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       }
-     }
-    }
-   },
-   "post": {
-    "operationId": "createGoal",
-    "summary": "Create a Goal, plan it, and materialize its Ready Task",
-    "description": "Returns 201 because the resource is created synchronously: the response is not sent until the Goal exists, its planning decision is recorded and its Task is materialized.\n\nThree authoritative transactions run under command identities derived from the caller's (commandEpoch, commandId), so a retry with the same identity reconciles the prior outcome rather than creating a second Goal. The Goal id is derived from the same identity, which is what lets a retry find what the first attempt created.",
-    "parameters": [
-     {
-      "name": "pantheon-command-epoch",
-      "in": "header",
-      "required": true,
-      "description": "The commandEpoch the client believes is current, read from GET /api/v1/system. A request carrying a superseded epoch fails closed as stale-command-epoch; the daemon never substitutes the current one.",
-      "schema": {
-       "type": "string",
-       "minLength": 1
-      }
-     },
-     {
-      "name": "pantheon-command-id",
-      "in": "header",
-      "required": true,
-      "description": "Single-use command identity within its epoch. Repeating a request with the same id reconciles the prior outcome; reusing it for a different request fails closed as conflict.",
-      "schema": {
-       "type": "string",
-       "minLength": 1
-      }
-     }
-    ],
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/CreateGoalRequest"
-       }
-      }
-     }
     },
     "responses": {
-     "201": {
-      "description": "The Goal, with its Ready Task.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Goal"
+      "StaleRevision": {
+        "description": "The request carried an If-Match that no longer matches the resource revision.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
         }
-       }
       },
-      "headers": {
-       "ETag": {
-        "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
-        "required": true,
-        "schema": {
-         "type": "string"
+      "PreconditionRequired": {
+        "description": "A mandatory precondition header was not supplied.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
         }
-       }
       }
-     },
-     "400": {
-      "description": "validation \u2014 the request is not a Goal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "stale-command-epoch, or conflict when the command id was already used for a different request.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "428": {
-      "description": "precondition-required \u2014 a command identity header is missing.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "internal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "503": {
-      "description": "temporarily-unavailable \u2014 there is no usable active configuration to plan against.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     }
     }
-   }
-  },
-  "/api/v1/goals/{goalId}": {
-   "get": {
-    "operationId": "getGoal",
-    "summary": "One Goal, with its Tasks",
-    "description": "Tasks are embedded because this API version exposes no Task resource.",
-    "parameters": [
-     {
-      "name": "goalId",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "The Goal.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Goal"
-        }
-       }
-      },
-      "headers": {
-       "ETag": {
-        "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
-        "required": true,
-        "schema": {
-         "type": "string"
-        }
-       }
-      }
-     },
-     "404": {
-      "description": "not-found.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "internal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/goals/{goalId}/actions/cancel": {
-   "post": {
-    "operationId": "cancelGoal",
-    "summary": "Drive a Goal toward Cancelled",
-    "description": "Returns 202, not 200: the durable intent is accepted while processing continues. The transaction commits Finalizing with terminalTarget Cancelled for the Goal and for every nonterminal Task it owns; the Goal reaches Cancelled only once its obligations are safely finalized.\n\nNo If-Match. Cancel-if-nonterminal is state-independent and idempotent, so it does not require a client-supplied prior revision. Cancellation stays available while the Goal is Finalizing: a Goal finalizing toward Succeeded or Failed is retargeted to Cancelled in place and still returns 202, and one already finalizing toward Cancelled changes nothing further. Only a terminal Goal refuses, because terminal history never reopens.",
-    "parameters": [
-     {
-      "name": "goalId",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "pantheon-command-epoch",
-      "in": "header",
-      "required": true,
-      "description": "The commandEpoch the client believes is current, read from GET /api/v1/system. A request carrying a superseded epoch fails closed as stale-command-epoch; the daemon never substitutes the current one.",
-      "schema": {
-       "type": "string",
-       "minLength": 1
-      }
-     },
-     {
-      "name": "pantheon-command-id",
-      "in": "header",
-      "required": true,
-      "description": "Single-use command identity within its epoch. Repeating a request with the same id reconciles the prior outcome; reusing it for a different request fails closed as conflict.",
-      "schema": {
-       "type": "string",
-       "minLength": 1
-      }
-     }
-    ],
-    "responses": {
-     "202": {
-      "description": "Cancellation accepted; the Goal is Finalizing.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Goal"
-        }
-       }
-      },
-      "headers": {
-       "ETag": {
-        "description": "Strong opaque validator derived from the Goal's authoritative row revision. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision unchanged.",
-        "required": true,
-        "schema": {
-         "type": "string"
-        }
-       }
-      }
-     },
-     "404": {
-      "description": "not-found.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "conflict when the Goal is terminal \u2014 terminal history never reopens \u2014 or stale-command-epoch.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "428": {
-      "description": "precondition-required \u2014 a command identity header is missing.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "internal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/events": {
-   "get": {
-    "operationId": "listEvents",
-    "summary": "A page of durable Events",
-    "parameters": [
-     {
-      "name": "after",
-      "in": "query",
-      "required": false,
-      "description": "Read strictly after this cursor. An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Absent means the current journal head. A cursor naming another journal history, a position past the head, or text that is not a cursor at all fails closed as cursor-gone; it is never quietly replaced with the head.",
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "limit",
-      "in": "query",
-      "required": false,
-      "description": "Maximum Events to return. Clamped to the server's page cap.",
-      "schema": {
-       "type": "integer",
-       "minimum": 1
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "The Event page.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/EventList"
-        }
-       }
-      }
-     },
-     "410": {
-      "description": "cursor-gone.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "internal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/events/watch": {
-   "get": {
-    "operationId": "watchEvents",
-    "summary": "Follow durable Events as they commit",
-    "description": "A Server-Sent Events stream. The SSE `id` line is the resumable journal cursor and the Event's own identity stays inside the payload, so a dropped stream resumes by passing the last id back as `after`.\n\nThe starting cursor is validated before the stream opens, because a 200 has already been committed by the time the first event is written.",
-    "parameters": [
-     {
-      "name": "after",
-      "in": "query",
-      "required": false,
-      "description": "Read strictly after this cursor. An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Absent means the current journal head. A cursor naming another journal history, a position past the head, or text that is not a cursor at all fails closed as cursor-gone; it is never quietly replaced with the head.",
-      "schema": {
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "The Event stream.",
-      "content": {
-       "text/event-stream": {
-        "schema": {
-         "type": "string",
-         "description": "SSE messages. Each carries `id` (the journal cursor), `event` (the Event type) and `data` (an Event object)."
-        }
-       }
-      }
-     },
-     "410": {
-      "description": "cursor-gone.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "internal.",
-      "content": {
-       "application/problem+json": {
-        "schema": {
-         "$ref": "#/components/schemas/Problem"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/dispatch": {
-   "get": {
-    "operationId": "getDispatch",
-    "summary": "Report dispatch desired state and effective dispatchability",
-    "description": "desiredMode is the operator's durable intent; effectiveCanDispatch is the current factual ability to commit new Run intents. They are deliberately different: desiredMode RUNNING can coexist with effectiveCanDispatch false while configuration is unusable, and desiredMode PAUSED stays paused even after every other gate is healthy. blockedBy is a normalized set of current factual gates, never a second desired-state field.",
-    "responses": {
-     "200": {
-      "description": "The current dispatch view.",
-      "headers": {
-       "ETag": {
-        "description": "Opaque strong validator over the scheduler singleton revision: \"dispatch-<revision>\". Pause/resume must carry it as If-Match.",
-        "schema": {
-         "type": "string"
-        }
-       }
-      },
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Dispatch"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/dispatch/actions/pause": {
-   "post": {
-    "operationId": "pauseDispatch",
-    "summary": "Pause new Run-intent commits",
-    "description": "Commits PAUSED as the durable operator desired state through the normal command envelope. Pausing fences new Scheduler T3 commits only: it does not cancel or stop already-committed Runs, revoke execution authority, release resources, or pretend existing external work stopped. Ordinary daemon restart preserves the durable pause.",
-    "parameters": [
-     {
-      "$ref": "#/components/parameters/CommandEpochHeader"
-     },
-     {
-      "$ref": "#/components/parameters/CommandIdHeader"
-     },
-     {
-      "name": "If-Match",
-      "in": "header",
-      "required": true,
-      "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
-      "schema": {
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Dispatch"
-        }
-       }
-      }
-     },
-     "412": {
-      "$ref": "#/components/responses/StaleRevision"
-     },
-     "428": {
-      "$ref": "#/components/responses/PreconditionRequired"
-     }
-    }
-   }
-  },
-  "/api/v1/dispatch/actions/resume": {
-   "post": {
-    "operationId": "resumeDispatch",
-    "summary": "Resume new Run-intent commits",
-    "description": "Commits RUNNING as the durable operator desired state. Resuming re-opens T3 commits subject to the remaining factual gates (configuration readiness); it creates nothing by itself.",
-    "parameters": [
-     {
-      "$ref": "#/components/parameters/CommandEpochHeader"
-     },
-     {
-      "$ref": "#/components/parameters/CommandIdHeader"
-     },
-     {
-      "name": "If-Match",
-      "in": "header",
-      "required": true,
-      "description": "The ETag from a prior GET /api/v1/dispatch. A missing precondition is served as 428; a lost race as 412.",
-      "schema": {
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "The durably committed desired mode. The response does not promise that the recovery/configuration gates are currently open; effective dispatchability is observed through this same resource.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Dispatch"
-        }
-       }
-      }
-     },
-     "412": {
-      "$ref": "#/components/responses/StaleRevision"
-     },
-     "428": {
-      "$ref": "#/components/responses/PreconditionRequired"
-     }
-    }
-   }
   }
- },
- "components": {
-  "schemas": {
-   "Problem": {
-    "type": "object",
-    "description": "RFC 9457 problem details. Clients branch on `code` and must not parse `detail`.",
-    "required": [
-     "type",
-     "title",
-     "status",
-     "detail",
-     "code"
-    ],
-    "properties": {
-     "type": {
-      "type": "string",
-      "description": "Stable identifier, spelled urn:pantheon:problem:<code>. A URN rather than an https URL: RFC 9457 wants a stable identifier, not a dereferenceable one."
-     },
-     "title": {
-      "type": "string"
-     },
-     "status": {
-      "type": "integer"
-     },
-     "detail": {
-      "type": "string",
-      "description": "Human-readable. Not machine-readable, and not stable."
-     },
-     "code": {
-      "type": "string",
-      "enum": [
-       "conflict",
-       "cursor-gone",
-       "internal",
-       "not-found",
-       "precondition-required",
-       "stale-command-epoch",
-       "stale-revision",
-       "temporarily-unavailable",
-       "validation"
-      ]
-     }
-    }
-   },
-   "Liveness": {
-    "type": "object",
-    "required": [
-     "live"
-    ],
-    "properties": {
-     "live": {
-      "type": "boolean"
-     }
-    }
-   },
-   "ReadinessComponent": {
-    "type": "object",
-    "required": [
-     "name",
-     "state"
-    ],
-    "properties": {
-     "name": {
-      "type": "string"
-     },
-     "state": {
-      "type": "string",
-      "enum": [
-       "satisfied",
-       "unsatisfied",
-       "unimplemented"
-      ],
-      "description": "`unimplemented` means the architecture requires this conjunct and no code in this build establishes it. It neither satisfies nor blocks readiness; it keeps the altitude of the `ready` flag visible."
-     },
-     "detail": {
-      "type": "string"
-     }
-    }
-   },
-   "Readiness": {
-    "type": "object",
-    "required": [
-     "ready",
-     "components"
-    ],
-    "properties": {
-     "ready": {
-      "type": "boolean"
-     },
-     "components": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/ReadinessComponent"
-      }
-     }
-    }
-   },
-   "Journal": {
-    "type": "object",
-    "required": [
-     "epoch"
-    ],
-    "description": "Event Journal continuity. Rotates independently of commandEpoch; both may rotate during disaster restore for different reasons.",
-    "properties": {
-     "epoch": {
-      "type": "string"
-     },
-     "latestSequence": {
-      "type": [
-       "integer",
-       "null"
-      ],
-      "description": "The last committed sequence, or null when nothing has been committed in this history. Sequences start at 1."
-     }
-    }
-   },
-   "ActiveConfiguration": {
-    "type": "object",
-    "required": [
-     "activationSequence",
-     "contentDigest",
-     "semanticsLoaded"
-    ],
-    "properties": {
-     "activationSequence": {
-      "type": "integer"
-     },
-     "contentDigest": {
-      "type": "string"
-     },
-     "semanticsLoaded": {
-      "type": "boolean",
-      "description": "false means the durable revision is active but its source drifted, so identity governs and nothing can be planned against it."
-     }
-    }
-   },
-   "System": {
-    "type": "object",
-    "required": [
-     "daemonVersion",
-     "apiVersions",
-     "schemaVersion",
-     "commandEpoch",
-     "journal",
-     "readiness"
-    ],
-    "properties": {
-     "daemonVersion": {
-      "type": "string"
-     },
-     "apiVersions": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     },
-     "schemaVersion": {
-      "type": "integer"
-     },
-     "commandEpoch": {
-      "type": "string",
-      "description": "The current RestoreGeneration. A mutation must carry this."
-     },
-     "journal": {
-      "$ref": "#/components/schemas/Journal"
-     },
-     "activeConfiguration": {
-      "oneOf": [
-       {
-        "$ref": "#/components/schemas/ActiveConfiguration"
-       },
-       {
-        "type": "null"
-       }
-      ]
-     },
-     "readiness": {
-      "$ref": "#/components/schemas/Readiness"
-     }
-    }
-   },
-   "GoalInput": {
-    "type": "object",
-    "required": [
-     "name",
-     "reference"
-    ],
-    "properties": {
-     "name": {
-      "type": "string"
-     },
-     "reference": {
-      "type": "string",
-      "description": "An opaque URI-shaped reference. Pantheon does not interpret it."
-     }
-    }
-   },
-   "Deliverable": {
-    "type": "object",
-    "required": [
-     "name",
-     "kind",
-     "required"
-    ],
-    "properties": {
-     "name": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string"
-     },
-     "required": {
-      "type": "boolean"
-     }
-    }
-   },
-   "GoalConstraints": {
-    "type": "object",
-    "description": "The authority ceiling for every Task planned from this Goal. A Task may tighten it and never widen it.",
-    "properties": {
-     "permittedEffects": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     },
-     "forbiddenEffects": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     },
-     "permittedResources": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     }
-    }
-   },
-   "GoalSpec": {
-    "type": "object",
-    "required": [
-     "objective",
-     "constraints"
-    ],
-    "properties": {
-     "objective": {
-      "type": "string",
-      "description": "The desired outcome, stated without prescribing an implementation."
-     },
-     "inputs": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/GoalInput"
-      }
-     },
-     "deliverables": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/Deliverable"
-      }
-     },
-     "constraints": {
-      "$ref": "#/components/schemas/GoalConstraints"
-     }
-    }
-   },
-   "CreateGoalRequest": {
-    "type": "object",
-    "required": [
-     "goal"
-    ],
-    "properties": {
-     "goal": {
-      "$ref": "#/components/schemas/GoalSpec"
-     }
-    }
-   },
-   "Task": {
-    "type": "object",
-    "required": [
-     "id",
-     "phase",
-     "createdGraphRevision",
-     "specDigest"
-    ],
-    "properties": {
-     "id": {
-      "type": "string"
-     },
-     "phase": {
-      "type": "string",
-      "enum": [
-       "Pending",
-       "Ready",
-       "Active",
-       "Waiting",
-       "Evaluating",
-       "Finalizing",
-       "Succeeded",
-       "Failed",
-       "Cancelled",
-       "Superseded"
-      ]
-     },
-     "createdGraphRevision": {
-      "type": "integer"
-     },
-     "specDigest": {
-      "type": "string",
-      "description": "Hex identity of the immutable Task specification. Not the specification itself: this API version exposes no Task resource."
-     }
-    }
-   },
-   "Goal": {
-    "type": "object",
-    "required": [
-     "id",
-     "phase",
-     "goalRevision",
-     "revision",
-     "goal",
-     "tasks"
-    ],
-    "properties": {
-     "id": {
-      "type": "string"
-     },
-     "phase": {
-      "type": "string",
-      "enum": [
-       "Planning",
-       "Active",
-       "Evaluating",
-       "Finalizing",
-       "Succeeded",
-       "Failed",
-       "Cancelled"
-      ]
-     },
-     "goalRevision": {
-      "type": "integer",
-      "description": "The semantic GoalRevision currently being pursued."
-     },
-     "revision": {
-      "type": "integer",
-      "description": "The authoritative row revision the ETag is derived from. It advances on every authoritative mutation, including a lifecycle transition that leaves goalRevision alone."
-     },
-     "goal": {
-      "$ref": "#/components/schemas/GoalSpec"
-     },
-     "tasks": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/Task"
-      }
-     }
-    }
-   },
-   "GoalSummary": {
-    "type": "object",
-    "required": [
-     "id",
-     "phase",
-     "goalRevision",
-     "revision"
-    ],
-    "properties": {
-     "id": {
-      "type": "string"
-     },
-     "phase": {
-      "type": "string",
-      "enum": [
-       "Planning",
-       "Active",
-       "Evaluating",
-       "Finalizing",
-       "Succeeded",
-       "Failed",
-       "Cancelled"
-      ]
-     },
-     "goalRevision": {
-      "type": "integer"
-     },
-     "revision": {
-      "type": "integer"
-     }
-    }
-   },
-   "GoalList": {
-    "type": "object",
-    "required": [
-     "goals",
-     "snapshotCursor"
-    ],
-    "properties": {
-     "goals": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/GoalSummary"
-      }
-     },
-     "snapshotCursor": {
-      "type": "string",
-      "description": "An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line. Read from the same durable snapshot as the list."
-     }
-    }
-   },
-   "Event": {
-    "type": "object",
-    "required": [
-     "eventId",
-     "cursor",
-     "eventType",
-     "recordedAt"
-    ],
-    "description": "Identity, type, ordering and command causality. No payload: this API version defines no Event body schema, and emitting an unspecified one would be a compatibility commitment by accident.",
-    "properties": {
-     "eventId": {
-      "type": "string",
-      "description": "Stable across retries and re-delivery. Use it to deduplicate."
-     },
-     "cursor": {
-      "type": "string",
-      "description": "An opaque Event Journal position, spelled <journalEpoch>:<sequence>. The same spelling is used by snapshotCursor, the after query parameter and the SSE id line."
-     },
-     "eventType": {
-      "type": "string"
-     },
-     "recordedAt": {
-      "type": "integer",
-      "description": "Unix seconds."
-     },
-     "commandEpoch": {
-      "type": "string",
-      "description": "The causing command's RestoreGeneration, never the journal epoch."
-     },
-     "commandId": {
-      "type": "string"
-     }
-    }
-   },
-   "EventList": {
-    "type": "object",
-    "required": [
-     "events",
-     "nextCursor"
-    ],
-    "properties": {
-     "events": {
-      "type": "array",
-      "items": {
-       "$ref": "#/components/schemas/Event"
-      }
-     },
-     "nextCursor": {
-      "type": "string",
-      "description": "Where to resume. Equal to the requested cursor when the page is empty, so a polling client cannot skip forward past Events it never saw."
-     }
-    }
-   },
-   "Dispatch": {
-    "type": "object",
-    "required": [
-     "desiredMode",
-     "revision",
-     "effectiveCanDispatch",
-     "blockedBy"
-    ],
-    "properties": {
-     "desiredMode": {
-      "type": "string",
-      "enum": [
-       "RUNNING",
-       "PAUSED"
-      ]
-     },
-     "revision": {
-      "type": "integer"
-     },
-     "effectiveCanDispatch": {
-      "type": "boolean"
-     },
-     "blockedBy": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     }
-    }
-   }
-  },
-  "responses": {
-   "StaleRevision": {
-    "description": "The request carried an If-Match that no longer matches the resource revision.",
-    "content": {
-     "application/problem+json": {
-      "schema": {
-       "$ref": "#/components/schemas/Problem"
-      }
-     }
-    }
-   },
-   "PreconditionRequired": {
-    "description": "A mandatory precondition header was not supplied.",
-    "content": {
-     "application/problem+json": {
-      "schema": {
-       "$ref": "#/components/schemas/Problem"
-      }
-     }
-    }
-   }
-  }
- }
 }

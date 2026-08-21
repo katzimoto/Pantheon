@@ -391,3 +391,17 @@ find: ("dispatch_mode", Value::from(mode.as_str())),
 replace: ("dispatch_mode", Value::from("RUNNING")),
 scope: -p pantheond --test dispatch_control
 test: pause_is_a_state_dependent_mutation_with_optimistic_concurrency
+
+name: t3-binding-owner-fence-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: if intent.binding.task_id != intent.task_id {
+replace: if false {
+scope: -p pantheon-store --lib
+test: scheduling::tests::stale_authority_fails_closed_without_writing_anything
+
+name: t3-snapshot-goal-owner-fence-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: if intent.snapshot.goal_id != intent.goal_id {
+replace: if false {
+scope: -p pantheon-store --lib
+test: scheduling::tests::stale_authority_fails_closed_without_writing_anything

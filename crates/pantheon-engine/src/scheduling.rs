@@ -177,7 +177,6 @@ impl<'store, 'authority, S: Borrow<Store>> SchedulingController<'store, 'authori
             let routed = match router.route_ready_task(&task_id, backends) {
                 Ok(routed) => routed,
                 Err(error) => {
-                    eprintln!("DEBUG route fail {task_id}: {error:?}");
                     if let ScheduleOutcome::Deferred { task_id, reason } =
                         self.defer(candidate, &error, snap.now)?
                     {

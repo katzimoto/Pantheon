@@ -826,9 +826,11 @@ fn stale_authority_fails_closed_without_writing_anything() {
         Scheduler,
         Configuration,
         BindingComponents,
+        BindingForOtherTask,
         SnapshotBase,
         SnapshotSpec,
         SnapshotPolicy,
+        SnapshotForOtherGoal,
         FairnessRow,
     }
 
@@ -841,9 +843,11 @@ fn stale_authority_fails_closed_without_writing_anything() {
         (Stale::Scheduler, "scheduler"),
         (Stale::Configuration, "config"),
         (Stale::BindingComponents, "components"),
+        (Stale::BindingForOtherTask, "binding-owner"),
         (Stale::SnapshotBase, "base"),
         (Stale::SnapshotSpec, "spec"),
         (Stale::SnapshotPolicy, "policy"),
+        (Stale::SnapshotForOtherGoal, "snapshot-owner"),
         (Stale::FairnessRow, "fairness"),
     ];
 
@@ -879,6 +883,17 @@ fn stale_authority_fails_closed_without_writing_anything() {
             // refuse it.
             Stale::SnapshotPolicy => {
                 frozen.snapshot.context_policy_digest = Digest::of(b"unrelated-policy");
+                frozen.snapshot_digest = frozen.snapshot.digest();
+            }
+            // A record frozen for a different owner: every digest is
+            // internally consistent, so only the owner comparison inside T3
+            // can refuse the swap.
+            Stale::BindingForOtherTask => {
+                frozen.binding.task_id = "task-elsewhere".to_string();
+                frozen.binding_digest = frozen.binding.digest();
+            }
+            Stale::SnapshotForOtherGoal => {
+                frozen.snapshot.goal_id = "goal-elsewhere".to_string();
                 frozen.snapshot_digest = frozen.snapshot.digest();
             }
             _ => {}

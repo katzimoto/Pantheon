@@ -202,6 +202,8 @@ resolved backend-private model/runtime audit metadata where appropriate
 
 `credentialBindingRegistryDigest` identifies the immutable CredentialBindingRegistry from the ConfigurationRevision captured at T3. It freezes the Run's logical credential-mapping authority without freezing SecretVersionId or secret bytes.
 
+Implementation status (v0.1.0): no compiled `credentialBindings` component exists yet, so committed Bindings freeze the six component digests the configuration schema defines today and omit `credentialBindingRegistryDigest`. This is a recorded lag against invariant 6, to be closed by the mission that introduces the component; it is not permission to invent a placeholder digest.
+
 Changing Agent/backend/offer/material execution configuration creates a new Run/new Binding. Binding is never edited in place.
 
 A later credential-binding configuration change does not mutate the Binding. For an exact credential-bearing semantic operation, Pantheon resolves the action/resource against both the Run's frozen registry and the current active registry and requires equality of the exact resolved `credentialBindingAuthorityDigest`. Whole-registry equality is deliberately unnecessary: changing an unrelated binding must not invalidate this Run.

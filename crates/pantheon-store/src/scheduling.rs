@@ -540,6 +540,21 @@ fn apply_run_intent(
                 .to_string(),
         ));
     }
+    // The frozen records carry their own owners; those owners must be this
+    // Run's Task and Goal. Both foreign keys would happily accept a record
+    // frozen for someone else, so only this comparison closes the swap.
+    if intent.binding.task_id != intent.task_id {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "the frozen Binding names task {} but this Run commits for {}",
+            intent.binding.task_id, intent.task_id
+        )));
+    }
+    if intent.snapshot.goal_id != intent.goal_id {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "the frozen source snapshot names goal {} but this Run commits under {}",
+            intent.snapshot.goal_id, intent.goal_id
+        )));
+    }
 
     // 3. Task currency: identity, Ready phase, expected revision, zero
     //    responsible Runs.
