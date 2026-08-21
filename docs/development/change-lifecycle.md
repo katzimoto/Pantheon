@@ -418,12 +418,13 @@ reading `main` shows every intermediate commit rather than one entry per change;
 `git log --first-parent` recovers the per-change view when that is what is
 wanted.
 
-Every merge to `main` so far has used this method, so the contract and the
-repository describe the same thing.
+Existing history contains single-parent landings from the period when repository
+settings still exposed squash and rebase. That history is not rewritten.
 
-Restricting GitHub's merge button to this method is mechanical enforcement, and
-follows the same rule as the rest of this section: the semantic contract comes
-first.
+GitHub repository settings expose only merge commits for future pull-request
+landings. This mechanically enforces the selected method without introducing
+any separate review, check, conversation-resolution, merge-queue or auto-merge
+requirement.
 
 ### Deferred enforcement
 
