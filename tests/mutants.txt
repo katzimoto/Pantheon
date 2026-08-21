@@ -602,3 +602,10 @@ find: .revision_agents_component_json(snapshot.configuration_activation_sequence
 replace: .revision_agents_component_json(0)?
 scope: -p pantheon-engine --lib
 test: context::tests::activating_a_newer_configuration_revision_never_changes_an_existing_runs_plan
+
+name: section-order-inverts-the-authority-hierarchy
+file: crates/pantheon-core/src/context.rs
+find: Self::AgentGuidance => 2,
+replace: Self::AgentGuidance => 0,
+scope: -p pantheon-core --test context
+test: composed_sections_are_ordered_by_class_then_authority_then_kind

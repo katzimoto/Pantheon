@@ -100,6 +100,23 @@ impl PrecedenceStratum {
             Self::ReferenceData => "reference-data",
         }
     }
+
+    /// The authority rank of this stratum, in canonical precedence order.
+    ///
+    /// `context-builder.md` ("Trust and precedence strata") orders these five
+    /// and places GOAL / TASK CONTRACT above AGENT GUIDANCE above REFERENCE
+    /// DATA; the rank is what makes a plan's section order state the same
+    /// thing the field says instead of leaving hierarchy to each consumer.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::ExecutionProtocol => 0,
+            Self::GoalTaskContract => 1,
+            Self::AgentGuidance => 2,
+            Self::ContinuationEvidence => 3,
+            Self::ReferenceData => 4,
+        }
+    }
 }
 
 /// One selected semantic section of a plan.
@@ -123,17 +140,23 @@ pub struct ContextSection {
 }
 
 impl ContextSection {
-    /// The total-order key selection sorts by. Deterministic by construction:
-    /// class first (mandatory, then preload, then on-demand), then the kind
-    /// spelling, then the within-kind key — never insertion order.
+    /// The total-order key selection sorts by. Deterministic by construction,
+    /// and aligned with the canonical trust hierarchy: inclusion class first
+    /// (mandatory, then preload, then on-demand), then the authority stratum
+    /// rank — so walking `sections` in listed order never presents
+    /// lower-authority content above higher-authority content — then the
+    /// canonical kind order (stable under renames), then the within-kind key.
+    /// Never insertion order.
     #[must_use]
-    pub fn order_key(&self) -> (u8, &'static str, &str) {
+    pub fn order_key(&self) -> (u8, u8, u8, &'static str, &str) {
         (
             match self.inclusion {
                 InclusionClass::Mandatory => 0,
                 InclusionClass::Preload => 1,
                 InclusionClass::OnDemand => 2,
             },
+            self.precedence.rank(),
+            kind_rank(self.kind),
             self.kind,
             self.key.as_str(),
         )
@@ -482,9 +505,35 @@ pub fn build_context_plan(
     })
 }
 
-/// Total order over sections: class, then kind, then within-kind key.
+/// Total order over sections: inclusion class, then authority stratum, then
+/// canonical kind order, then within-kind key. A pure function of the two
+/// sections alone — the frozen policy contributes to selection through the
+/// mandatory-section satisfiability check and the optional drop order, never
+/// through this ordering.
 fn compare_sections(left: &ContextSection, right: &ContextSection) -> Ordering {
     left.order_key().cmp(&right.order_key())
+}
+
+/// The stable ordinal of a section kind inside the total order.
+///
+/// Fixed by the canonical contract's own enumerations rather than by spelling,
+/// so renaming a kind cannot silently reorder plan identity: task-contract
+/// before goal-contract (the trust strata list objective/constraints/acceptance
+/// before Goal constraints is their shared stratum; within it the Task's own
+/// contract leads), SOUL before BEHAVIOR (`agent-genome.md`'s layer order),
+/// then workspace orientation and input references. Unknown kinds sort after
+/// every known one, deterministically by spelling, so a future kind extends
+/// the order without reordering existing sections.
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        SECTION_TASK_CONTRACT => 0,
+        SECTION_GOAL_CONTRACT => 1,
+        SECTION_AGENT_SOUL => 2,
+        SECTION_AGENT_BEHAVIOR => 3,
+        SECTION_WORKSPACE_ORIENTATION => 4,
+        SECTION_REFERENCE_INPUT => 5,
+        _ => u8::MAX,
+    }
 }
 
 /// Applies the frozen policy's deterministic optional drop order.
@@ -492,7 +541,7 @@ fn compare_sections(left: &ContextSection, right: &ContextSection) -> Ordering {
 /// Mandatory sections are never dropped. On-demand references are never
 /// dropped — they are pointers, not payload. When `capacity_exceeded` holds,
 /// preload sections leave in `drop_order`: whole kinds in the listed sequence,
-/// highest-ordered section first inside a kind. The same eligible set, the
+/// tail-of-the-total-order first inside a kind. The same eligible set, the
 /// same policy and the same measurement always drop the same sections in the
 /// same order, whatever order the caller supplied them in.
 ///
@@ -508,10 +557,10 @@ pub fn apply_optional_drop(
 
     for kind in drop_order {
         while capacity_exceeded(&kept) {
-            // The highest-ordered remaining preload section of this kind is
-            // the next to go: canonical order follows the frozen policy's
-            // priority, so the tail of that order is the least important
-            // survivor. Stable even among same-kind siblings.
+            // The last remaining preload section of this kind in the total
+            // order is the next to go: the order runs from most-authoritative
+            // and most-prioritized content to least, so its tail is the least
+            // important survivor. Stable even among same-kind siblings.
             let victim = kept
                 .iter()
                 .filter(|section| {

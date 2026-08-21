@@ -204,13 +204,98 @@ fn selection_ordering_and_dropping_ignore_collection_order() {
     assert_eq!(dropped.len(), 1);
     assert_eq!(
         dropped[0].key, "b",
-        "the least important survivor drops first: canonical order follows the \
-         frozen policy's priority, so its tail goes"
+        "the least important survivor drops first: the tail of the total order goes"
     );
     assert!(
         kept.iter()
             .any(|s| s.inclusion == InclusionClass::Mandatory),
         "mandatory content is never dropped"
+    );
+}
+
+#[test]
+fn composed_sections_are_ordered_by_class_then_authority_then_kind() {
+    // Canonical-order invariant: the section list is part of plan identity,
+    // and walking it in listed order must never present lower-authority
+    // content above higher-authority content. `context-builder.md` ("Trust
+    // and precedence strata") places GOAL / TASK CONTRACT above AGENT
+    // GUIDANCE above REFERENCE DATA, and `agent-genome.md` orders SOUL before
+    // BEHAVIOR — so the composed plan states exactly that order, independent
+    // of kind spelling.
+    let spec = task_spec(
+        "goal-1",
+        vec![
+            TaskInput {
+                name: "z-findings".to_string(),
+                reference: "artifact://sha256/z".to_string(),
+            },
+            TaskInput {
+                name: "a-baseline".to_string(),
+                reference: "artifact://sha256/a".to_string(),
+            },
+        ],
+    );
+    let plan = build(&spec);
+    let sequence: Vec<&str> = plan.sections.iter().map(|section| section.kind).collect();
+    assert_eq!(
+        sequence,
+        [
+            SECTION_TASK_CONTRACT,
+            SECTION_GOAL_CONTRACT,
+            SECTION_AGENT_SOUL,
+            SECTION_AGENT_BEHAVIOR,
+            SECTION_WORKSPACE_ORIENTATION,
+            SECTION_REFERENCE_INPUT,
+            SECTION_REFERENCE_INPUT,
+        ],
+        "class, then authority stratum, then canonical kind order"
+    );
+
+    // The strata themselves are non-inverting across the whole list.
+    let ranks: Vec<u8> = plan
+        .sections
+        .iter()
+        .map(|section| section.precedence.rank())
+        .collect();
+    let mut sorted = ranks.clone();
+    sorted.sort_unstable();
+    assert_eq!(ranks, sorted, "authority never decreases down the list");
+
+    // Within-kind siblings stay key-ordered regardless of declaration order.
+    let input_keys: Vec<&str> = plan
+        .sections
+        .iter()
+        .filter(|s| s.kind == SECTION_REFERENCE_INPUT)
+        .map(|s| s.key.as_str())
+        .collect();
+    assert_eq!(input_keys, ["a-baseline", "z-findings"]);
+
+    // The stratum rank dominates the kind ordinal when the two disagree:
+    // authority, not spelling or kind numbering, decides relative position.
+    let high_authority_late_kind = pantheon_core::context::ContextSection {
+        kind: SECTION_WORKSPACE_ORIENTATION,
+        key: String::new(),
+        inclusion: InclusionClass::Mandatory,
+        precedence: PrecedenceStratum::AgentGuidance,
+        provenance: Value::Null,
+        instruction: None,
+    };
+    let low_authority_early_kind = pantheon_core::context::ContextSection {
+        kind: SECTION_TASK_CONTRACT,
+        key: String::new(),
+        inclusion: InclusionClass::Mandatory,
+        precedence: PrecedenceStratum::GoalTaskContract,
+        provenance: Value::Null,
+        instruction: None,
+    };
+    let mut pair = [
+        high_authority_late_kind.clone(),
+        low_authority_early_kind.clone(),
+    ];
+    pair.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
+    assert_eq!(
+        pair[0].kind, SECTION_TASK_CONTRACT,
+        "GOAL/TASK CONTRACT outranks AGENT GUIDANCE however their kinds number"
     );
 }
 
