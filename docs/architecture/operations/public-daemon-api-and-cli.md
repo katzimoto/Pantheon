@@ -104,8 +104,6 @@ Representative v1 reads:
 
 ```text
 GET /api/v1/system
-GET /api/v1/health/live
-GET /api/v1/health/ready
 
 GET /api/v1/goals[/...]
 GET /api/v1/tasks[/...]
@@ -387,7 +385,43 @@ Agent Control defines additional restricted worker-operation problems such as `t
 
 Cancellation/supersession that committed before Candidate submission therefore yields a deterministic stale-authority/conflict response rather than ambiguous Candidate creation.
 
+### Statuses
+
+The status is part of a code's contract: each problem body carries the status it was served with, and clients may branch on either. Every code the Operator API v1 can return maps to exactly one fixed HTTP status:
+
+```text
+not-found                404
+validation               400
+precondition-required    428
+stale-revision           412
+stale-command-epoch      409
+conflict                 409
+cursor-gone              410
+temporarily-unavailable  503
+internal                 500
+```
+
+Reasoning for the mappings HTTP semantics do not settle on their own:
+
+- `precondition-required` -> 428 and `stale-revision` -> 412 are the two halves of optimistic concurrency: 428 answers a mandatory precondition the client failed to supply (`If-Match` absent), 412 answers one the client supplied and lost (`If-Match` did not match).
+- `stale-command-epoch` -> **409**, deliberately not 412: 412 reports a failed client-supplied conditional request on a resource representation, while a stale command epoch is fail-closed loss of command authority against the current RestoreGeneration. It is decided before any precondition header is consulted and occurs whether or not the client sent one.
+- `conflict` -> 409 covers the remaining state-vs-request disagreements: current durable state forbids the command (for example a terminal Goal), or the command identity was reused for a different request.
+- `cursor-gone` -> 410: the requested journal position is permanently unreachable in this history; the resource-gone semantics match exactly, including the client obligation to relist rather than retry.
+- `temporarily-unavailable` -> 503 aligns with `/health/ready`: the same control-plane-not-ready fact is reported with the same status whether a client discovers it through readiness or through a refused mutation.
+- `not-found` -> 404, `validation` -> 400 and `internal` -> 500 follow HTTP defaults; they are recorded so that none of them is implicit.
+
+A word from the wider vocabulary above enters this table, with its reasoning where the choice is not obvious, when the operation that can return it ships. A code no path can return promises no status.
+
 ## Health/readiness
+
+Health probes are process-level operational endpoints, not versioned semantic API resources. Their canonical paths therefore sit outside `/api/v1`:
+
+```text
+GET /health/live
+GET /health/ready
+```
+
+A probe or supervisor configured against them survives an Operator API version transition — the daemon keeps answering its process-level health questions even when `/api/v2` replaces `/api/v1`. Pantheon is unreleased, so no compatibility alias is kept: `GET /api/v1/health/live` and `GET /api/v1/health/ready` are not served.
 
 ```text
 GET /health/live
