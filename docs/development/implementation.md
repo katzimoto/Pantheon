@@ -10,8 +10,10 @@ the architecture contract wins and the disagreement is a defect to report.
 
 ## Current state
 
-Most of the workspace is still scaffolding: every crate exists, compiles,
-documents its own boundary and is covered by the dependency checker.
+Every crate exists, compiles, documents its own boundary and is covered by the
+dependency checker. Several now carry real behaviour and the rest are still
+scaffolding; the paragraphs below are where that split is kept current, and
+`AGENTS.md` points here rather than restating it.
 `pantheon-store` implements the authoritative
 SQLite store kernel described in
 `docs/architecture/persistence-and-recovery/sqlite-persistence-and-transactions.md`,
@@ -98,11 +100,12 @@ pantheon-cli                  -> pantheon-operator-protocol
 ```
 
 These are ceilings, not requirements. An allowed edge is declared in a manifest
-when real code needs it and not before, which is why no crate currently declares
-an internal edge to another workspace crate — `pantheon-store`'s dependency on
-`rusqlite` (see "Current state") is a third-party edge this graph does not
-govern. The graph above is enforced by `scripts/check-crate-deps.sh`,
-which reads Cargo's own resolved dependencies rather than grepping manifests, and
+when real code needs it and not before, so a crate's declared dependencies are
+normally narrower than its line here, and an edge listed above may not exist yet.
+`pantheon-store`'s dependency on `rusqlite` (see "Current state") is a
+third-party edge this graph does not govern. The graph above is enforced by
+`scripts/check-crate-deps.sh`, which reads Cargo's own resolved dependencies
+rather than grepping manifests, and
 covers dev and build dependencies and every target platform. Adding a forbidden
 edge fails verification; so does adding a crate the allowlist does not mention.
 

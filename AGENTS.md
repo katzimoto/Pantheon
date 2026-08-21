@@ -6,8 +6,10 @@ does not repeat it. See `README.md` for the project summary.
 ## Repository state
 
 Pantheon holds canonical architecture documents, JSON Schemas, and a Rust
-workspace under `crates/`. The workspace is scaffolding: every crate compiles and
-states its own boundary, and none implements Pantheon behaviour yet.
+workspace under `crates/`. Every crate compiles and states its own boundary.
+Which crates carry real behaviour and which are still scaffolding is recorded in
+`docs/development/implementation.md`; this file deliberately does not repeat it,
+because a second copy of that answer is a second thing to keep true.
 
 Rust is the implementation language, and the toolchain is pinned in
 `rust-toolchain.toml`; no other language or toolchain enters unless the task says
