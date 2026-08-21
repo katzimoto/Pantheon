@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 
 use pantheon_core::artifact::{EntryKind, RepositoryPath};
 use pantheon_core::config::Digest;
+use pantheon_core::execution::LogicalAgentVersion;
 use pantheon_core::planning::direct::{self, PlanningInput, Trigger};
 use pantheon_core::planning::goal::{Deliverable, GoalConstraints, GoalInput, GoalSpec};
+use pantheon_core::scheduling::{ContextSourceSnapshot, ExecutionBinding};
 use pantheon_core::workspace::{Materialization, RequestedBase, ResolvedBase, WorkspacePhase};
-use pantheon_store::{Command, Store};
+use pantheon_store::{Command, Revision, RunIntent, SealAuthority, Store, StoreError};
 
 use crate::workspace::{
     MaterializationTarget, MaterializerError, RepositoryMaterializer, WorkspaceCommand,
@@ -26,7 +28,7 @@ use crate::workspace::{
 
 use super::{
     BaseObject, CapturedEntry, ChangesetSealer, ContentObjectStore, ExternalFault, ObjectRef,
-    SealAuthority, SealCommand, SealError, SealRequest, TrustedBaseReader, WorkspaceTreeCapture,
+    SealCommand, SealError, SealRequest, TrustedBaseReader, WorkspaceTreeCapture,
 };
 use crate::configuration::{ConfigurationAuthority, SourceSet};
 
@@ -63,7 +65,9 @@ impl Drop for TempDir {
 // ---- doubles --------------------------------------------------------------
 
 /// Emits a scripted captured tree, observes the durable Workspace phase at
-/// the moment capture runs, and can fail at an exact step.
+/// the moment capture runs, and can fail at an exact step — or invalidate
+/// the seal's authority while capture runs, which is the deterministic hook
+/// proving publication revalidates on its own.
 struct ScriptedCapture<'a> {
     store: &'a Store,
     entries: Vec<(Vec<u8>, EntryKind, Vec<u8>)>,
@@ -71,6 +75,9 @@ struct ScriptedCapture<'a> {
     fail_at: Cell<Option<usize>>,
     /// The Workspace phases observed across calls.
     observed_phases: RefCell<Vec<WorkspacePhase>>,
+    /// Cancel the Goal during capture, between the freeze boundary and the
+    /// publication transaction.
+    cancel_during_capture: Cell<bool>,
 }
 
 impl<'a> ScriptedCapture<'a> {
@@ -80,6 +87,7 @@ impl<'a> ScriptedCapture<'a> {
             entries,
             fail_at: Cell::new(None),
             observed_phases: RefCell::new(Vec::new()),
+            cancel_during_capture: Cell::new(false),
         }
     }
 }
@@ -97,6 +105,20 @@ impl WorkspaceTreeCapture for ScriptedCapture<'_> {
             .expect("workspace exists")
             .phase;
         self.observed_phases.borrow_mut().push(phase);
+        if self.cancel_during_capture.get() {
+            let epoch = self.store.restore_generation().expect("generation");
+            self.store
+                .cancel_goal(
+                    &Command {
+                        epoch: epoch.as_str(),
+                        id: "cmd-cancel-mid-capture",
+                        request_hash: &[31u8; 32],
+                        event_type: "goal.cancelled",
+                    },
+                    "goal-1",
+                )
+                .expect("the fixture cancels the goal");
+        }
         for (index, (path, kind, bytes)) in self.entries.iter().enumerate() {
             if self.fail_at.get() == Some(index) {
                 return Err(ExternalFault {
@@ -397,6 +419,10 @@ fn prepared(label: &str, resources: &[&str]) -> (TempDir, Store, PathBuf) {
         )
         .expect("the workspace becomes Ready");
 
+    // Sealing runs under a current Run, so the fixture Task is dispatched
+    // before anything seals.
+    dispatch(&store);
+
     (dir, store, workspace_root)
 }
 
@@ -404,6 +430,80 @@ fn worker_repo(workspace_root: &Path) -> PathBuf {
     let repo = workspace_root.join("workspace-1").join("repo");
     std::fs::create_dir_all(repo.join("src")).expect("src dir");
     repo
+}
+
+/// Dispatches the fixture Task through T3, building the Run intent the same
+/// way [`crate::scheduling::SchedulingController`] does but without routing.
+/// This produces exactly the post-#29 state sealing runs under: an Active
+/// Task whose current responsible Run (`run-1`, status revision 1) froze
+/// this Task, Workspace and base.
+fn dispatch(store: &Store) {
+    let pointer = store.configuration_pointer().expect("pointer");
+    let active = pointer.active.as_ref().expect("active configuration");
+    let snap = store.scheduling_snapshot().expect("snapshot");
+    let candidate = snap
+        .candidates
+        .first()
+        .expect("a dispatchable Task")
+        .clone();
+
+    let agent = LogicalAgentVersion {
+        name: "builder".to_string(),
+        version: 1,
+    };
+    let binding = ExecutionBinding {
+        task_id: "task-1".to_string(),
+        agent: agent.clone(),
+        request_digest: Digest::of(b"request"),
+        offer_digest: Digest::of(b"offer"),
+        backend_id: "fake-local".to_string(),
+        descriptor_revision: 3,
+        descriptor_digest: Digest::of(b"descriptor"),
+        execution_profile_digest: active.components.execution_profile,
+        sandbox_profile_digest: Digest::of(b"sandbox-profile"),
+        route_policy_digest: active.components.routing,
+        configuration_activation_sequence: active.activation_sequence,
+        configuration_content_digest: active.content_digest,
+        component_digests: active.components,
+    };
+    let snapshot = ContextSourceSnapshot {
+        task_spec_digest: candidate.spec_digest,
+        goal_id: candidate.goal_id.clone(),
+        goal_revision: candidate.goal_current_revision,
+        graph_revision: candidate.graph_revision,
+        agent,
+        configuration_activation_sequence: active.activation_sequence,
+        context_policy_digest: active.components.context_policy,
+        workspace_id: "workspace-1".to_string(),
+        workspace_resolved_base: BASE.to_string(),
+    };
+    let binding_digest = binding.digest();
+    let snapshot_digest = snapshot.digest();
+    let intent = RunIntent {
+        run_id: "run-1",
+        task_id: &candidate.task_id,
+        goal_id: &candidate.goal_id,
+        expected_task_revision: candidate.task_revision,
+        expected_goal_row_revision: candidate.goal_row_revision,
+        expected_goal_current_revision: candidate.goal_current_revision,
+        expected_graph_revision: candidate.graph_revision,
+        expected_workspace_revision: candidate.workspace_revision,
+        expected_scheduler_revision: snap.state.revision,
+        expected_goal_fairness_revision: None,
+        expected_task_scheduling_revision: candidate.scheduling_revision,
+        configuration_activation_sequence: active.activation_sequence,
+        binding_digest: &binding_digest,
+        binding: &binding,
+        snapshot_digest: &snapshot_digest,
+        snapshot: &snapshot,
+    };
+    let epoch = store.restore_generation().expect("generation");
+    store
+        .commit_run_intent(
+            &command(epoch.as_str(), "cmd-t3", &[9u8; 32], "run.committed"),
+            &intent,
+        )
+        .expect("the Run intent commits");
 }
 
 /// The changed worker state every happy-path test uses: `app.txt` modified,
@@ -431,11 +531,19 @@ fn sealer<'a>(
     ChangesetSealer::new(store, capture, &MemoryBase, cas, workspace_root)
 }
 
+/// The claimed seal authority matching the fixture's dispatched Run.
+fn run_authority(expected_run_revision: i64) -> SealAuthority {
+    SealAuthority {
+        run_id: "run-1".to_string(),
+        expected_run_revision: Revision::new(expected_run_revision),
+    }
+}
+
 fn seal_request() -> SealRequest<'static> {
     SealRequest {
         task_id: "task-1",
         output_slot: "changeset",
-        authority: SealAuthority::TaskCheckpoint,
+        authority: run_authority(1),
     }
 }
 
@@ -633,7 +741,7 @@ fn the_output_slot_must_exist_and_permit_code_changeset() {
     let unknown = SealRequest {
         task_id: "task-1",
         output_slot: "no-such-slot",
-        authority: SealAuthority::TaskCheckpoint,
+        authority: run_authority(1),
     };
     let err = sealer
         .seal(&seal_command(epoch.as_str(), "cmd-slot-a"), &unknown)
@@ -643,7 +751,7 @@ fn the_output_slot_must_exist_and_permit_code_changeset() {
     let wrong_kind = SealRequest {
         task_id: "task-1",
         output_slot: "diagnosis",
-        authority: SealAuthority::TaskCheckpoint,
+        authority: run_authority(1),
     };
     let err = sealer
         .seal(&seal_command(epoch.as_str(), "cmd-slot-b"), &wrong_kind)
@@ -860,5 +968,200 @@ fn a_deleted_path_outside_scope_is_refused_at_its_own_gate() {
     assert!(
         matches!(error, SealError::ScopeViolated { ref path } if path.contains("outside.txt")),
         "{error}"
+    );
+}
+
+// ---- Issue #76: the seal authority itself ---------------------------------
+
+#[test]
+fn a_stale_authority_claim_is_refused_before_any_capture() {
+    // Canonical invariant: the freeze boundary re-reads authoritative state
+    // inside its transaction and refuses a Run claim whose expected
+    // revision no longer matches — the caller's observation is stale.
+    let (_dir, store, workspace_root) = prepared("stale-claim", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    let capture = changed_capture(&store);
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+
+    let stale = SealRequest {
+        task_id: "task-1",
+        output_slot: "changeset",
+        authority: run_authority(99),
+    };
+    let error = sealer(&store, &capture, &cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-stale"), &stale)
+        .expect_err("a stale claimed run revision must refuse");
+    assert!(
+        matches!(
+            error,
+            SealError::Store(StoreError::SealAuthorityInvalid { .. })
+        ),
+        "{error}"
+    );
+
+    // Nothing ran: capture never started and no payload reached CAS.
+    assert!(
+        capture.observed_phases.borrow().is_empty(),
+        "capture must not run against unproven authority"
+    );
+    assert!(cas.objects.borrow().is_empty(), "no bytes were published");
+    let workspace = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    assert_eq!(
+        workspace.phase,
+        WorkspacePhase::Ready,
+        "the refusal wrote no fence"
+    );
+}
+
+#[test]
+fn an_already_frozen_workspace_revalidates_current_run_authority_before_capture() {
+    // Canonical invariant: an existing Workspace fence is not authorization.
+    // A retry against an already-Frozen Workspace re-proves the Run relation
+    // in an authoritative transaction before capture runs.
+    let (_dir, store, workspace_root) = prepared("frozen-revalidate", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    let epoch = store.restore_generation().expect("generation");
+
+    let first = {
+        let capture = changed_capture(&store);
+        let cas = MemoryCas::new();
+        sealer(&store, &capture, &cas, &workspace_root)
+            .seal(&seal_command(epoch.as_str(), "cmd-first"), &seal_request())
+            .expect("the valid current Run seals")
+    };
+
+    // A retry claiming a stale revision is refused before capture.
+    let retry_capture = ScriptedCapture::new(
+        &store,
+        vec![(b"app.txt".to_vec(), EntryKind::Regular, b"fixed".to_vec())],
+    );
+    let retry_cas = MemoryCas::new();
+    let stale_retry = SealRequest {
+        task_id: "task-1",
+        output_slot: "changeset",
+        authority: run_authority(99),
+    };
+    let error = sealer(&store, &retry_capture, &retry_cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-retry"), &stale_retry)
+        .expect_err("the already-frozen path must refuse stale authority");
+    assert!(
+        matches!(
+            error,
+            SealError::Store(StoreError::SealAuthorityInvalid { .. })
+        ),
+        "{error}"
+    );
+    assert!(
+        retry_capture.observed_phases.borrow().is_empty(),
+        "no capture may run under refused authority"
+    );
+    assert!(
+        retry_cas.objects.borrow().is_empty(),
+        "a refused retry publishes nothing"
+    );
+
+    // The same valid request remains idempotent: it converges on the one
+    // content identity the successful seal established.
+    let replay_capture = changed_capture(&store);
+    let replay_cas = MemoryCas::new();
+    let second = sealer(&store, &replay_capture, &replay_cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-second"), &seal_request())
+        .expect("the same valid request still seals");
+    assert_eq!(first.artifact_digest, second.artifact_digest);
+}
+
+#[test]
+fn a_conflicting_retry_cannot_reuse_a_command_identity_to_bypass_authority() {
+    // Canonical invariant: command identity is bound to the claimed
+    // authority facts. A retry presenting different Run authority derives a
+    // genuinely new command, so the ledger cannot hand it an earlier
+    // decision's outcome without revalidating anything.
+    let (_dir, store, workspace_root) = prepared("identity-conflict", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    let epoch = store.restore_generation().expect("generation");
+
+    let first = {
+        let capture = changed_capture(&store);
+        let cas = MemoryCas::new();
+        sealer(&store, &capture, &cas, &workspace_root)
+            .seal(&seal_command(epoch.as_str(), "same-cmd"), &seal_request())
+            .expect("the original request seals")
+    };
+
+    // Same outer command identity and hash; different claimed authority.
+    let conflicting = SealRequest {
+        task_id: "task-1",
+        output_slot: "changeset",
+        authority: run_authority(99),
+    };
+    let conflicting_cas = MemoryCas::new();
+    let conflict_capture = changed_capture(&store);
+    let error = sealer(&store, &conflict_capture, &conflicting_cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "same-cmd"), &conflicting)
+        .expect_err("a conflicting retry must be validated afresh, not replayed");
+    assert!(
+        matches!(
+            error,
+            SealError::Store(StoreError::SealAuthorityInvalid { .. })
+        ),
+        "{error}"
+    );
+    assert!(conflicting_cas.objects.borrow().is_empty());
+
+    // The original outcome stands untouched.
+    let artifact = store
+        .artifact(first.artifact_digest)
+        .expect("read")
+        .expect("the original Artifact remains");
+    assert_eq!(artifact.kind, "code.changeset");
+}
+
+#[test]
+fn authority_lost_between_freeze_and_publication_is_refused_at_the_final_boundary() {
+    // Canonical invariant: validation performed before filesystem capture
+    // says nothing about now. The publication transaction independently
+    // re-reads the same Run facts inside its own transaction, so authority
+    // destroyed while capture runs fails closed there: no Artifact row, no
+    // WorkspaceRevision, and the Workspace keeps its freeze.
+    let (_dir, store, workspace_root) = prepared("mid-capture-cancel", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    let capture = changed_capture(&store);
+    capture.cancel_during_capture.set(true);
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+
+    let error = sealer(&store, &capture, &cas, &workspace_root)
+        .seal(&seal_command(epoch.as_str(), "cmd-mid"), &seal_request())
+        .expect_err("authority destroyed mid-capture must refuse publication");
+    assert!(
+        matches!(
+            error,
+            SealError::Store(StoreError::SealAuthorityInvalid { .. })
+        ),
+        "{error}"
+    );
+
+    // Capture did run (inside the fence), but nothing was published.
+    assert_eq!(
+        capture.observed_phases.borrow().as_slice(),
+        &[WorkspacePhase::Frozen],
+    );
+    let workspace = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    assert_eq!(
+        workspace.phase,
+        WorkspacePhase::Frozen,
+        "post-freeze failure retains the freeze"
+    );
+    assert_eq!(
+        workspace.materialization,
+        Materialization::Present,
+        "and never retracts what was observed"
     );
 }

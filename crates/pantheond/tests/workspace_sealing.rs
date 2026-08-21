@@ -1,17 +1,19 @@
-//! End-to-end evidence for Issue #32, composed the way the daemon composes
-//! it: real durable authority, the real confined capture boundary, the real
-//! sterile base reader and the real local CAS.
+//! End-to-end evidence for Issues #32 and #76, composed the way the daemon
+//! composes it: real durable authority, the real confined capture boundary,
+//! the real sterile base reader and the real local CAS.
 //!
-//! The sequence is the one the mission asks to be demonstrated:
+//! The sequence is the one the missions ask to be demonstrated:
 //!
 //! ```text
 //! Ready coding Task T at immutable base B
+//!   → T3 commits: T becomes Active under its current Run R
 //!   → worker edits/commits/stages arbitrary local state
-//!   → quiesce W (freeze) and pin the trusted capture root
+//!   → quiesce W (freeze) under R's authority; pin the trusted capture root
 //!   → derive before-state from trusted B through sterile Git
 //!   → derive after-state from confined no-follow reads of W
 //!   → write required bytes to CAS
-//!   → commit immutable WorkspaceRevision + code.changeset Artifact
+//!   → commit immutable WorkspaceRevision + code.changeset Artifact,
+//!     revalidating R inside the publication transaction
 //!   → remove the Workspace and its worker-local Git history entirely
 //!   → the Artifact remains self-contained for every changed path
 //! ```
@@ -26,16 +28,18 @@ use std::process::Command as Process;
 
 use pantheon_cas::LocalFsCas;
 use pantheon_core::config::Digest;
+use pantheon_core::execution::LogicalAgentVersion;
 use pantheon_core::planning::direct::{self, PlanningInput, Trigger};
 use pantheon_core::planning::goal::{Deliverable, GoalConstraints, GoalInput, GoalSpec};
+use pantheon_core::scheduling::{ContextSourceSnapshot, ExecutionBinding};
 use pantheon_engine::configuration::{ConfigurationAuthority, SourceSet};
 use pantheon_engine::planning::PlanningController;
 use pantheon_engine::sealing::{
-    ContentObjectStore, SealAuthority, SealCommand, SealRequest, WorkspaceTreeCapture,
+    ChangesetSealer, ContentObjectStore, SealCommand, SealRequest, WorkspaceTreeCapture,
 };
 use pantheon_engine::workspace::{WorkspaceCommand, WorkspaceController, WorkspaceRequest};
 use pantheon_git::{ConfinedCapture, GitBaseReader, GitMaterializer};
-use pantheon_store::{Command, Store};
+use pantheon_store::{Command, Revision, RunIntent, SealAuthority, Store};
 
 struct TempDir(PathBuf);
 
@@ -238,8 +242,84 @@ fn sealer<'a>(
     base: &'a GitBaseReader,
     cas: &'a LocalFsCas,
     workspace_root: &'a Path,
-) -> pantheon_engine::sealing::ChangesetSealer<'a> {
-    pantheon_engine::sealing::ChangesetSealer::new(store, capture, base, cas, workspace_root)
+) -> ChangesetSealer<'a> {
+    ChangesetSealer::new(store, capture, base, cas, workspace_root)
+}
+
+/// Dispatches the Ready coding Task through T3, the way the daemon's
+/// scheduler does, so sealing runs under a real durable Run relation
+/// (`run-1`, status revision 1) rather than a bare Task.
+fn dispatch(store: &Store) {
+    let pointer = store.configuration_pointer().expect("pointer");
+    let active = pointer.active.as_ref().expect("active configuration");
+    let snap = store.scheduling_snapshot().expect("snapshot");
+    let candidate = snap
+        .candidates
+        .first()
+        .expect("a dispatchable Task")
+        .clone();
+
+    let agent = LogicalAgentVersion {
+        name: "builder".to_string(),
+        version: 1,
+    };
+    let binding = ExecutionBinding {
+        task_id: candidate.task_id.clone(),
+        agent: agent.clone(),
+        request_digest: Digest::of(b"request"),
+        offer_digest: Digest::of(b"offer"),
+        backend_id: "fake-local".to_string(),
+        descriptor_revision: 3,
+        descriptor_digest: Digest::of(b"descriptor"),
+        execution_profile_digest: active.components.execution_profile,
+        sandbox_profile_digest: Digest::of(b"sandbox-profile"),
+        route_policy_digest: active.components.routing,
+        configuration_activation_sequence: active.activation_sequence,
+        configuration_content_digest: active.content_digest,
+        component_digests: active.components,
+    };
+    let workspace = store
+        .workspace_for_task(&candidate.task_id)
+        .expect("read")
+        .expect("the Task owns a Workspace");
+    let snapshot = ContextSourceSnapshot {
+        task_spec_digest: candidate.spec_digest,
+        goal_id: candidate.goal_id.clone(),
+        goal_revision: candidate.goal_current_revision,
+        graph_revision: candidate.graph_revision,
+        agent,
+        configuration_activation_sequence: active.activation_sequence,
+        context_policy_digest: active.components.context_policy,
+        workspace_id: workspace.id.clone(),
+        workspace_resolved_base: workspace.resolved_base.as_str().to_string(),
+    };
+    let binding_digest = binding.digest();
+    let snapshot_digest = snapshot.digest();
+    let intent = RunIntent {
+        run_id: "run-1",
+        task_id: &candidate.task_id,
+        goal_id: &candidate.goal_id,
+        expected_task_revision: candidate.task_revision,
+        expected_goal_row_revision: candidate.goal_row_revision,
+        expected_goal_current_revision: candidate.goal_current_revision,
+        expected_graph_revision: candidate.graph_revision,
+        expected_workspace_revision: candidate.workspace_revision,
+        expected_scheduler_revision: snap.state.revision,
+        expected_goal_fairness_revision: None,
+        expected_task_scheduling_revision: candidate.scheduling_revision,
+        configuration_activation_sequence: active.activation_sequence,
+        binding_digest: &binding_digest,
+        binding: &binding,
+        snapshot_digest: &snapshot_digest,
+        snapshot: &snapshot,
+    };
+    let epoch = store.restore_generation().expect("generation");
+    store
+        .commit_run_intent(
+            &command(epoch.as_str(), "cmd-t3", &[9u8; 32], "run.committed"),
+            &intent,
+        )
+        .expect("the Run intent commits");
 }
 
 fn seal(
@@ -260,7 +340,10 @@ fn seal(
         &SealRequest {
             task_id: "task-1",
             output_slot: "changeset",
-            authority: SealAuthority::TaskCheckpoint,
+            authority: SealAuthority {
+                run_id: "run-1".to_string(),
+                expected_run_revision: Revision::new(1),
+            },
         },
     )
 }
@@ -343,6 +426,7 @@ fn a_sealed_changeset_is_cas_complete_and_survives_deletion_of_the_workspace() {
     ready_coding_task(&store, &["workspace://**"]);
 
     ensure_workspace(&store, &materializer, &workspace_root, &source, "ws-req-1");
+    dispatch(&store);
 
     // The worker does ordinary, messy coding work: edit, add, delete, link,
     // chmod — then stages half of it and commits on a branch for good
@@ -446,6 +530,7 @@ fn identity_ignores_worker_commits_branches_and_staging() {
     let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
     ready_coding_task(&store, &["workspace://**"]);
     ensure_workspace(&store, &materializer, &workspace_root, &source, "ws-req-1");
+    dispatch(&store);
 
     let repo = workspace_root.join("workspace-1").join("repo");
     std::fs::write(repo.join("app.txt"), b"fixed\n").expect("modify");
@@ -513,6 +598,7 @@ fn hostile_git_control_state_is_inert_data_and_source_refs_stay_untouched() {
     let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
     ready_coding_task(&store, &["workspace://**"]);
     ensure_workspace(&store, &materializer, &workspace_root, &source, "ws-req-1");
+    dispatch(&store);
 
     let source_refs_before = git(&source, &["show-ref"]);
     let repo = workspace_root.join("workspace-1").join("repo");

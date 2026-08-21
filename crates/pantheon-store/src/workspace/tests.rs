@@ -11,6 +11,8 @@ use crate::error::StoreError;
 use crate::planning::tests::{
     command, create_goal, materialize, plan_and_record, store_with_configuration, validated,
 };
+use crate::scheduling::tests::dispatch_ready_task;
+use crate::seal::SealAuthority;
 use crate::store::Store;
 use crate::test_support::TempDir;
 use crate::transaction::Revision;
@@ -18,6 +20,15 @@ use crate::workspace::{WorkspaceBinding, WorkspaceRecord};
 
 const BASE: &str = "dc6fcd729d1c3b0426712ab6985f28c19be95d55";
 const OTHER_BASE: &str = "3ab5ae51b3728243d6d221857e865ec97189e6e1";
+/// The Run the fixture dispatches; its status starts at revision 1.
+const RUN: &str = "run-1";
+
+fn run_authority(expected_run_revision: i64) -> SealAuthority {
+    SealAuthority {
+        run_id: RUN.to_string(),
+        expected_run_revision: Revision::new(expected_run_revision),
+    }
+}
 
 /// A store holding one Ready Task, which is what a Workspace needs a holder
 /// to be.
@@ -524,6 +535,12 @@ fn ready(store: &Store, id: &str, command_id: &str) -> WorkspaceRecord {
     )
 }
 
+/// Dispatches the fixture Task through T3 so a seal authority exists. The
+/// Workspace must already be Ready: T3 selects only Tasks owning one.
+fn dispatch(store: &Store, ws_id: &str) {
+    dispatch_ready_task(store, "goal-1", "task-1", ws_id, BASE, RUN, "cmd-t3");
+}
+
 fn freeze(
     store: &Store,
     id: &str,
@@ -533,6 +550,9 @@ fn freeze(
     let epoch = store.restore_generation().expect("generation");
     store.freeze_workspace(
         &command(epoch.as_str(), command_id, &[11u8; 32], "workspace.frozen"),
+        &run_authority(1),
+        "task-1",
+        "changeset",
         id,
         expected,
     )
@@ -542,6 +562,7 @@ fn freeze(
 fn freezing_a_ready_workspace_suspends_mutation_authority_and_keeps_presence() {
     let (_dir, store, _task) = store_with_ready_task("freeze-happy");
     ready(&store, "workspace-1", "cmd-ready");
+    dispatch(&store, "workspace-1");
     let current = store
         .workspace_for_task("task-1")
         .expect("read")
@@ -556,6 +577,219 @@ fn freezing_a_ready_workspace_suspends_mutation_authority_and_keeps_presence() {
         "a freeze is a fence, not an observation"
     );
     assert_eq!(frozen.revision.get(), current.revision.get() + 1);
+}
+
+#[test]
+fn freezing_requires_the_current_run_not_merely_a_ready_task() {
+    // Post-#29 a Ready Task owns zero Runs and no execution has happened:
+    // there is nothing settled to seal and no Run relation to authorize it.
+    let (_dir, store, _task) = store_with_ready_task("freeze-no-run");
+    ready(&store, "workspace-1", "cmd-ready");
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+
+    let err = freeze(&store, "workspace-1", current.revision, "cmd-freeze")
+        .expect_err("a Ready Task with no Run cannot authorize a seal");
+    assert!(
+        matches!(err, StoreError::SealAuthorityInvalid { .. }),
+        "{err}"
+    );
+
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    assert_eq!(
+        current.phase,
+        WorkspacePhase::Ready,
+        "the refusal wrote nothing: no freeze exists"
+    );
+}
+
+#[test]
+fn freeze_refuses_stale_or_unauthorized_runs_and_freezes_nothing() {
+    enum Fault {
+        NonexistentRun,
+        StaleRevision,
+        WrongTaskRun,
+        TerminalRun,
+        NotCurrentRun,
+        UnknownSlot,
+    }
+
+    for (fault, label) in [
+        (Fault::NonexistentRun, "nonexistent-run"),
+        (Fault::StaleRevision, "stale-revision"),
+        (Fault::WrongTaskRun, "wrong-task-run"),
+        (Fault::TerminalRun, "terminal-run"),
+        (Fault::NotCurrentRun, "not-current-run"),
+        (Fault::UnknownSlot, "unknown-slot"),
+    ] {
+        let (_dir, store, _task) = store_with_ready_task("freeze-fault");
+        ready(&store, "workspace-1", "cmd-ready");
+        dispatch(&store, "workspace-1");
+        let current = store
+            .workspace_for_task("task-1")
+            .expect("read")
+            .expect("current");
+
+        let authority = match fault {
+            Fault::NonexistentRun => SealAuthority {
+                run_id: "run-absent".to_string(),
+                expected_run_revision: Revision::new(1),
+            },
+            Fault::StaleRevision => run_authority(99),
+            Fault::WrongTaskRun => {
+                insert_foreign_run(&store);
+                SealAuthority {
+                    run_id: "run-foreign".to_string(),
+                    expected_run_revision: Revision::new(1),
+                }
+            }
+
+            Fault::TerminalRun => {
+                terminalize_current_run(&store);
+                run_authority(1)
+            }
+            // A second Run of this Task exists and is nonterminal, but the
+            // Task's pointer still names the terminal first Run: claiming
+            // the second must refuse on currentness alone.
+            Fault::NotCurrentRun => {
+                insert_superseding_run(&store);
+                SealAuthority {
+                    run_id: "run-2".to_string(),
+                    expected_run_revision: Revision::new(1),
+                }
+            }
+            Fault::UnknownSlot => run_authority(1),
+        };
+        let slot = match fault {
+            Fault::UnknownSlot => "no-such-slot",
+            _ => "changeset",
+        };
+
+        let epoch = store.restore_generation().expect("generation");
+        let Err(err) = store.freeze_workspace(
+            &command(
+                epoch.as_str(),
+                "cmd-freeze",
+                &[11u8; 32],
+                "workspace.frozen",
+            ),
+            &authority,
+            "task-1",
+            slot,
+            "workspace-1",
+            current.revision,
+        ) else {
+            panic!("{label}: the faulting scenario must refuse the freeze");
+        };
+        assert!(
+            matches!(err, StoreError::SealAuthorityInvalid { .. }),
+            "{label}: {err}"
+        );
+
+        let after = store
+            .workspace_for_task("task-1")
+            .expect("read")
+            .expect("current");
+        assert_eq!(
+            after.phase,
+            WorkspacePhase::Ready,
+            "{label}: nothing was frozen"
+        );
+        assert_eq!(
+            after.revision, current.revision,
+            "{label}: no revision burned"
+        );
+    }
+}
+
+/// Inserts a Run owned by another Task (which exists, satisfying the FK),
+/// to prove holder identity is checked against the sealing Task. The
+/// fixture's own Run is terminalized first so the single global slot can
+/// hold the foreign one.
+fn insert_foreign_run(store: &Store) {
+    terminalize_current_run(store);
+    create_goal(store, "goal-2", "cmd-goal-2");
+    let sequence = store
+        .configuration_pointer()
+        .expect("pointer")
+        .active
+        .as_ref()
+        .expect("active")
+        .activation_sequence;
+    let op = plan_and_record(store, "goal-2", sequence, "cmd-plan-2");
+    let registry = store
+        .configuration_pointer()
+        .expect("pointer")
+        .active
+        .as_ref()
+        .expect("active")
+        .components
+        .evaluator_registry;
+    let plan: Materializable =
+        crate::planning::tests::validated_for("goal-2", sequence, registry, "unit-tests-v1");
+    materialize(store, &op, "task-2", &plan, "cmd-materialize-2").expect("second task");
+    store
+        .write(|writer| {
+            writer.execute(
+                "INSERT INTO runs (id, task_id, binding_digest,
+                        context_source_snapshot_digest, created_at)
+                 SELECT 'run-foreign', 'task-2', binding_digest,
+                        context_source_snapshot_digest, unixepoch()
+                 FROM runs WHERE id = 'run-1'",
+                &[],
+            )?;
+            writer.execute(
+                "INSERT INTO run_status (run_id, task_id, phase, terminal_target,
+                        revision, active_slot, updated_at)
+                 VALUES ('run-foreign', 'task-2', 'Active', NULL, 1, NULL, unixepoch())",
+                &[],
+            )
+        })
+        .expect("fixture run inserts");
+}
+
+/// Terminalizes the fixture's current Run in place, keeping its revision:
+/// exactly what a cancelled or failed execution leaves behind.
+fn terminalize_current_run(store: &Store) {
+    store
+        .write(|writer| {
+            writer.execute(
+                "UPDATE run_status SET phase = 'Failed', active_slot = NULL
+                 WHERE run_id = 'run-1'",
+                &[],
+            )
+        })
+        .expect("fixture terminalizes");
+}
+
+/// Gives the Task a second, nonterminal Run while its responsible-Run
+/// pointer still names the terminal first one — the shape that isolates the
+/// not-current rejection from every other arm.
+fn insert_superseding_run(store: &Store) {
+    terminalize_current_run(store);
+    store
+        .write(|writer| {
+            writer.execute(
+                "INSERT INTO runs (id, task_id, binding_digest,
+                        context_source_snapshot_digest, created_at)
+                 SELECT 'run-2', task_id, binding_digest,
+                        context_source_snapshot_digest, unixepoch()
+                 FROM runs WHERE id = 'run-1'",
+                &[],
+            )?;
+            writer.execute(
+                "INSERT INTO run_status (run_id, task_id, phase, terminal_target,
+                        revision, active_slot, updated_at)
+                 VALUES ('run-2', 'task-1', 'Active', NULL, 1, 'global', unixepoch())",
+                &[],
+            )
+        })
+        .expect("fixture superseding run inserts");
 }
 
 #[test]
@@ -585,6 +819,7 @@ fn only_a_verified_ready_workspace_can_be_frozen() {
 fn freezing_twice_from_the_same_observation_is_one_durable_transition() {
     let (_dir, store, _task) = store_with_ready_task("freeze-replay");
     ready(&store, "workspace-1", "cmd-ready");
+    dispatch(&store, "workspace-1");
     let current = store
         .workspace_for_task("task-1")
         .expect("read")
@@ -608,6 +843,7 @@ fn freezing_twice_from_the_same_observation_is_one_durable_transition() {
 fn capture_failure_evidence_requires_the_fence_it_claims() {
     let (_dir, store, _task) = store_with_ready_task("capture-failure");
     ready(&store, "workspace-1", "cmd-ready");
+    dispatch(&store, "workspace-1");
     let epoch = store.restore_generation().expect("generation");
     let record_failure = |expected: Revision| {
         store.record_capture_failure(
@@ -641,4 +877,92 @@ fn capture_failure_evidence_requires_the_fence_it_claims() {
     let recorded = executed(record_failure(frozen.revision).expect("evidence records"));
     assert_eq!(recorded.phase, WorkspacePhase::Frozen);
     assert_eq!(recorded.materialization, Materialization::Present);
+}
+
+#[test]
+fn an_already_frozen_retry_revalidates_current_run_authority() {
+    // The Workspace fence surviving an earlier attempt must not stand in
+    // for authorization: the retry boundary re-proves the Run relation
+    // before capture, and refuses without writing anything when it is gone.
+    let (_dir, store, _task) = store_with_ready_task("frozen-revalidate");
+    ready(&store, "workspace-1", "cmd-ready");
+    dispatch(&store, "workspace-1");
+    let pre_freeze = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current")
+        .revision;
+    let frozen_record =
+        executed(freeze(&store, "workspace-1", pre_freeze, "cmd-freeze").expect("freezes"));
+    let fence = frozen_record.revision;
+
+    let revalidate = |authority: &SealAuthority, expected: Revision| {
+        let epoch = store.restore_generation().expect("generation");
+        store.validate_seal_authority_command(
+            &command(
+                epoch.as_str(),
+                "cmd-revalidate",
+                &[13u8; 32],
+                "workspace.seal-authority.validated",
+            ),
+            authority,
+            "task-1",
+            "changeset",
+            "workspace-1",
+            expected,
+        )
+    };
+
+    // A stale claimed revision is refused against current durable state.
+    let err = revalidate(&run_authority(99), fence).expect_err("stale run authority must refuse");
+    assert!(
+        matches!(err, StoreError::SealAuthorityInvalid { .. }),
+        "{err}"
+    );
+
+    // A Run that went terminal after the fence is refused too.
+    terminalize_current_run(&store);
+    let err = revalidate(&run_authority(1), fence).expect_err("terminal run authority must refuse");
+    assert!(
+        matches!(err, StoreError::SealAuthorityInvalid { .. }),
+        "{err}"
+    );
+
+    // And a moved fence is a conflict before any authority question.
+    dispatch_superseding_pointer(&store);
+    let err = revalidate(&run_authority(1), Revision::new(fence.get() + 1))
+        .expect_err("a moved fence must refuse as a conflict");
+    assert!(
+        matches!(
+            err,
+            StoreError::RevisionConflict {
+                table: "workspaces",
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    // None of the refusals thawed the Workspace or burned a revision.
+    let after = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    assert_eq!(after.phase, WorkspacePhase::Frozen);
+    assert_eq!(after.revision, fence);
+}
+
+/// Repairs the fixture's responsibility pointer to the superseding Run so
+/// later fixture work stays coherent (used only after deliberate corruption
+/// above).
+fn dispatch_superseding_pointer(store: &Store) {
+    insert_superseding_run(store);
+    store
+        .write(|writer| {
+            writer.execute(
+                "UPDATE tasks SET active_run_id = 'run-2' WHERE id = 'task-1'",
+                &[],
+            )
+        })
+        .expect("fixture pointer moves");
 }
