@@ -490,3 +490,52 @@ find: .blob_bytes(source, &before.oid)
 replace: .blob_bytes(source, "0000000000000000000000000000000000000000")
 scope: -p pantheond --test workspace_sealing
 test: a_sealed_changeset_is_cas_complete_and_survives_deletion_of_the_workspace
+
+name: t3a-wrong-source-attachment-accepted
+file: crates/pantheon-store/src/context.rs
+find: if run_snapshot.as_slice() != attachment.source_snapshot_digest.as_bytes() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: context::tests::a_plan_built_from_another_snapshot_cannot_attach
+
+name: t3a-second-plan-reconciled-as-success
+file: crates/pantheon-store/src/context.rs
+find: if existing.as_slice() == attachment.plan_digest.as_bytes() {
+replace: if true {
+scope: -p pantheon-store --lib
+test: context::tests::a_second_different_plan_cannot_replace_the_attached_plan
+
+name: t3a-content-hash-fence-removed
+file: crates/pantheon-store/src/context.rs
+find: if computed != *attachment.plan_digest {
+replace: if false {
+scope: -p pantheon-store --lib
+test: context::tests::plan_bytes_must_hash_to_their_claimed_digest_before_anything_is_written
+
+name: t3a-stored-content-divergence-ignored
+file: crates/pantheon-store/src/context.rs
+find: if stored_json != attachment.plan_canonical_json {
+replace: if false {
+scope: -p pantheon-store --lib
+test: context::tests::an_existing_plan_digest_with_different_bytes_is_a_content_conflict
+
+name: frozen-guidance-digest-fence-removed
+file: crates/pantheon-engine/src/context.rs
+find: if guidance_digest(&guidance.soul) != snapshot.agent_soul_digest
+replace: if false
+scope: -p pantheon-engine --lib
+test: context::tests::guidance_that_does_not_reproduce_the_frozen_digests_fails_closed
+
+name: workspace-owner-relation-fence-removed
+file: crates/pantheon-engine/src/context.rs
+find: if workspace.task_id != task_id {
+replace: if false {
+scope: -p pantheon-engine --lib
+test: context::tests::a_workspace_outside_the_frozen_relation_fails_closed
+
+name: guidance-selected-from-a-fixed-generation-not-the-frozen-one
+file: crates/pantheon-engine/src/context.rs
+find: .revision_agents_component_json(snapshot.configuration_activation_sequence)?
+replace: .revision_agents_component_json(0)?
+scope: -p pantheon-engine --lib
+test: context::tests::activating_a_newer_configuration_revision_never_changes_an_existing_runs_plan

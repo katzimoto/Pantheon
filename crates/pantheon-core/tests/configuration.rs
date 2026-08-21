@@ -221,8 +221,8 @@ fn an_evaluator_referencing_an_undeclared_profile_is_rejected() {
 fn a_mandatory_context_section_cannot_be_dropped() {
     // Rule 6: mandatory context is never silently truncated.
     let err = compile(&variant(
-        r#""optionalDropOrder": ["workspace", "memory"]"#,
-        r#""optionalDropOrder": ["workspace", "task"]"#,
+        r#""optionalDropOrder": ["workspace-orientation"]"#,
+        r#""optionalDropOrder": ["workspace-orientation", "task-contract"]"#,
     ))
     .expect_err("dropping a mandatory section is rejected");
     assert!(
@@ -461,7 +461,7 @@ fn invalid_agent_pin_and_conflicting_current_versions_are_rejected_before_activa
 
     let conflicting = VALID_SOURCE.replacen(
         r#""agents": ["#,
-        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"]},"#,
+        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"],"soul":"Second version identity.","behavior":"Second version behavior."},"#,
         1,
     );
     let err = compile(&conflicting).expect_err("two current versions are invalid");

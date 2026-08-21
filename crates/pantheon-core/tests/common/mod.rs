@@ -23,7 +23,9 @@ pub(crate) const VALID_SOURCE: &str = r#"{
       "minContextTokens": 8000,
       "sandboxProfile": "strict-local-container",
       "sandboxRequirements": ["isolation.control-plane"],
-      "actions": ["shell.execute", "filesystem.read", "filesystem.write"]
+      "actions": ["shell.execute", "filesystem.read", "filesystem.write"],
+      "soul": "A careful coding agent that protects operator trust.",
+      "behavior": "Plan before editing. Keep changes minimal and verifiable."
     }
   ],
   "routing": {
@@ -70,12 +72,12 @@ pub(crate) const VALID_SOURCE: &str = r#"{
   },
   "context": {
     "schemaVersion": 1,
-    "mandatorySections": ["task", "acceptance"],
-    "preloadPriority": ["task", "workspace"],
+    "mandatorySections": ["task-contract", "goal-contract", "agent-soul", "agent-behavior"],
+    "preloadPriority": ["workspace-orientation"],
     "memoryLimitTokens": 4000,
     "workspaceOrientationLimitTokens": 2000,
     "safetyMarginTokens": 512,
-    "optionalDropOrder": ["workspace", "memory"]
+    "optionalDropOrder": ["workspace-orientation"]
   },
   "authorization": {
     "schemaVersion": 1,

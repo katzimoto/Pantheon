@@ -14,7 +14,7 @@ fn source(memory_limit: i64) -> String {
   "agents": [{{"name":"builder","version":1,"accepts":["code-change"],"competencies":["rust"],
     "routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
-    "actions":["filesystem.read"]}}],
+    "actions":["filesystem.read"],"soul":"Careful coding agent identity.","behavior":"Plan first; keep changes minimal."}}],
   "routing": {{"policies":[{{"name":"default","ordering":["contextCapacity"],"tieBreak":"backendId"}}]}},
   "execution": {{
     "profiles":[{{"name":"strict","isolationClass":"CONTAINER",
@@ -25,9 +25,9 @@ fn source(memory_limit: i64) -> String {
     "versions":[{{"id":"unit-v1","kind":"check","argv":["/bin/check"],"timeoutMs":1000,
       "sandboxProfile":"strict","resultProtocol":"p-v1"}}],
     "refs":[{{"ref":"check://p/unit","currentVersion":"unit-v1"}}]}},
-  "context": {{"schemaVersion":1,"mandatorySections":["task"],"preloadPriority":["task"],
+  "context": {{"schemaVersion":1,"mandatorySections":["task-contract","goal-contract","agent-soul","agent-behavior"],"preloadPriority":["workspace-orientation"],
     "memoryLimitTokens":{memory_limit},"workspaceOrientationLimitTokens":2000,
-    "safetyMarginTokens":512,"optionalDropOrder":["memory"]}},
+    "safetyMarginTokens":512,"optionalDropOrder":["workspace-orientation"]}},
   "authorization": {{"schemaVersion":1,"rules":[{{"action":"filesystem.read","effect":"permit"}}]}}
 }}"#
     )

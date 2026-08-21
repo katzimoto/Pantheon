@@ -84,6 +84,15 @@ pub struct Agent {
     pub sandbox_requirements: Vec<String>,
     /// The semantic action surface. Availability is not authorization.
     pub actions: Vec<String>,
+    /// The static approved SOUL identity guidance of this immutable version.
+    ///
+    /// `agent-genome.md` separates SOUL from BEHAVIOR as distinct semantic
+    /// layers; both are operator-approved static input for v1 and compile into
+    /// this component, which is where their immutability comes from. They are
+    /// instruction text only: neither carries credentials nor grants authority.
+    pub soul: String,
+    /// The static approved cross-task BEHAVIOR guidance of this version.
+    pub behavior: String,
 }
 
 impl Agent {
@@ -116,6 +125,8 @@ impl Component for AgentComponent {
                         set_strings(&agent.sandbox_requirements),
                     ),
                     ("actions", set_strings(&agent.actions)),
+                    ("soul", Value::string(&agent.soul)),
+                    ("behavior", Value::string(&agent.behavior)),
                 ])
             })),
         )])
@@ -420,6 +431,64 @@ impl Component for ContextComponent {
             ),
             ("optionalDropOrder", strings(&self.optional_drop_order)),
         ])
+    }
+}
+
+/// A stored context policy that cannot be read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPolicyDecodeError(pub String);
+
+impl std::fmt::Display for ContextPolicyDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stored context policy is not readable: {}", self.0)
+    }
+}
+
+impl std::error::Error for ContextPolicyDecodeError {}
+
+impl ContextComponent {
+    /// Reads a compiled context policy back from its stored canonical form.
+    ///
+    /// The Context Builder reconstructs the exact policy a Run froze at T3
+    /// through this decoder; it never accepts a caller-supplied substitute.
+    pub fn from_canonical_value(value: &Value) -> Result<Self, ContextPolicyDecodeError> {
+        let error = |detail: String| ContextPolicyDecodeError(detail);
+        let string_list = |name: &str| -> Result<Vec<String>, ContextPolicyDecodeError> {
+            match value.get(name) {
+                Some(Value::Array(entries)) => entries
+                    .iter()
+                    .map(|entry| match entry {
+                        Value::String(text) => Ok(text.clone()),
+                        other => Err(error(format!(
+                            "{name} contains a non-string value ({})",
+                            other.kind()
+                        ))),
+                    })
+                    .collect(),
+                _ => Err(error(format!("missing or malformed {name}"))),
+            }
+        };
+        let integer = |name: &str| -> Result<i64, ContextPolicyDecodeError> {
+            match value.get(name) {
+                Some(Value::Integer(number)) => Ok(*number),
+                Some(other) => Err(error(format!(
+                    "{name} is not an integer (found {})",
+                    other.kind()
+                ))),
+                None => Err(error(format!("missing {name}"))),
+            }
+        };
+        let schema_version = integer("schemaVersion")?;
+        Ok(Self {
+            schema_version: u32::try_from(schema_version)
+                .map_err(|_| error("schemaVersion does not fit a 32-bit version".to_string()))?,
+            mandatory_sections: string_list("mandatorySections")?,
+            preload_priority: string_list("preloadPriority")?,
+            memory_limit_tokens: integer("memoryLimitTokens")?,
+            workspace_orientation_limit_tokens: integer("workspaceOrientationLimitTokens")?,
+            safety_margin_tokens: integer("safetyMarginTokens")?,
+            optional_drop_order: string_list("optionalDropOrder")?,
+        })
     }
 }
 

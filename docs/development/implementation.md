@@ -80,16 +80,38 @@ base reads; and `pantheon-cas` is the concrete local content-addressed store
 behind the CAS port. There is still no Candidate and no acceptance: sealing
 produces durable output, and what accepts it is a later boundary.
 
+On top of that the same crates carry deterministic Run context preparation
+(#30): `pantheon-core` holds the provider-neutral `ContextPlan` vocabulary —
+inclusion classes, precedence strata, canonical section identity — plus the
+pure rules that deterministically select one plan from a frozen source
+snapshot and the frozen ContextPolicy; the Agent configuration now carries
+each version's bounded static SOUL/BEHAVIOR guidance as compiled component
+content, so its digests are content-addressed with everything else. T3 freezes
+those guidance digests into the source snapshot and validates them against the
+stored immutable agents component before committing. `pantheon-store` owns the
+`context_plans` / `run_context_plans` families and the one-time T3a attachment
+transaction, whose composite foreign keys prove that an attached plan was
+built from exactly the source snapshot its Run froze; `pantheon-engine` owns
+the `ContextPreparationController`, which reconstructs every frozen source by
+immutable identity (never through an active pointer), digest-verifies it,
+builds the plan deterministically, attaches it exactly once, and reconciles a
+same-plan retry after restart. There is still no Attempt, no Run Controller
+execution lifecycle, no Sandbox, no production executor, no Agent Control, no
+Candidate submission, no evaluation and no acceptance: preparation ends at
+durable readiness evidence for the later lifecycle to compose.
+
 There is still no endpoint surface beyond Goals/dispatch/events, no Attempt,
-no Sandbox, no ContextPlan and no concrete execution backend: T3 creates
-durable responsibility, not execution. The store's schema is limited to
+no Sandbox and no concrete execution backend: T3 creates durable
+responsibility, not execution. The store's schema is limited to
 migration bookkeeping, installation identity, the command ledger, Event
 Journal and journal epoch/sequence state, the configuration
 component/revision/active-pointer families, the Goal, planning, TaskGraph
 and Task families, the `workspaces` family, the scheduler/Run-intent families
-that path requires, and the `blobs`/`artifacts`/`artifact_members`/
-`workspace_revisions` families sealing publishes into; the future conceptual
-production schema is not implemented ahead of the behaviour that needs it.
+that path requires, the `blobs`/`artifacts`/`artifact_members`/
+`workspace_revisions` families sealing publishes into, and the
+`context_plans`/`run_context_plans` families context preparation publishes
+into; the future conceptual production schema is not implemented ahead of the
+behaviour that needs it.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite), `pantheon-core`
 depends on `sha2` for the SHA-256 digests identity requires, and

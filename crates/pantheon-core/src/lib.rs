@@ -21,15 +21,18 @@
 //! its deterministic encoding, content [`config::Digest`]s, and the immutable
 //! compiled components a ConfigurationRevision is built from. [`execution`]
 //! holds pure Agent eligibility, provider-neutral requests/offers and
-//! pre-Run candidate selection. Compiling a revision from source and
-//! activating it are effects and belong to `pantheon-engine`; storing one
-//! belongs to `pantheon-store`.
+//! pre-Run candidate selection. [`context`] holds the provider-neutral
+//! [`ContextPlan`](context::ContextPlan) vocabulary and the pure rules that
+//! deterministically select one plan from a Run's frozen source snapshot.
+//! Compiling a revision from source and activating it are effects and belong
+//! to `pantheon-engine`; storing one belongs to `pantheon-store`.
 //!
 //! The crate map, the allowed dependency graph and the rule for when a new
 //! crate is justified are in `docs/development/implementation.md`.
 
 pub mod artifact;
 pub mod config;
+pub mod context;
 pub mod execution;
 pub mod planning;
 pub mod scheduling;

@@ -492,6 +492,87 @@ impl Store {
             .transpose()
         })
     }
+
+    /// One Task-owned Workspace row by its stable identity, whatever phase it
+    /// has since reached.
+    ///
+    /// Deliberately unfiltered: preparation proves the Workspace relation the
+    /// source snapshot froze (ownership and immutable base) without depending
+    /// on mutable lifecycle state that may legitimately have advanced after
+    /// T3.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when a stored row cannot be interpreted;
+    /// [`StoreError::Sqlite`] on a storage failure.
+    pub fn workspace_record(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+        self.read(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT task_id, repository, source_path, requested_base, resolved_base,
+                            phase, materialization, revision
+                     FROM workspaces WHERE id = ?1",
+                    rusqlite::params![workspace_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .map(Some)
+                .or_else(|err| match err {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(StoreError::Sqlite(other)),
+                })?;
+
+            row.map(
+                |(
+                    task_id,
+                    repository,
+                    source_path,
+                    requested_base,
+                    resolved_base,
+                    phase,
+                    materialization,
+                    revision,
+                )| {
+                    Ok(WorkspaceRecord {
+                        id: workspace_id.to_string(),
+                        requested_base: parse_requested(&requested_base, workspace_id)?,
+                        resolved_base: parse_resolved(&resolved_base, workspace_id)?,
+                        phase: WorkspacePhase::parse(&phase).ok_or_else(|| {
+                            StoreError::InvariantViolated(format!(
+                                "workspace {workspace_id} has unknown phase {phase}"
+                            ))
+                        })?,
+                        materialization: Materialization::parse(&materialization).ok_or_else(
+                            || {
+                                StoreError::InvariantViolated(format!(
+                                    "workspace {workspace_id} has unknown materialization \
+                                     {materialization}"
+                                ))
+                            },
+                        )?,
+                        task_id: task_id.to_string(),
+                        repository,
+                        source_path,
+                        revision: Revision::new(revision),
+                    })
+                },
+            )
+            .transpose()
+        })
+    }
 }
 
 /// Applies one revisioned phase/materialization transition and returns the

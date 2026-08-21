@@ -111,7 +111,7 @@ fn configuration_source() -> String {
     "accepts":["code.change"],"competencies":["code.analysis","code.editing","test.execution"],"routePolicy":"default",
     "executionFeatures":["exec.shell"],"minContextTokens":8000,
     "sandboxProfile":"strict","sandboxRequirements":["isolation.control-plane"],
-    "actions":["filesystem.read"]}}],
+    "actions":["filesystem.read"],"soul":"Careful coding agent identity.","behavior":"Plan first; keep changes minimal."}}],
   "routing": {{"policies":[{{"name":"default","priority":0,"ordering":["contextCapacity"],
     "tieBreak":"backendId","requiresKeyedLaunch":false}}]}},
   "execution": {{"profiles":[{{"name":"strict","isolationClass":"CONTAINER",
@@ -123,10 +123,10 @@ fn configuration_source() -> String {
     "argv":["/bin/check"],"timeoutMs":1000,"sandboxProfile":"strict",
     "resultProtocol":"p-v1"}}],"refs":[{{"ref":"{evaluator_ref}",
     "currentVersion":"unit-tests-v1"}}]}},
-  "context": {{"schemaVersion":1,"mandatorySections":["task"],
-    "preloadPriority":["task"],"memoryLimitTokens":4000,
+  "context": {{"schemaVersion":1,"mandatorySections":["task-contract","goal-contract","agent-soul","agent-behavior"],
+    "preloadPriority":["workspace-orientation"],"memoryLimitTokens":4000,
     "workspaceOrientationLimitTokens":2000,"safetyMarginTokens":512,
-    "optionalDropOrder":["memory"]}},
+    "optionalDropOrder":["workspace-orientation"]}},
   "authorization": {{"schemaVersion":1,"rules":[
     {{"action":"filesystem.read","effect":"permit"}}
   ]}}

@@ -207,6 +207,21 @@ fn requested() -> RequestedBase {
     RequestedBase::parse("main").expect("fixture ref")
 }
 
+/// The approved guidance of one Agent version under an activated revision,
+/// extracted from the stored immutable agents component.
+fn stored_guidance(
+    store: &Store,
+    active: &ActiveConfiguration,
+    agent: &LogicalAgentVersion,
+) -> pantheon_core::context::AgentGuidance {
+    let agents_json = store
+        .revision_agents_component_json(active.activation_sequence)
+        .expect("read agents component")
+        .expect("agents component stored");
+    let value = pantheon_core::config::parse::parse(&agents_json).expect("fixture component");
+    pantheon_core::context::frozen_agent_guidance(&value, agent).expect("fixture guidance")
+}
+
 /// The frozen strategy and context-source authority for `TASK`.
 #[derive(Clone)]
 struct Frozen {
@@ -257,6 +272,10 @@ fn frozen_for(
         name: "builder".to_string(),
         version: 1,
     };
+    // The guidance digests the active revision actually carries, read back
+    // through the same extraction rule T3 validates with — so a fixture can
+    // freeze honest identities without duplicating fixture text.
+    let guidance = stored_guidance(store, active, &agent);
     let binding = ExecutionBinding {
         task_id: task_id.to_string(),
         agent: agent.clone(),
@@ -277,9 +296,11 @@ fn frozen_for(
         goal_id: goal_id.to_string(),
         goal_revision: 1,
         graph_revision: 1,
-        agent,
+        agent: agent.clone(),
         configuration_activation_sequence: active.activation_sequence,
         context_policy_digest: active.components.context_policy,
+        agent_soul_digest: pantheon_core::context::guidance_digest(&guidance.soul),
+        agent_behavior_digest: pantheon_core::context::guidance_digest(&guidance.behavior),
         workspace_id: ws_id.to_string(),
         workspace_resolved_base: resolved_base.to_string(),
     };

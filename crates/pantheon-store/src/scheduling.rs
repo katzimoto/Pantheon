@@ -540,6 +540,54 @@ fn apply_run_intent(
                 .to_string(),
         ));
     }
+
+    // 2b. Agent-guidance currency: the source snapshot freezes the exact
+    //     SOUL/BEHAVIOR digests of the selected Agent version under this same
+    //     revision. They are recomputed here from the stored immutable agents
+    //     component — through the same extraction rule preparation later uses
+    //     — so a snapshot pairing one revision's facts with another
+    //     generation's guidance cannot commit.
+    let agents_component_json: Option<String> = writer.query_optional(
+        "SELECT component.canonical_json
+         FROM configuration_revisions revision
+         JOIN configuration_components component
+           ON component.digest = revision.agents_digest
+         WHERE revision.activation_sequence = ?1",
+        &[Value::Integer(intent.configuration_activation_sequence)],
+        |row| row.get(0),
+    )?;
+    let Some(agents_component_json) = agents_component_json else {
+        return writer.fail(StoreError::InvariantViolated(format!(
+            "configuration revision {} has no stored agents component",
+            intent.configuration_activation_sequence
+        )));
+    };
+    let expected = match pantheon_core::config::parse::parse(&agents_component_json)
+        .map_err(|err| err.to_string())
+        .and_then(|value| {
+            pantheon_core::context::frozen_agent_guidance(&value, &intent.snapshot.agent)
+                .map_err(|err| err.to_string())
+        }) {
+        Ok(guidance) => (
+            pantheon_core::context::guidance_digest(&guidance.soul),
+            pantheon_core::context::guidance_digest(&guidance.behavior),
+        ),
+        Err(detail) => {
+            return writer.fail(StoreError::InvariantViolated(format!(
+                "the active ConfigurationRevision carries no usable guidance for agent {}@{}: {detail}",
+                intent.snapshot.agent.name, intent.snapshot.agent.version
+            )));
+        }
+    };
+    if expected.0 != intent.snapshot.agent_soul_digest
+        || expected.1 != intent.snapshot.agent_behavior_digest
+    {
+        return writer.fail(StoreError::InvariantViolated(
+            "the frozen source snapshot names Agent guidance that does not belong to \
+             the active ConfigurationRevision"
+                .to_string(),
+        ));
+    }
     // The frozen records carry their own owners; those owners must be this
     // Run's Task and Goal. Both foreign keys would happily accept a record
     // frozen for someone else, so only this comparison closes the swap.
@@ -763,9 +811,9 @@ fn apply_run_intent(
         "INSERT INTO context_source_snapshots
              (digest, configuration_activation_sequence, context_policy_digest,
               task_spec_digest, goal_id, goal_revision, graph_revision,
-              agent_name, agent_version, workspace_id, workspace_resolved_base,
-              canonical_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+              agent_name, agent_version, agent_soul_digest, agent_behavior_digest,
+              workspace_id, workspace_resolved_base, canonical_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT (digest) DO NOTHING",
         &[
             Value::Blob(intent.snapshot_digest.as_bytes().to_vec()),
@@ -777,6 +825,8 @@ fn apply_run_intent(
             Value::Integer(intent.snapshot.graph_revision),
             Value::from(intent.snapshot.agent.name.as_str()),
             Value::Integer(i64::from(intent.snapshot.agent.version)),
+            Value::Blob(intent.snapshot.agent_soul_digest.as_bytes().to_vec()),
+            Value::Blob(intent.snapshot.agent_behavior_digest.as_bytes().to_vec()),
             Value::from(intent.snapshot.workspace_id.as_str()),
             Value::from(intent.snapshot.workspace_resolved_base.as_str()),
             Value::from(canonical_json(&intent.snapshot.to_value())),

@@ -614,6 +614,77 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             UNIQUE (workspace_id, state_digest)
         ) STRICT;",
     },
+    Migration {
+        version: 12,
+        name: "create_context_plan_attachment",
+        // The context-plan families from the canonical persistence contract's
+        // "Context source snapshot and ContextPlan attachment" section, which
+        // Issue #30's preparation path needs:
+        //
+        // - `context_plans` — immutable content-addressed plans;
+        // - `run_context_plans` — the one-time Run attachment.
+        //
+        // The composite foreign keys are quoted from that contract rather
+        // than invented here: they prove that an attached plan was built from
+        // exactly the source snapshot its Run froze at T3, and `run_id` as
+        // primary key proves at most one attachment per Run.
+        //
+        // The parent key `runs(id, context_source_snapshot_digest)` did not
+        // exist when migration 9 created `runs`, and SQLite cannot add a
+        // UNIQUE constraint to a table without rebuilding it — so it arrives
+        // here as a unique index, which is what SQLite requires of a
+        // composite foreign-key parent anyway. No existing table is rebuilt.
+        //
+        // Two nullable columns extend `context_source_snapshots` with the
+        // frozen Agent guidance digests this mission added to the snapshot
+        // vocabulary. ALTER TABLE cannot add a CHECK or NOT NULL column
+        // without a default, so nullability is the schema-level shape; every
+        // snapshot written from this build onward populates both columns in
+        // T3, and preparation fails closed on a legacy NULL rather than
+        // substituting current guidance.
+        sql: "ALTER TABLE context_source_snapshots
+                  ADD COLUMN agent_soul_digest BLOB CHECK (length(agent_soul_digest) = 32);
+
+        ALTER TABLE context_source_snapshots
+                  ADD COLUMN agent_behavior_digest BLOB CHECK (length(agent_behavior_digest) = 32);
+
+        -- Composite parent key for run_context_plans' holder-safe FK below.
+        CREATE UNIQUE INDEX runs_id_and_source_snapshot
+            ON runs (id, context_source_snapshot_digest);
+
+        CREATE TABLE context_plans (
+            digest                 BLOB    NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            -- A plan exists only relative to one exact frozen source universe.
+            source_snapshot_digest BLOB    NOT NULL
+                                           REFERENCES context_source_snapshots(digest),
+            builder_version        TEXT    NOT NULL
+                                           CHECK (length(builder_version) BETWEEN 1 AND 128),
+            canonical_json         TEXT    NOT NULL,
+            created_at             INTEGER NOT NULL,
+            UNIQUE (digest, source_snapshot_digest)
+        ) STRICT;
+
+        CREATE TABLE run_context_plans (
+            -- Primary key over the Run alone: at most one attachment per Run,
+            -- enforced by the database rather than controller discipline.
+            -- Existence of the Run is proved by the composite FK below, which
+            -- also proves the snapshot pairing; a bare run_id FK would say
+            -- less.
+            run_id                         TEXT    NOT NULL PRIMARY KEY,
+            context_source_snapshot_digest BLOB    NOT NULL,
+            context_plan_digest            BLOB    NOT NULL
+                                                   CHECK (length(context_plan_digest) = 32),
+            attached_at                    INTEGER NOT NULL,
+            -- Holder-safe FKs proving both halves at once: the attachment
+            -- names THIS Run's exact frozen snapshot, and the plan was built
+            -- from that same snapshot. A plan for another snapshot is not
+            -- merely rejected by the controller; the database refuses it.
+            FOREIGN KEY (run_id, context_source_snapshot_digest)
+                REFERENCES runs(id, context_source_snapshot_digest),
+            FOREIGN KEY (context_plan_digest, context_source_snapshot_digest)
+                REFERENCES context_plans(digest, source_snapshot_digest)
+        ) STRICT;",
+    },
 ];
 
 /// Runs the production migration set against `conn`.
