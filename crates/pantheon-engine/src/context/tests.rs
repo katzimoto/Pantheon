@@ -569,8 +569,9 @@ fn mutable_workspace_lifecycle_after_t3_does_not_mutate_the_initial_plan() {
         .prepare_run_context(world.run_id())
         .expect("preparation while Ready");
 
-    // Freeze the Workspace through #32's authoritative transition. The
-    // materialization completion left the row at revision 3.
+    // Freeze the Workspace through #32's authoritative transition, under the
+    // committed Run's sealing authority (#76). The materialization completion
+    // left the row at revision 3.
     let epoch = store.restore_generation().expect("generation");
     store
         .freeze_workspace(
@@ -580,6 +581,12 @@ fn mutable_workspace_lifecycle_after_t3_does_not_mutate_the_initial_plan() {
                 &[15u8; 32],
                 "workspace.frozen",
             ),
+            &pantheon_store::SealAuthority {
+                run_id: world.run_id().to_string(),
+                expected_run_revision: pantheon_store::Revision::new(1),
+            },
+            "task-1",
+            "changeset",
             "ws-1",
             pantheon_store::Revision::new(3),
         )

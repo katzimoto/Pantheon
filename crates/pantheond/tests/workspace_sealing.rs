@@ -290,6 +290,14 @@ fn dispatch(store: &Store) {
         agent,
         configuration_activation_sequence: active.activation_sequence,
         context_policy_digest: active.components.context_policy,
+        // The guidance digests the fixture configuration's agents component
+        // actually carries, so T3's frozen-guidance validation accepts it.
+        agent_soul_digest: pantheon_core::context::guidance_digest(
+            "Careful coding agent identity.",
+        ),
+        agent_behavior_digest: pantheon_core::context::guidance_digest(
+            "Plan first; keep changes minimal.",
+        ),
         workspace_id: workspace.id.clone(),
         workspace_resolved_base: workspace.resolved_base.as_str().to_string(),
     };
