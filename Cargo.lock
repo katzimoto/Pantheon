@@ -375,6 +375,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pantheon-git"
+version = "0.1.0"
+dependencies = [
+ "pantheon-core",
+ "pantheon-engine",
+]
+
+[[package]]
 name = "pantheon-operator-api"
 version = "0.1.0"
 dependencies = [
@@ -410,7 +418,9 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "pantheon-core",
  "pantheon-engine",
+ "pantheon-git",
  "pantheon-operator-api",
  "pantheon-store",
  "serde_json",

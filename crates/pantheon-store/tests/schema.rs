@@ -51,6 +51,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "task_graphs".to_string(),
             "task_specs".to_string(),
             "tasks".to_string(),
+            "workspaces".to_string(),
         ],
         "unexpected production table set"
     );
@@ -226,5 +227,42 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
     assert!(
         !autoincrement,
         "journal sequencing must not use SQLite AUTOINCREMENT"
+    );
+
+    // The Task-owned Workspace carries durable ownership, the two base
+    // identities and lifecycle — and nothing about a Run, a Sandbox, a
+    // WorkspaceRevision, a Candidate or a Git worktree. `repositories`,
+    // `workspace_revisions` and `integration_intents` are named in the same
+    // canonical table family and deliberately do not exist yet.
+    assert_eq!(
+        columns(&dir.db_path(), "workspaces"),
+        [
+            "created_at",
+            "id",
+            "materialization",
+            "phase",
+            "repository",
+            "requested_base",
+            "resolved_base",
+            "revision",
+            "source_path",
+            "task_id"
+        ],
+        "the Workspace row is ownership, base identity and lifecycle only"
+    );
+
+    // The cardinality invariant lives in the database, not in controller
+    // discipline: a Task owns at most one Workspace that is not Released.
+    let index: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'workspaces_one_current_per_task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the one-current-workspace index exists");
+    assert!(
+        index.contains("UNIQUE") && index.contains("phase != 'Released'"),
+        "the one-current-workspace index must stay a partial unique index: {index}"
     );
 }
