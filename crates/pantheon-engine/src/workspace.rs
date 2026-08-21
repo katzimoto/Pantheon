@@ -309,6 +309,18 @@ impl<'a> WorkspaceController<'a> {
     /// again after a daemon restart reopens the same Workspace bound to the
     /// same base rather than creating a second one.
     ///
+    /// Idempotent is not the same as mutually exclusive, and the difference
+    /// matters to whoever supervises this. Command replay proves an identity
+    /// already committed, not that no other caller is running now: two live
+    /// callers can both observe `Committed::Replayed` and reach the external
+    /// discard/materialize steps against the same destination concurrently.
+    /// The blast radius is bounded — external state at that point is
+    /// never-`Ready` controller-owned scratch, rebuilding it is deterministic,
+    /// and whichever caller loses the revisioned CAS surfaces
+    /// [`StoreError::RevisionConflict`] rather than committing — but a
+    /// controller that needs one materialization at a time must serialize its
+    /// own dispatch. Nothing wires a production caller yet.
+    ///
     /// # Errors
     ///
     /// [`WorkspaceError`] as documented on each variant. On every failure the

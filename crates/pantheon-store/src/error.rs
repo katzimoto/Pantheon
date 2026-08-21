@@ -120,6 +120,10 @@ pub enum StoreError {
     /// rebuilt.
     ///
     /// Recovery for such a Workspace is reconciliation, not rematerialization.
+    /// Two transitions raise this: rebuilding such a Workspace directly, and
+    /// recording a materialization failure against one — the latter because
+    /// the fence reads the row's current phase, so moving it to `Error` would
+    /// erase the evidence the fence depends on.
     WorkspaceNotRematerializable {
         workspace_id: String,
         phase: &'static str,

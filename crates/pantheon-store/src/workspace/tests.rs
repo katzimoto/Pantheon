@@ -347,6 +347,79 @@ fn a_workspace_that_has_been_mutable_is_never_rematerialized() {
 }
 
 #[test]
+fn a_workspace_that_has_been_mutable_cannot_be_recorded_as_a_materialization_failure() {
+    // The rematerialization fence is *derivative*: it asks whether the current
+    // phase has ever been mutable, and `Error` reads as never-mutable. So the
+    // transition into `Error` is where invariant 20 is actually weakest — a
+    // Ready row moved here would lose the only durable evidence protecting it,
+    // and the next rebuild would pass every remaining check and delete the
+    // worker's work. Nothing shipped calls this against a Ready Workspace; the
+    // fence exists so nothing ever can.
+    let (_dir, store, task) = store_with_ready_task("workspace-failure-after-ready");
+    let opened = open(&store, &task, "workspace-1", "cmd-open");
+    let materializing = begin(&store, "workspace-1", opened.revision, "cmd-begin");
+    let ready = executed(
+        complete(
+            &store,
+            "workspace-1",
+            materializing.revision,
+            &resolved(BASE),
+            "cmd-ready",
+        )
+        .expect("ready commits"),
+    );
+
+    let epoch = store.restore_generation().expect("generation");
+    let err = store
+        .fail_workspace_materialization(
+            &command(epoch.as_str(), "cmd-fail", &[10u8; 32], "workspace.error"),
+            "workspace-1",
+            ready.revision,
+            Materialization::Unknown,
+        )
+        .expect_err("a Ready workspace cannot be demoted to Error");
+
+    assert!(
+        matches!(
+            err,
+            StoreError::WorkspaceNotRematerializable { phase: "Ready", .. }
+        ),
+        "unexpected error: {err}"
+    );
+
+    // The evidence survived, so the fence that reads it still holds.
+    let current = store
+        .workspace_for_task(&task)
+        .expect("read")
+        .expect("exists");
+    assert_eq!(current.phase, WorkspacePhase::Ready);
+    assert_eq!(current.materialization, Materialization::Present);
+    assert_eq!(current.revision, ready.revision, "no revision was burned");
+
+    // And the rebuild path is still refused, which is the property the fence
+    // above exists to protect rather than merely to state.
+    let err = store
+        .begin_workspace_materialization(
+            &command(
+                epoch.as_str(),
+                "cmd-begin-2",
+                &[8u8; 32],
+                "workspace.materializing",
+            ),
+            "workspace-1",
+            ready.revision,
+        )
+        .expect_err("and the workspace is still not rebuildable");
+    assert!(
+        matches!(
+            err,
+            StoreError::WorkspaceNotRematerializable { phase: "Ready", .. }
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn a_workspace_that_failed_before_ever_being_ready_may_be_rebuilt_at_the_same_base() {
     let (_dir, store, task) = store_with_ready_task("workspace-retry");
     let opened = open(&store, &task, "workspace-1", "cmd-open");

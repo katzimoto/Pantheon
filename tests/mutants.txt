@@ -270,3 +270,11 @@ find: .env("HOME", &self.home)
 replace: .env("HOME", std::env::var_os("HOME").unwrap_or_default())
 scope: -p pantheon-git --lib
 test: tests::the_sterile_profile_passes_only_an_allowlisted_environment
+
+name: failed-workspace-transition-skips-the-mutability-fence
+file: crates/pantheon-store/src/workspace.rs
+find: if phase.has_been_mutable() {
+replace: if false {
+occurrence: 2
+scope: -p pantheon-store --lib
+test: workspace::tests::a_workspace_that_has_been_mutable_cannot_be_recorded_as_a_materialization_failure

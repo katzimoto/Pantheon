@@ -260,12 +260,22 @@ impl Store {
     /// is never by itself evidence that a partially created Workspace
     /// directory is absent.
     ///
+    /// Refuses a Workspace that has already been mutable, for a reason that is
+    /// not obvious from this transition alone. The rematerialization fence in
+    /// [`Store::begin_workspace_materialization`] answers "has this Workspace
+    /// ever been `Ready`?" from the row's *current* phase, and `Error` reads as
+    /// never-mutable. So a `Ready` row moved to `Error` here would lose the only
+    /// durable evidence that protects it, after which rebuilding it would pass
+    /// every remaining check and discard worker-writable state. The evidence has
+    /// to be non-erasable for the fence that reads it to mean anything.
+    ///
     /// # Errors
     ///
     /// [`StoreError::InvariantViolated`] when `observed` is `Present`, which
     /// would claim a verified materialization this path never performed;
-    /// [`StoreError::RevisionConflict`] when the Workspace has moved; plus the
-    /// command envelope's failures.
+    /// [`StoreError::WorkspaceNotRematerializable`] when the Workspace has
+    /// already been mutable; [`StoreError::RevisionConflict`] when the
+    /// Workspace has moved; plus the command envelope's failures.
     pub fn fail_workspace_materialization(
         &self,
         command: &Command<'_>,
@@ -279,6 +289,13 @@ impl Store {
                     "workspace {workspace_id} cannot record Present materialization \
                      on a failure path"
                 )));
+            }
+            let phase = workspace_phase(writer, workspace_id, expected)?;
+            if phase.has_been_mutable() {
+                return writer.fail(StoreError::WorkspaceNotRematerializable {
+                    workspace_id: workspace_id.to_string(),
+                    phase: phase.as_str(),
+                });
             }
             transition(
                 writer,
