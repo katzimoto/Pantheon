@@ -492,6 +492,41 @@ fn compiled_agent_declarations_reject_unknown_or_empty_manifest_fields() {
 }
 
 #[test]
+fn agent_guidance_is_required_and_bounded() {
+    // Guidance is mandatory instruction provenance: an Agent version without
+    // it has nothing for a Run to freeze, so it does not compile rather than
+    // surfacing later as a preparation failure. And because preparation
+    // embeds these bodies into mandatory plan sections, an unbounded operator
+    // string would make that embedding unbounded — so the bound is a
+    // compile-time rejection, never a silent truncation.
+    use pantheon_core::config::compile::MAX_GUIDANCE_CHARS;
+
+    let err = compile(&variant(
+        &format!(
+            r#""soul": "{}""#,
+            "A careful coding agent that protects operator trust."
+        ),
+        r#""soul": """#,
+    ))
+    .expect_err("empty SOUL guidance must be rejected");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref path, .. } if path == "agents[0].soul"),
+        "unexpected: {err}"
+    );
+
+    let oversized = "x".repeat(MAX_GUIDANCE_CHARS + 1);
+    let err = compile(&variant(
+        r#""behavior": "Plan before editing. Keep changes minimal and verifiable.""#,
+        &format!(r#""behavior": "{oversized}""#),
+    ))
+    .expect_err("oversized BEHAVIOR guidance must be rejected");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref detail, .. } if detail.contains("at most")),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
 fn agent_membership_order_does_not_change_compiled_identity() {
     let reference = compile(VALID_SOURCE).expect("reference compiles");
     let reordered = variant(
