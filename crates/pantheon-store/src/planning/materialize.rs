@@ -281,6 +281,26 @@ pub(crate) fn apply(
         ],
     )?;
 
+    // A Ready Task begins its first scheduling-eligibility interval in this
+    // same transaction: the durable interval start is what deterministic
+    // ordering survives restart on, and writing it with the transition is the
+    // only way it cannot drift from the transition itself. Pending Tasks get
+    // no row yet; their interval starts when they actually become Ready.
+    if phase == TaskPhase::Ready {
+        let now = writer
+            .query_optional("SELECT unixepoch()", &[], |row| row.get::<_, i64>(0))?
+            .ok_or_else(|| {
+                StoreError::InvariantViolated("could not read the current time".to_string())
+            })?;
+        writer.execute(
+            "INSERT INTO task_scheduling_state (
+                 task_id, eligible_since, next_attempt_at,
+                 last_failure_code, last_failure_detail_json, revision, updated_at)
+             VALUES (?1, ?2, NULL, NULL, NULL, 1, ?2)",
+            &[Value::from(task_id), Value::Integer(now)],
+        )?;
+    }
+
     // 6. The graph patch itself: an ordinary revisioned CAS against the
     //    revision this transaction just re-read.
     let patched_graph = writer.update_revisioned(

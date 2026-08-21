@@ -20,6 +20,9 @@ Commands:
   goal get <id>
   goal list
   goal cancel <id>
+  dispatch status              Dispatch desired state and effective gates
+  dispatch pause               Fence new Run-intent commits (durable)
+  dispatch resume              Re-open Run-intent commits
   events watch [--after <cursor>]
   events list [--after <cursor>] [--limit <n>]
 
@@ -67,6 +70,9 @@ pub(crate) enum Command {
     GoalCancel {
         id: String,
     },
+    DispatchStatus,
+    DispatchPause,
+    DispatchResume,
     EventsList {
         after: Option<String>,
         limit: Option<i64>,
@@ -167,8 +173,21 @@ fn parse_command(words: Vec<String>) -> Result<Command, ArgsError> {
         "status" => nothing_more(words, "status").map(|()| Command::Status),
         "version" => nothing_more(words, "version").map(|()| Command::Version),
         "goal" => parse_goal(words),
+        "dispatch" => parse_dispatch(words),
         "events" => parse_events(words),
         other => err(format!("unknown command {other}")),
+    }
+}
+
+fn parse_dispatch<I: Iterator<Item = String>>(mut words: I) -> Result<Command, ArgsError> {
+    match words.next().as_deref() {
+        Some("status") => nothing_more(words, "dispatch status").map(|()| Command::DispatchStatus),
+        Some("pause") => nothing_more(words, "dispatch pause").map(|()| Command::DispatchPause),
+        Some("resume") => nothing_more(words, "dispatch resume").map(|()| Command::DispatchResume),
+        other => err(format!(
+            "dispatch needs status, pause or resume, got {}",
+            other.unwrap_or("nothing")
+        )),
     }
 }
 

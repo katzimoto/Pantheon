@@ -27,7 +27,7 @@ pub(crate) async fn create(
     let epoch = command_epoch(client).await?;
     let id = command_id(invocation)?;
     let goal: GoalResponse = client
-        .post(&path("/goals"), &epoch, &id, Some(body))
+        .post(&path("/goals"), &epoch, &id, None, Some(body))
         .await?;
     emit(invocation, &goal, || render::goal(&goal));
     Ok(())
@@ -61,6 +61,7 @@ pub(crate) async fn cancel(
             &path(&format!("/goals/{goal_id}/actions/cancel")),
             &epoch,
             &id,
+            None,
             None,
         )
         .await?;

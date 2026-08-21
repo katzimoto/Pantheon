@@ -53,7 +53,12 @@ report() {
 # broken references in files nobody wrote, and would make the result depend on
 # whether the tree had been built — `scripts/verify.sh` runs this check and then
 # `cargo doc`, so the next run would be inspecting the previous run's output.
-files=$(find . -path ./.git -prune -o -path ./target -prune -o -name '*.md' -print |
+# Every other hidden directory is pruned for the same reason: tooling that
+# lives in dot-directories (editor state, local agent installs and their
+# vendored node_modules) is not repository documentation, and none of it is
+# tracked.
+files=$(find . -path ./.git -prune -o -path ./target -prune \
+	-o -path './.*' -prune -o -name '*.md' -print |
 	sed 's|^\./||' | sort)
 
 # 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`,

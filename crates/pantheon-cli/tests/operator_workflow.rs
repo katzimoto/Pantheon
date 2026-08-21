@@ -346,3 +346,33 @@ fn a_restart_leaves_the_cli_reading_and_watching_the_same_durable_goal() {
     fixture.restart();
     assert_eq!(fixture.json(&args), first);
 }
+
+#[test]
+fn dispatch_pause_and_resume_are_durable_across_a_restart() {
+    // The CLI is only an Operator API client, so this proves the whole
+    // canonical path: `pantheon dispatch` -> socket -> daemon -> durable
+    // scheduler state, surviving full daemon reconstruction.
+    let mut fixture = Fixture::start("cli-dispatch");
+
+    let fresh = fixture.json(&["dispatch", "status"]);
+    assert_eq!(fresh["desiredMode"], "RUNNING");
+    assert_eq!(fresh["effectiveCanDispatch"], true);
+    let revision = fresh["revision"].as_i64().expect("revision");
+
+    fixture.run(&["dispatch", "pause"]);
+    let paused = fixture.json(&["dispatch", "status"]);
+    assert_eq!(paused["desiredMode"], "PAUSED");
+    assert_eq!(paused["revision"], revision + 1);
+    assert_eq!(paused["effectiveCanDispatch"], false);
+
+    // The pause survives the daemon; the CLI reads it back from authority.
+    fixture.restart();
+    let after = fixture.json(&["dispatch", "status"]);
+    assert_eq!(after["desiredMode"], "PAUSED");
+    assert_eq!(after["revision"], revision + 1);
+
+    fixture.run(&["dispatch", "resume"]);
+    let resumed = fixture.json(&["dispatch", "status"]);
+    assert_eq!(resumed["desiredMode"], "RUNNING");
+    assert_eq!(resumed["revision"], revision + 2);
+}

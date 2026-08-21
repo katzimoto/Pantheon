@@ -57,6 +57,7 @@ mod migrations;
 mod operator;
 mod planning;
 mod policy;
+mod scheduling;
 mod store;
 /// Assumptions about SQLite that Pantheon's correctness rests on.
 #[cfg(test)]
@@ -74,6 +75,10 @@ pub use operator::{Cursor, CursorError, EventRecord, GoalDetail, GoalSnapshot};
 pub use planning::{
     Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,
     PlanningOperationRecord, PlanningState, ProposalRecord, TaskRecord,
+};
+pub use scheduling::{
+    DispatchCandidate, GoalSchedulingRow, RunIntent, RunIntentCommit, SchedulerStateRecord,
+    SchedulingSnapshot,
 };
 pub use store::{RestoreGeneration, Store};
 pub use transaction::{Revision, Value, Writer};

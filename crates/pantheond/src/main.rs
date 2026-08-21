@@ -35,9 +35,10 @@ mod options;
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pantheon_engine::configuration::{ConfigurationAuthority, ConfigurationStatus, SourceSet};
-use pantheon_engine::operator::OperatorRuntime;
+use pantheon_engine::operator::{OperatorRuntime, ScheduleOutcome};
 use pantheon_store::{Command, Store};
 
 use crate::options::{Options, USAGE};
@@ -77,24 +78,58 @@ fn run(options: &Options) -> Result<(), String> {
     report(&status);
 
     let runtime = Arc::new(OperatorRuntime::new(store, authority));
-    let router = pantheon_operator_api::router(runtime);
+    let router = pantheon_operator_api::router(Arc::clone(&runtime));
 
     let executor = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("could not start the runtime: {err}"))?;
 
-    executor.block_on(async {
+    let served = executor.block_on(async {
+        // The scheduler controller is supervised here because this is the
+        // composition root's job: the engine owns the cycle, the daemon
+        // decides when it runs and with which concrete backends. None are
+        // registered in this build, so every cycle honestly ends before
+        // routing with nothing eligible to admit; a later mission supplies
+        // real backends here.
+        let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&runtime)));
         println!(
             "pantheond: operator control on {}",
             options.socket.display()
         );
-        pantheon_operator_api::serve(&options.socket, router, shutdown())
+        let served = pantheon_operator_api::serve(&options.socket, router, shutdown())
             .await
-            .map_err(|err| format!("{err}"))
-    })?;
+            .map_err(|err| format!("{err}"));
+        scheduler.abort();
+        served
+    });
+
+    served?;
     println!("pantheond: stopped");
     Ok(())
+}
+
+/// Ticks the scheduling cycle until shutdown.
+///
+/// Aborting between ticks is safe by construction: a cycle performs no
+/// external effect, so the only thing that can be interrupted is either a
+/// read or one authoritative transaction, which commits or rolls back whole.
+/// The tick period is deliberately coarse — scheduling is not latency-bound,
+/// and each cycle is a full re-derivation from durable state.
+async fn scheduler_loop(runtime: Arc<OperatorRuntime>) {
+    const TICK: Duration = Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(TICK).await;
+        let runtime = Arc::clone(&runtime);
+        let outcome =
+            tokio::task::spawn_blocking(move || runtime.service().schedule_once(&[])).await;
+        match outcome {
+            Ok(Ok(ScheduleOutcome::Idle)) => {}
+            Ok(Ok(outcome)) => println!("pantheond: scheduler: {outcome:?}"),
+            Ok(Err(err)) => eprintln!("pantheond: scheduler cycle failed: {err}"),
+            Err(err) => eprintln!("pantheond: scheduler task failed: {err}"),
+        }
+    }
 }
 
 /// Establishes the configuration authority this daemon will serve under.

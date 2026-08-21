@@ -299,3 +299,95 @@ replace: if false {
 occurrence: 2
 scope: -p pantheon-store --lib
 test: workspace::tests::a_workspace_that_has_been_mutable_cannot_be_recorded_as_a_materialization_failure
+
+name: t3-dispatch-pause-gate-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: if state.dispatch_mode != DispatchMode::Running {
+replace: if false {
+scope: -p pantheon-store --lib
+test: scheduling::tests::paused_dispatch_fences_t3_survives_restart_and_never_cancels_committed_work
+
+name: t3-scheduler-revision-fence-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: if state.revision != intent.expected_scheduler_revision {
+replace: if false {
+scope: -p pantheon-store --lib
+test: scheduling::tests::stale_authority_fails_closed_without_writing_anything
+
+name: t3-config-currency-fence-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: if active != Some(intent.configuration_activation_sequence) {
+replace: if false {
+scope: -p pantheon-store --lib
+test: scheduling::tests::stale_authority_fails_closed_without_writing_anything
+
+name: t3-binding-revision-fence-weakened
+file: crates/pantheon-store/src/scheduling.rs
+find: if !matches || intent.snapshot.context_policy_digest != components.context_policy {
+replace: if !matches {
+occurrence: 1
+scope: -p pantheon-store --lib
+test: scheduling::tests::stale_authority_fails_closed_without_writing_anything
+
+name: t3-slot-admission-check-removed
+file: crates/pantheon-store/src/scheduling.rs
+find: "SELECT run_id, task_id FROM run_status WHERE active_slot IS NOT NULL LIMIT 1",
+replace: "SELECT run_id, task_id FROM run_status WHERE 0 = 1 LIMIT 1",
+scope: -p pantheon-store --lib
+test: scheduling::tests::a_second_task_cannot_take_the_held_slot_while_a_run_is_responsible
+
+name: t3-fairness-sequence-does-not-advance
+file: crates/pantheon-store/src/scheduling.rs
+find: ("next_service_sequence", Value::Integer(charged + 1)),
+replace: ("next_service_sequence", Value::Integer(charged)),
+scope: -p pantheon-store --lib
+test: scheduling::tests::t3_commits_one_run_and_activates_the_task_atomically
+
+name: t3-task-activation-loses-its-pointer
+file: crates/pantheon-store/src/scheduling.rs
+find: ("active_run_id", Value::from(intent.run_id)),
+replace: ("terminal_target", Value::from("Cancelled")),
+scope: -p pantheon-store --lib
+test: scheduling::tests::t3_commits_one_run_and_activates_the_task_atomically
+
+name: t3-eligibility-interval-left-open
+file: crates/pantheon-store/src/scheduling.rs
+find: ("eligible_since", Value::Null),
+replace: ("eligible_since", Value::Integer(0)),
+scope: -p pantheon-store --lib
+test: scheduling::tests::t3_commits_one_run_and_activates_the_task_atomically
+
+name: scheduler-bootstrap-defaults-to-paused
+file: crates/pantheon-store/src/migrations.rs
+find: SELECT 'singleton', 'RUNNING', 1, 1, unixepoch()
+replace: SELECT 'singleton', 'PAUSED', 1, 1, unixepoch()
+scope: -p pantheon-store --lib
+test: scheduling::tests::a_fresh_installation_dispatches_by_default
+
+name: materialization-skips-the-eligibility-interval
+file: crates/pantheon-store/src/planning/materialize.rs
+find: if phase == TaskPhase::Ready {
+replace: if false {
+scope: -p pantheon-store --lib
+test: planning::tests::materializing_a_ready_task_opens_its_first_eligibility_interval
+
+name: service-order-serves-the-wrong-goal-first
+file: crates/pantheon-core/src/scheduling.rs
+find: candidates.sort();
+replace: candidates.reverse();
+scope: -p pantheon-core --test scheduling
+test: the_least_recently_served_goal_wins_and_a_never_served_goal_sorts_first
+
+name: scheduling-walk-stops-at-the-first-deferral
+file: crates/pantheon-engine/src/scheduling.rs
+find: continue;
+replace: break;
+scope: -p pantheon-engine --lib
+test: scheduling::tests::fairness_is_charged_only_when_a_run_commits
+
+name: pause-commits-the-opposite-mode
+file: crates/pantheon-store/src/scheduling.rs
+find: ("dispatch_mode", Value::from(mode.as_str())),
+replace: ("dispatch_mode", Value::from("RUNNING")),
+scope: -p pantheond --test dispatch_control
+test: pause_is_a_state_dependent_mutation_with_optimistic_concurrency

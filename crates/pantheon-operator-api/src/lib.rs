@@ -34,6 +34,7 @@
 
 mod command;
 mod description;
+mod dispatch;
 mod events;
 mod goals;
 mod problem;
@@ -70,6 +71,9 @@ pub fn router(runtime: Arc<OperatorRuntime>) -> Router {
         .route("/goals", get(goals::list).post(goals::create))
         .route("/goals/{goalId}", get(goals::get))
         .route("/goals/{goalId}/actions/cancel", post(goals::cancel))
+        .route("/dispatch", get(dispatch::status))
+        .route("/dispatch/actions/pause", post(dispatch::pause))
+        .route("/dispatch/actions/resume", post(dispatch::resume))
         .route("/events", get(events::list))
         .route("/events/watch", get(events::watch));
 

@@ -198,7 +198,30 @@ impl<'a> Writer<'a> {
         expected: Revision,
         assignments: &[(&'static str, Value)],
     ) -> Result<Revision, StoreError> {
+        self.update_revisioned_by(table, ID_COLUMN, id, expected, assignments)
+    }
+
+    /// [`Writer::update_revisioned`] against a named identity column.
+    ///
+    /// The canonical mutable-status shape keys rows on `id`, but several
+    /// contract families key on their owning identity instead —
+    /// `task_scheduling_state.task_id`, `goal_scheduling_state.goal_id`. The
+    /// statement shape, the increment, and the exactly-one-row requirement
+    /// are identical to [`Writer::update_revisioned`]; only the predicate's
+    /// left-hand side differs, and it is subject to the same plain-identifier
+    /// rule so no caller-supplied string can reach it.
+    pub fn update_revisioned_by(
+        &self,
+        table: &'static str,
+        key_column: &'static str,
+        key: &str,
+        expected: Revision,
+        assignments: &[(&'static str, Value)],
+    ) -> Result<Revision, StoreError> {
         if let Err(err) = ensure_plain_identifier("table", table) {
+            return self.fail(err);
+        }
+        if let Err(err) = ensure_plain_identifier("column", key_column) {
             return self.fail(err);
         }
         for (column, _) in assignments {
@@ -206,11 +229,12 @@ impl<'a> Writer<'a> {
                 return self.fail(err);
             }
             // SQLite accepts an UPDATE that assigns the same column twice,
-            // so a payload assignment naming `revision` or `id` would
-            // silently compete with the CAS predicate and the increment
-            // this statement exists to guarantee. Reject it instead.
+            // so a payload assignment naming the revision or either identity
+            // column would silently compete with the CAS predicate and the
+            // increment this statement exists to guarantee. Reject it.
             if column.eq_ignore_ascii_case(REVISION_COLUMN)
                 || column.eq_ignore_ascii_case(ID_COLUMN)
+                || column.eq_ignore_ascii_case(key_column)
             {
                 return self.fail(StoreError::InvariantViolated(format!(
                     "a revisioned update may not assign the {column} column of {table}"
@@ -218,7 +242,7 @@ impl<'a> Writer<'a> {
             }
         }
 
-        // Parameters are positional: ?1 is the id, ?2 the expected
+        // Parameters are positional: ?1 is the key, ?2 the expected
         // revision, and the payload values follow from ?3.
         let mut set_clauses = Vec::with_capacity(assignments.len() + 1);
         for (index, (column, _)) in assignments.iter().enumerate() {
@@ -227,12 +251,12 @@ impl<'a> Writer<'a> {
         set_clauses.push(format!("{REVISION_COLUMN} = {REVISION_COLUMN} + 1"));
 
         let sql = format!(
-            "UPDATE {table} SET {} WHERE {ID_COLUMN} = ?1 AND {REVISION_COLUMN} = ?2",
+            "UPDATE {table} SET {} WHERE {key_column} = ?1 AND {REVISION_COLUMN} = ?2",
             set_clauses.join(", ")
         );
 
         let mut bound = Vec::with_capacity(assignments.len() + 2);
-        bound.push(rusqlite::types::Value::Text(id.to_string()));
+        bound.push(rusqlite::types::Value::Text(key.to_string()));
         bound.push(rusqlite::types::Value::Integer(expected.get()));
         bound.extend(assignments.iter().map(|(_, value)| bind(value)));
 
@@ -251,16 +275,16 @@ impl<'a> Writer<'a> {
                 // Safe to look up inside the transaction: this transaction
                 // already holds write authority, so the answer cannot
                 // change under us and no check-then-write window opens.
-                let actual = self.current_revision(table, id)?;
+                let actual = self.current_revision_by(table, key_column, key)?;
                 self.fail(StoreError::RevisionConflict {
                     table,
-                    id: id.to_string(),
+                    id: key.to_string(),
                     expected: expected.get(),
                     actual,
                 })
             }
             more => self.fail(StoreError::InvariantViolated(format!(
-                "revisioned update of {table} row {id} affected {more} rows, not exactly one"
+                "revisioned update of {table} row {key} affected {more} rows, not exactly one"
             ))),
         }
     }
@@ -336,9 +360,18 @@ impl<'a> Writer<'a> {
     }
 
     fn current_revision(&self, table: &str, id: &str) -> Result<Option<i64>, StoreError> {
-        let sql = format!("SELECT {REVISION_COLUMN} FROM {table} WHERE {ID_COLUMN} = ?1");
+        self.current_revision_by(table, ID_COLUMN, id)
+    }
+
+    fn current_revision_by(
+        &self,
+        table: &str,
+        key_column: &str,
+        key: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let sql = format!("SELECT {REVISION_COLUMN} FROM {table} WHERE {key_column} = ?1");
         self.tx
-            .query_row(&sql, rusqlite::params![id], |row| row.get::<_, i64>(0))
+            .query_row(&sql, rusqlite::params![key], |row| row.get::<_, i64>(0))
             .map(Some)
             .or_else(|err| match err {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),

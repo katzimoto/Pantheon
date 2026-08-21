@@ -14,8 +14,9 @@
 //! crates that `pantheond` wires in. Nor does it own transport: HTTP routing
 //! and wire formats belong to `pantheon-operator-api`.
 //!
-//! Configuration publication, Goal-to-Ready-Task planning and pre-Run Agent /
-//! Execution Fabric routing are implemented here. Run/Attempt control and
+//! Configuration publication, Goal-to-Ready-Task planning, pre-Run Agent /
+//! Execution Fabric routing and the single-slot scheduling path up to the T3
+//! Run-intent commit are implemented here. Attempt creation, preparation and
 //! concrete backends remain later boundaries. See
 //! `docs/development/implementation.md`.
 
@@ -23,4 +24,5 @@ pub mod configuration;
 pub mod operator;
 pub mod planning;
 pub mod routing;
+pub mod scheduling;
 pub mod workspace;
