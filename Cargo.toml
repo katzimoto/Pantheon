@@ -20,6 +20,7 @@ members = [
     "crates/pantheon-cli",
     "crates/pantheon-core",
     "crates/pantheon-engine",
+    "crates/pantheon-git",
     "crates/pantheon-operator-api",
     "crates/pantheon-operator-protocol",
     "crates/pantheon-store",

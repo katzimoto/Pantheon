@@ -21,6 +21,13 @@ tokio = { version = "1.53.1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# The Workspace materialization test composes the real durable authority, the
+# real control path and the real Git materializer. The composition root is the
+# only crate allowed to name all three, which is why that evidence lives here
+# and not inside any one of them.
+pantheon-core = { path = "../pantheon-core" }
+pantheon-git = { path = "../pantheon-git" }
+
 # The end-to-end tests speak HTTP/1.1 over the real Unix socket, because that
 # is the only way to prove the transport an operator actually uses works. A
 # test that called the engine directly would prove nothing about it.

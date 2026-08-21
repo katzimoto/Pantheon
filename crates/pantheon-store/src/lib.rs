@@ -62,6 +62,7 @@ mod store;
 #[cfg(test)]
 mod substrate_tests;
 mod transaction;
+mod workspace;
 
 #[cfg(test)]
 mod test_support;
@@ -76,3 +77,4 @@ pub use planning::{
 };
 pub use store::{RestoreGeneration, Store};
 pub use transaction::{Revision, Value, Writer};
+pub use workspace::{WorkspaceBinding, WorkspaceRecord};

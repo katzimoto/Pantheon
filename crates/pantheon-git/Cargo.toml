@@ -1,0 +1,15 @@
+[package]
+name = "pantheon-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The Workspace vocabulary this crate speaks, and the port it implements.
+# Both edges are allowed by `docs/development/implementation.md`.
+pantheon-core = { path = "../pantheon-core" }
+pantheon-engine = { path = "../pantheon-engine" }
+
+[lints]
+workspace = true

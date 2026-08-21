@@ -95,6 +95,45 @@ pub enum StoreError {
         phase: &'static str,
         terminal_target: Option<String>,
     },
+    /// The Task named as a Workspace holder does not exist, or is not in a
+    /// phase from which it may acquire a new Workspace.
+    ///
+    /// Typed rather than a generic conflict because Workspace ownership is
+    /// Task-scoped: a caller has to be able to tell "this Task may not own a
+    /// Workspace" apart from "this Task already owns one". `phase` is
+    /// `"Absent"` when no such Task exists.
+    WorkspaceHolderIneligible {
+        task_id: String,
+        phase: &'static str,
+    },
+    /// The Task already owns a current, non-`Released` Workspace.
+    ///
+    /// A coding Task owns exactly one. This is the typed form of the
+    /// `workspaces_one_current_per_task` partial unique index, which remains
+    /// the database's own backstop.
+    WorkspaceAlreadyCurrent {
+        task_id: String,
+        workspace_id: String,
+    },
+    /// The Workspace has already been mutable to an execution owner, so its
+    /// external state may hold unsealed work and must not be discarded and
+    /// rebuilt.
+    ///
+    /// Recovery for such a Workspace is reconciliation, not rematerialization.
+    WorkspaceNotRematerializable {
+        workspace_id: String,
+        phase: &'static str,
+    },
+    /// The identity a materializer established on disk is not the immutable
+    /// base the Workspace is durably bound to.
+    ///
+    /// Fails closed: a `Ready` Workspace whose durable base disagrees with its
+    /// materialized state would make every later claim about that base false.
+    WorkspaceBaseMismatch {
+        workspace_id: String,
+        bound: String,
+        verified: String,
+    },
     /// A connection Pantheon needs could not be used: the authoritative
     /// writer is poisoned by an earlier panic, or a caller attempted to
     /// re-enter the serialized authoritative writer it already holds.
@@ -169,6 +208,34 @@ impl fmt::Display for StoreError {
             Self::InvariantViolated(detail) => {
                 write!(f, "store invariant violated: {detail}")
             }
+            Self::WorkspaceHolderIneligible { task_id, phase } => write!(
+                f,
+                "task {task_id} is {phase} and may not acquire a workspace"
+            ),
+            Self::WorkspaceAlreadyCurrent {
+                task_id,
+                workspace_id,
+            } => write!(
+                f,
+                "task {task_id} already owns current workspace {workspace_id}"
+            ),
+            Self::WorkspaceNotRematerializable {
+                workspace_id,
+                phase,
+            } => write!(
+                f,
+                "workspace {workspace_id} is {phase} and has already been mutable, \
+                 so it cannot be rematerialized"
+            ),
+            Self::WorkspaceBaseMismatch {
+                workspace_id,
+                bound,
+                verified,
+            } => write!(
+                f,
+                "workspace {workspace_id} is bound to base {bound} but \
+                 materialization established {verified}"
+            ),
             Self::ConnectionUnavailable(detail) => {
                 write!(f, "store connection unavailable: {detail}")
             }
@@ -189,6 +256,10 @@ impl std::error::Error for StoreError {
             | Self::StaleCommandEpoch { .. }
             | Self::CommandConflict { .. }
             | Self::GoalNotCancellable { .. }
+            | Self::WorkspaceHolderIneligible { .. }
+            | Self::WorkspaceAlreadyCurrent { .. }
+            | Self::WorkspaceNotRematerializable { .. }
+            | Self::WorkspaceBaseMismatch { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

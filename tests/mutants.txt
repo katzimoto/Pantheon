@@ -214,3 +214,59 @@ find: && self.component_digests == other.component_digests
 replace: && other.component_digests == other.component_digests
 scope: -p pantheon-core --test execution
 test: configuration_binding_compares_every_component_not_a_chosen_few
+
+name: workspace-rematerialization-fence-removed
+file: crates/pantheon-core/src/workspace.rs
+find: Self::Ready | Self::Frozen | Self::Releasing | Self::Released
+replace: Self::Requested
+scope: -p pantheon-store --lib
+test: workspace::tests::a_workspace_that_has_been_mutable_is_never_rematerialized
+
+name: workspace-ready-accepts-any-base
+file: crates/pantheon-store/src/workspace.rs
+find: if &bound_base != verified_base {
+replace: if false {
+scope: -p pantheon-store --lib
+test: workspace::tests::the_ready_transition_requires_the_base_that_was_durably_bound
+
+name: workspace-failure-may-claim-materialization
+file: crates/pantheon-store/src/workspace.rs
+find: if observed == Materialization::Present {
+replace: if false {
+scope: -p pantheon-store --lib
+test: workspace::tests::a_failure_path_cannot_claim_verified_materialization
+
+name: partial-workspace-may-be-stored-ready
+file: crates/pantheon-store/src/migrations.rs
+find: CHECK (phase != 'Ready' OR materialization = 'Present'),
+replace: CHECK (1 = 1),
+scope: -p pantheon-store --lib
+test: workspace::tests::a_partially_materialized_workspace_cannot_be_stored_as_ready
+
+name: missing-ready-workspace-silently-rebuilt
+file: crates/pantheon-engine/src/workspace.rs
+find: if observed == Materialization::Present {
+replace: if true {
+scope: -p pantheon-engine --lib
+test: workspace::tests::a_ready_workspace_whose_state_vanished_fails_closed_instead_of_being_rebuilt
+
+name: shared-git-common-dir-accepted-as-isolated
+file: crates/pantheon-git/src/materializer.rs
+find: if common.is_empty() || common != git_dir {
+replace: if common.is_empty() {
+scope: -p pantheon-git --lib
+test: tests::a_linked_worktree_shares_the_source_repositorys_git_authority
+
+name: workspace-seeded-from-a-non-empty-template
+file: crates/pantheon-git/src/sterile.rs
+find: pub(crate) fn template(&self) -> &Path {
+replace: pub(crate) fn template(&self) -> &Path { if true { return &self.home; }
+scope: -p pantheon-git --lib
+test: tests::ambient_configuration_placed_where_git_would_look_does_not_reach_a_workspace
+
+name: sterile-home-inherited-from-the-host
+file: crates/pantheon-git/src/sterile.rs
+find: .env("HOME", &self.home)
+replace: .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+scope: -p pantheon-git --lib
+test: tests::the_sterile_profile_passes_only_an_allowlisted_environment

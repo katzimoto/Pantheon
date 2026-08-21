@@ -23,3 +23,4 @@ pub mod configuration;
 pub mod operator;
 pub mod planning;
 pub mod routing;
+pub mod workspace;

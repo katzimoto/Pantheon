@@ -8,11 +8,14 @@
 //! failure rolls back all three: no partial schema and no falsely advanced
 //! version.
 //!
-//! The schema is deliberately minimal: migration bookkeeping and the
-//! `system_state` singleton for installation identity / RestoreGeneration,
-//! plus the durable command ledger, Event Journal and journal epoch/sequence
-//! state the command mutation kernel requires. It does not implement any
-//! future production table family.
+//! The schema is deliberately minimal, and grows only with the behaviour
+//! that reads it: migration bookkeeping and the `system_state` singleton for
+//! installation identity / RestoreGeneration; the durable command ledger,
+//! Event Journal and journal epoch/sequence state the command mutation kernel
+//! requires; the configuration component/revision/active-pointer families;
+//! the Goal, planning, TaskGraph and Task families; and the Task-owned
+//! `workspaces` family. No production table family is created ahead of the
+//! behaviour that needs it.
 //!
 //! Migrations are append-only. An applied migration's SQL is checksummed and
 //! verified on every open, so editing an existing entry would make every
@@ -335,6 +338,69 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             normalization_provenance TEXT    NOT NULL,
             created_at               INTEGER NOT NULL
         ) STRICT;",
+    },
+    Migration {
+        version: 8,
+        name: "create_task_workspaces",
+        // `workspaces` is the canonical table name from the persistence
+        // contract's "Table families" section (SANDBOX / WORKSPACE). The
+        // sibling families named there — `repositories`,
+        // `workspace_revisions`, `integration_intents` — arrive with the
+        // behaviour that needs them, as every other family here has.
+        //
+        // The phase domain is the full canonical list from
+        // docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md
+        // ("Workspace phases"), not only the phases this mission drives, for
+        // the same reason `tasks` accepts all ten Task phases.
+        sql: "CREATE TABLE workspaces (
+            id              TEXT    NOT NULL PRIMARY KEY,
+            -- Workspace ownership is Task-scoped and survives Run turnover,
+            -- so the Task is the holder and there is no Run column here.
+            task_id         TEXT    NOT NULL REFERENCES tasks(id),
+            -- The opaque repository reference the Task declared. Recorded
+            -- verbatim: no canonical contract defines a URI shape to parse.
+            repository      TEXT    NOT NULL CHECK (length(repository) BETWEEN 1 AND 512),
+            -- The controller-trusted local repository root. Global recovery
+            -- requires durable Pantheon records to define the roots recovery
+            -- may inspect, rather than following repository indirection to
+            -- discover one.
+            source_path     TEXT    NOT NULL CHECK (length(source_path) > 0),
+            -- What was asked for, which may move afterwards.
+            requested_base  TEXT    NOT NULL CHECK (length(requested_base) BETWEEN 1 AND 255),
+            -- What it resolved to, once. Immutable for the life of the
+            -- Workspace: 40 hexadecimal characters for a SHA-1 repository,
+            -- 64 for a SHA-256 one.
+            resolved_base   TEXT    NOT NULL CHECK (length(resolved_base) IN (40, 64)),
+            phase           TEXT    NOT NULL CHECK (phase IN (
+                'Requested', 'Materializing', 'Ready', 'Frozen',
+                'Releasing', 'Released', 'Error')),
+            -- The strongest factual observation about external state, kept
+            -- independent of `phase` for the reason the Sandbox contract
+            -- gives: a controller error never proves external absence.
+            materialization TEXT    NOT NULL CHECK (materialization IN (
+                'Present', 'Absent', 'Unknown')),
+            revision        INTEGER NOT NULL CHECK (revision > 0),
+            created_at      INTEGER NOT NULL,
+            -- A partially materialized Workspace can never be reported
+            -- Ready. This is the mission's central fence, so it is a
+            -- database constraint rather than a controller promise.
+            CHECK (phase != 'Ready' OR materialization = 'Present'),
+            -- Durable intention exists before any side effect: while a
+            -- Workspace is still Requested, recovery may conclude that no
+            -- external state exists. Crossing to Materializing is what
+            -- gives up that conclusion.
+            CHECK (phase != 'Requested' OR materialization = 'Absent'),
+            -- Releasing the Task's Workspace slot requires established
+            -- absence, never a timeout or an error.
+            CHECK (phase != 'Released' OR materialization = 'Absent')
+        ) STRICT;
+
+        -- A coding Task owns exactly one current Workspace. Enforced by the
+        -- database because it is a cardinality invariant, not a scheduling
+        -- convention: two concurrent materializations for one Task must fail
+        -- rather than race to create a second authority.
+        CREATE UNIQUE INDEX workspaces_one_current_per_task
+            ON workspaces (task_id) WHERE phase != 'Released';",
     },
 ];
 

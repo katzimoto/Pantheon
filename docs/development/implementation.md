@@ -41,21 +41,31 @@ validation that turns a proposal into something materializable;
 `pantheon-store` owns the Goal, graph, Task and planning tables and the
 authoritative mutations; `pantheon-engine` runs the control path.
 
-There is no scheduler, no endpoint and no concrete backend yet. `pantheon-core`
-and `pantheon-engine` now implement the pre-Run Agent-resolution and
-side-effect-free ExecutionOffer path; nothing creates a Run, an Attempt, a
-Workspace or a Sandbox. The store's schema is limited to
+On top of that the four crates carry the Task-owned coding Workspace:
+`pantheon-core` holds the Workspace phase domain, the separate materialization
+observation and the two base identities; `pantheon-store` owns the `workspaces`
+family and its four authoritative transitions; `pantheon-engine` owns the
+ordering between durable state and external effect, together with the abstract
+`RepositoryMaterializer` port; and `pantheon-git` is the first concrete
+implementation behind one of the engine's ports, materializing a Workspace as
+an independent local Git repository under a sterile execution profile.
+
+There is no scheduler and no endpoint yet, and no concrete execution backend.
+`pantheon-core` and `pantheon-engine` implement the pre-Run Agent-resolution
+and side-effect-free ExecutionOffer path; nothing creates a Run, an Attempt, a
+Sandbox or a WorkspaceRevision. The store's schema is limited to
 migration bookkeeping, installation identity, the command ledger, Event
 Journal and journal epoch/sequence state, the configuration
-component/revision/active-pointer families, and the Goal, planning, TaskGraph
-and Task families that path requires; the future conceptual production
-schema is not implemented ahead of the behaviour that needs it. Revisioned
-mutation and the command envelope are exercised against test-only fixture
-tables for that reason.
+component/revision/active-pointer families, the Goal, planning, TaskGraph
+and Task families that path requires, and the `workspaces` family; the future
+conceptual production schema is not implemented ahead of the behaviour that
+needs it. Revisioned mutation and the command envelope are exercised against
+test-only fixture tables for that reason.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite) and `pantheon-core`
 depends on `sha2` for the SHA-256 configuration digests the configuration
-contract names; every other crate still has no third-party dependencies. That remains a deliberate default for
+contract names; `pantheon-git` drives the `git` executable through `std`
+alone. Every other crate still has no third-party dependencies. That remains a deliberate default for
 a crate until real code needs one, not an oversight.
 
 ## Crate map
@@ -65,6 +75,7 @@ crates/
 ├── pantheon-core/                semantic vocabulary and pure domain rules
 ├── pantheon-store/               authoritative persistence
 ├── pantheon-engine/              effectful control-plane orchestration
+├── pantheon-git/                 isolated Git Workspace materialization
 ├── pantheon-operator-protocol/   Operator Control wire contract
 ├── pantheon-operator-api/        Operator Control transport adapter
 ├── pantheond/                    daemon, and the composition root
@@ -88,11 +99,13 @@ Allowed direct internal edges:
 pantheon-core                 -> (none)
 pantheon-store                -> pantheon-core
 pantheon-engine               -> pantheon-core, pantheon-store
+pantheon-git                  -> pantheon-core, pantheon-engine
 pantheon-operator-protocol    -> (none)
 pantheon-operator-api         -> pantheon-core, pantheon-engine,
                                  pantheon-operator-protocol
 pantheond                     -> pantheon-core, pantheon-store,
-                                 pantheon-engine, pantheon-operator-api,
+                                 pantheon-engine, pantheon-git,
+                                 pantheon-operator-api,
                                  pantheon-operator-protocol
 pantheon-cli                  -> pantheon-operator-protocol
 ```
@@ -106,7 +119,7 @@ which reads Cargo's own resolved dependencies rather than grepping manifests, an
 covers dev and build dependencies and every target platform. Adding a forbidden
 edge fails verification; so does adding a crate the allowlist does not mention.
 
-Three edges carry most of the architectural weight:
+Four edges carry most of the architectural weight:
 
 - **`pantheon-core` depends on nothing.** The semantic vocabulary stays true
   regardless of how state is stored, which provider runs a workload, or which
@@ -116,6 +129,15 @@ Three edges carry most of the architectural weight:
   never a second path into Pantheon's state. Depending on the wire contract
   alone makes bypassing the daemon a compile error rather than a code-review
   question.
+- **`pantheon-git` is a crate, not a module in the engine.** Two of the
+  boundaries below apply at once: it is a concrete platform implementation
+  behind an abstract port, which is what keeps that port abstract, and it is a
+  trust boundary — everything in it spawns processes against repository state,
+  which is exactly the authority the engine's own code must not be able to
+  reach directly. It depends on `pantheon-engine` because that is where the
+  port it implements is declared, and it deliberately cannot reach
+  `pantheon-store`: a materializer that could open the database would be a
+  second path into authoritative state.
 - **`pantheon-operator-protocol` depends on nothing.** It is a compatibility
   membrane. If public types were aliases of core domain types or persistence
   rows, every internal refactor would become a public breaking change.
@@ -131,6 +153,7 @@ the implementation.
 | `pantheon-core` | Provider-neutral semantic types; rules that are pure computation | Persistence, transport, process, filesystem or network effects; concrete provider, model or harness names; daemon startup; sandbox behaviour |
 | `pantheon-store` | Connection policy, migrations, transaction boundaries, queries, row/domain mapping, invariant checks, backup/restore database mechanics | Any external effect: network, Git, process, container, executor, sandbox, secret provider |
 | `pantheon-engine` | Scheduling, run/attempt control, recovery, authorization, evaluation, configuration, artifact and integration workflows; the abstract ports to outside systems | Concrete implementations behind its own ports; HTTP routing and wire formats |
+| `pantheon-git` | Concrete Git materialization of a Task Workspace: repository creation, observation, discard, and the sterile non-interactive execution profile every Git process runs under | Durable authority; orchestration; deciding what happens after a failure; Sandbox behaviour |
 | `pantheon-operator-protocol` | Request/response bodies, public resource representations, error envelopes, query and pagination types | Any internal dependency; transport; persistence shapes |
 | `pantheon-operator-api` | Routes, Unix-socket HTTP, middleware, wire/domain conversion, sensitive request handling, API description assembly | Business decisions; direct persistence access |
 | `pantheond` | Bootstrap, observability init, constructing store and engine, choosing concrete backends, server startup, controller supervision, shutdown | Domain rules, persistence details, orchestration logic, request handling |
@@ -224,6 +247,13 @@ It runs the GitHub Actions pin check, the documentation checks, the crate
 dependency check, the store read-path check, `cargo fmt --check`, workspace
 Clippy with warnings denied, workspace tests, and rustdoc with warnings denied,
 all with `--locked`.
+
+One test surface needs something beyond the toolchain: `pantheon-git`'s tests
+and the Workspace end-to-end test drive the `git` executable against
+repositories they create in a temporary directory. That is not a new
+prerequisite in practice — obtaining this repository requires `git` — and the
+alternative, asserting Git's behaviour in comments, is what `AGENTS.md`
+forbids.
 
 `scripts/check-store-read-paths.sh` refuses a public method on `Store` that
 nothing outside test code calls. Twice a review has found a durable fact stored,

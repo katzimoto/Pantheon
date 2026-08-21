@@ -80,6 +80,30 @@ host repository common-dir
 
 The worker may commit locally for development/checkpointing. Those commits/branch names are not semantic Candidate identity.
 
+#### MVP materialization
+
+The v1 local-repository strategy is fixed, and each property below is a security or identity property rather than an implementation preference:
+
+```text
+create an empty repository at the deterministic Workspace path
+fetch exactly the immutable base object from the source repository
+pin that object under a Pantheon-owned ref
+check it out detached
+```
+
+- **No remote is ever configured.** A remote is not created and later removed; it never exists. Pushing to a non-current branch of a local non-bare repository succeeds, so a configured remote pointing at the source would be worker-reachable authority over the source's refs, and any window in which one exists is a window in which that is true.
+- **The fetch names the immutable object identity, not the requested ref.** Movement of the requested ref between resolution and materialization therefore cannot change what the Workspace contains, and rematerialization reproduces the same content.
+- **Objects are copied, not shared.** No `objects/info/alternates`, no shared common directory, and no hardlinked object store: the Workspace's object database is its own.
+- **The Workspace's Git configuration is created by Pantheon.** The source repository's configuration, hooks, template directory and attributes are never copied, so no credential helper, URL rewrite, hook or filter of the source becomes worker authority.
+- **`HEAD` is detached at the base**, and Pantheon creates no branch. A branch name Pantheon chose could later be mistaken for result identity; the worker creates whatever branches it wants.
+- **The Workspace carries a repository-local commit identity.** The sterile controller execution profile removes the host user's Git identity along with the rest of the host home, and a Workspace where `git commit` refuses to run is not usable coding state.
+
+A Workspace's deterministic desired path is derived from the controller-owned Workspace root and the durable Workspace ID, so a process that has read only durable state computes the same path without discovering it. That, with the resolved base, is the Workspace's idempotency identity in `docs/architecture/persistence-and-recovery/global-recovery-and-crash-reconciliation.md`.
+
+Resolving the requested base reads the source repository, and that read runs under the source repository's own configuration. The source is operator-supplied input at materialization time, not Agent-writable state; the boundary this establishes is the other direction, that none of the source's control state becomes worker authority. Repository state an Agent has written remains untrusted input under the hostile-repository rule below.
+
+The Workspace binds to the repository the Task declares as its `repository` input (`docs/architecture/tasks/task-object.md`), not to a repository named by whoever requested materialization. Resolving that opaque reference to a concrete location is a separate concern; v1 takes the controller-trusted local repository root from durable Workspace state.
+
 ### Linked worktrees
 
 Linked worktrees remain useful for trusted controller operations, trusted-host workloads, verification/materialization and future safe projections.
@@ -209,6 +233,47 @@ ERROR
 ```
 
 `READY` allows the current Task execution owner to mutate within the Workspace. `FROZEN` is used while authoritative candidate/yield/finalization state must not change without a new controller transition.
+
+Lifecycle phase and external materialization are **separate durable facts**, for the reason `docs/architecture/security/sandbox-broker-and-isolation.md` keeps Sandbox phase and observed presence apart: a controller error is never evidence that an external effect did not happen.
+
+```text
+phase          REQUESTED|MATERIALIZING|READY|FROZEN|RELEASING|RELEASED|ERROR
+materialization                        PRESENT|ABSENT|UNKNOWN
+```
+
+Three combinations are load-bearing:
+
+```text
+REQUESTED + ABSENT
+→ durable identity and intention exist and no side effect has been attempted
+→ recovery may conclude the Workspace path holds nothing
+
+MATERIALIZING + UNKNOWN
+→ side effects are authorized and may have run
+→ that conclusion is given up until an observation restores it
+
+READY + PRESENT
+→ verified materialization; the execution owner may mutate
+```
+
+`READY` requires `PRESENT`: a partially materialized Workspace is never reported Ready. `ERROR` says nothing about external state, and an `ERROR` Workspace retains whatever observation was actually established — `UNKNOWN` unless absence was proved. Ordinary `RELEASED` likewise requires established absence.
+
+The transition `REQUESTED -> MATERIALIZING` is a durable side-effect marker in the sense the persistence contract's external-contact markers are: it commits before the first filesystem or Git effect, so a crash immediately afterwards is distinguishable from a crash before it.
+
+### Rematerialization
+
+Whether partial Workspace state may be discarded and rebuilt turns on one durable question: has this Workspace ever been `READY`?
+
+```text
+never READY   → no execution owner has ever been able to mutate it
+              → whatever exists at its path is controller-owned scratch
+              → discard and rebuild at the same Workspace ID and base
+
+has been READY → it may hold unsealed work
+               → never silently recreated; reconcile, or fail closed
+```
+
+Retry is therefore deterministic rather than dependent on what survived a crash, and the rule that a missing `READY` Workspace is a `RecoveryFinding` rather than a rebuild (see "Startup reconciliation") follows from the same distinction.
 
 Task Waiting after blocking yield normally keeps the Task-scoped Workspace reservation but freezes mutation authority until a later Run becomes responsible.
 
@@ -461,3 +526,5 @@ Workspace policy and Sandbox policy jointly enforce these boundaries.
 16. Agent-writable filesystem structure is untrusted input; privileged capture is rooted in durable Workspace state, root-confined and no-follow, and never dereferences Agent-created indirection with ambient authority.
 17. Symlinks may be repository content but are captured as link-target bytes, never as dereferenced target content; unsupported special filesystem objects fail closed in v1.
 18. Sterile Git configuration is defense in depth; confinement or controller-owned Git control state is the security boundary.
+19. Workspace lifecycle phase and external materialization are separate durable facts; `READY` requires established `PRESENT`, and `ERROR` never proves absence.
+20. A Workspace that has never been `READY` may be discarded and rebuilt at the same ID and base; one that has been `READY` is never silently recreated.
