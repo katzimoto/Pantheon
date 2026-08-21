@@ -17,7 +17,7 @@
       "get": {
         "operationId": "getLiveness",
         "summary": "Whether the daemon process is functioning",
-        "description": "Touches no durable state and cannot fail. An unreachable database is a readiness fact, not a reason to restart a daemon that is still serving.",
+        "description": "Canonical and unversioned: health probes are process-level endpoints, not versioned semantic resources, so probe configuration survives an Operator API version transition. No /api/v1/health alias is served. Touches no durable state and cannot fail. An unreachable database is a readiness fact, not a reason to restart a daemon that is still serving.",
         "responses": {
           "200": {
             "description": "The process is serving.",
@@ -36,55 +36,7 @@
       "get": {
         "operationId": "getReadiness",
         "summary": "Whether new authority-bearing work could be admitted",
-        "description": "503 while the control plane could not safely admit work. Components the architecture requires but this build does not establish are reported with state `unimplemented` rather than asserted.",
-        "responses": {
-          "200": {
-            "description": "The control plane could admit work.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Readiness"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The control plane could not admit work.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Readiness"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/health/live": {
-      "get": {
-        "operationId": "getLivenessVersioned",
-        "summary": "Whether the daemon process is functioning",
-        "description": "Identical to /health/live. The canonical contract writes this path both with and without the version prefix; both are served so neither spelling is made canonical here, and the disagreement is reported as a documentation defect.",
-        "responses": {
-          "200": {
-            "description": "The process is serving.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Liveness"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/health/ready": {
-      "get": {
-        "operationId": "getReadinessVersioned",
-        "summary": "Whether new authority-bearing work could be admitted",
-        "description": "Identical to /health/ready. See /api/v1/health/live for why both spellings are served.",
+        "description": "Canonical and unversioned, like /health/live. 503 while the control plane could not safely admit work. Components the architecture requires but this build does not establish are reported with state `unimplemented` rather than asserted.",
         "responses": {
           "200": {
             "description": "The control plane could admit work.",
@@ -317,7 +269,7 @@
       "post": {
         "operationId": "cancelGoal",
         "summary": "Drive a Goal toward Cancelled",
-        "description": "Returns 202, not 200: the durable intent is accepted while processing continues. The transaction commits Finalizing with terminalTarget Cancelled for the Goal and for every nonterminal Task it owns; the Goal reaches Cancelled only once its obligations are safely finalized.\n\nNo If-Match. Cancel-if-nonterminal is state-independent and idempotent, so it does not require a client-supplied prior revision. Cancelling a Goal that is already finalizing toward Cancelled changes nothing further and still returns 202.",
+        "description": "Returns 202, not 200: the durable intent is accepted while processing continues. The transaction commits Finalizing with terminalTarget Cancelled for the Goal and for every nonterminal Task it owns; the Goal reaches Cancelled only once its obligations are safely finalized.\n\nNo If-Match. Cancel-if-nonterminal is state-independent and idempotent, so it does not require a client-supplied prior revision. Cancellation stays available while the Goal is Finalizing: a Goal finalizing toward Succeeded or Failed is retargeted to Cancelled in place and still returns 202, and one already finalizing toward Cancelled changes nothing further. Only a terminal Goal refuses, because terminal history never reopens.",
         "parameters": [
           {
             "name": "goalId",
@@ -379,7 +331,7 @@
             }
           },
           "409": {
-            "description": "conflict when the Goal is terminal or finalizing toward another outcome, or stale-command-epoch.",
+            "description": "conflict when the Goal is terminal \u2014 terminal history never reopens \u2014 or stale-command-epoch.",
             "content": {
               "application/problem+json": {
                 "schema": {

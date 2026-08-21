@@ -1,15 +1,20 @@
 //! Goal cancellation as a desired-state transition.
 //!
-//! `docs/architecture/goals/goal-lifecycle-and-completion-controller.md`
-//! ("Cancellation") makes cancellation a *target*, not an outcome:
+//! `docs/architecture/goals-and-planning/goal-lifecycle-and-completion-controller.md`
+//! ("Cancellation") makes cancellation available in every nonterminal phase:
 //!
 //! ```text
-//! Planning/Active/Evaluating -> Finalizing / terminalTarget=Cancelled
+//! Planning/Active/Evaluating            -> Finalizing / terminalTarget=Cancelled
+//! Finalizing / target=Succeeded|Failed  -> Finalizing / terminalTarget=Cancelled
+//! Finalizing / target=Cancelled         -> unchanged (idempotent)
+//! Succeeded | Failed | Cancelled        -> refused
 //! ```
 //!
-//! and "Goal becomes Cancelled only when those obligations are safely
-//! finalized". This module commits exactly that transition and the fence it
-//! carries; it never terminalizes a Goal, because the Goal Completion
+//! The principle the contract states is that Finalizing means the terminal
+//! outcome has not yet become immutable terminal history, so cancellation can
+//! still win while finalization runs — by *retargeting* the pending outcome —
+//! but a terminal Goal never reopens. This module commits exactly those
+//! transitions; it never terminalizes a Goal, because the Goal Completion
 //! Controller that decides obligations are finalized does not exist yet and
 //! inventing an MVP-only substitute is what the mission forbids.
 //!
@@ -17,9 +22,11 @@
 //! ("Cancellation", invariant 9) says cancellation "use[s] Finalizing +
 //! terminalTarget and never leave[s] a terminal Task with a live Run", so
 //! every nonterminal Task is driven to the same target under the *same*
-//! transaction and the same command. Propagating the fence in a second
-//! transaction would leave a window in which the Goal is fenced and its Tasks
-//! are still schedulable.
+//! transaction and the same command — including on a retarget, where Tasks
+//! that had been left alone because the Goal was heading for `Succeeded` must
+//! now be fenced too. Propagating the fence in a second transaction would
+//! leave a window in which the Goal is fenced and its Tasks are still
+//! schedulable.
 
 use pantheon_core::planning::{GoalPhase, TaskPhase};
 
@@ -37,20 +44,27 @@ pub struct Cancellation {
     /// How many nonterminal Tasks were driven to the same target.
     pub tasks_fenced: usize,
     /// Whether the Goal was already targeting `Cancelled` when this command
-    /// arrived, so this call changed no Goal phase.
+    /// arrived, so this call changed no Goal phase and burned no revision.
+    /// `false` covers both a fresh fence and a retarget; either way the Goal
+    /// row was written.
     pub already_targeted: bool,
 }
 
 impl Store {
     /// Drives a Goal, and every nonterminal Task it owns, toward `Cancelled`.
     ///
+    /// A Goal finalizing toward `Succeeded` or `Failed` is retargeted in
+    /// place: it stays in `Finalizing`, its `terminal_target` becomes
+    /// `Cancelled`, and its nonterminal Tasks are fenced. Cancelling a Goal
+    /// already targeting `Cancelled` changes nothing.
+    ///
     /// # Errors
     ///
-    /// [`StoreError::GoalNotCancellable`] when the Goal is terminal or is
-    /// already finalizing toward a different outcome — nothing is written and
-    /// the command consumes no durable identity. Otherwise any storage
-    /// failure, or a [`StoreError::RevisionConflict`] if another writer moved
-    /// the Goal first.
+    /// [`StoreError::GoalNotCancellable`] when the Goal is terminal — terminal
+    /// history never reopens — and nothing is written; the command consumes no
+    /// durable identity. Otherwise any storage failure, or a
+    /// [`StoreError::RevisionConflict`] if another writer moved the Goal
+    /// first.
     pub fn cancel_goal(
         &self,
         command: &Command<'_>,
@@ -85,13 +99,20 @@ impl Store {
             let already_targeted = match (phase, target) {
                 // The ordinary case: fence a live Goal.
                 (GoalPhase::Planning | GoalPhase::Active | GoalPhase::Evaluating, _) => false,
+                // Finalizing means the outcome is not yet immutable history,
+                // so cancellation retargets a finalization aimed elsewhere:
+                // same phase, new target, ordinary revisioned write. Tasks
+                // that had been left alone under the old target are fenced by
+                // the same transaction below.
+                (GoalPhase::Finalizing, Some("Succeeded") | Some("Failed")) => false,
                 // Cancelling an already-cancelling Goal is the retry the
-                // contract calls state-independent: the target is already
-                // what the caller asked for.
+                // contract calls idempotent: the target is already what the
+                // caller asked for.
                 (GoalPhase::Finalizing, Some("Cancelled")) => true,
-                // Terminal Goals never reopen, and retargeting a Goal already
-                // finalizing toward Succeeded or Failed is a transition the
-                // Goal contract's table does not grant.
+                // Terminal Goals never reopen: cancellation cannot rewrite
+                // committed history. (A `Finalizing` row with no target would
+                // also land here, and the schema's CHECK constraints make that
+                // state unreachable.)
                 _ => {
                     return writer.fail(StoreError::GoalNotCancellable {
                         goal_id: goal_id.to_string(),

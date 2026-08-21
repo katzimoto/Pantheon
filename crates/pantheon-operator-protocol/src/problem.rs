@@ -46,18 +46,19 @@ impl ProblemCode {
 
     /// The HTTP status this code is served with.
     ///
-    /// Three of these are fixed by the canonical contract: 428 for
-    /// `precondition-required`, 412 for `stale-revision`, 410 for
-    /// `cursor-gone`. The rest the contract leaves undefined, and this
-    /// function is where #26 decides them. The two worth stating a reason for:
+    /// The mapping is owned by the canonical contract:
+    /// `docs/architecture/operations/public-daemon-api-and-cli.md`
+    /// ("Problem Details" → "Statuses") fixes one status per code and records
+    /// the reasoning. This function implements that table; it does not decide
+    /// it. The two mappings most worth restating here:
     ///
-    /// - `stale-command-epoch` is **409**, not 412. 412 belongs to a failed
-    ///   `If-Match` precondition the client supplied; a stale command epoch is
-    ///   a fail-closed authority conflict that occurs whether or not any
-    ///   precondition was sent.
-    /// - `temporarily-unavailable` is **503**, matching the readiness
-    ///   endpoint, so a client sees the same status for "not ready yet"
-    ///   however it discovers it.
+    /// - `stale-command-epoch` is **409**, not 412: 412 belongs to a failed
+    ///   client-supplied `If-Match` precondition, while a stale command epoch
+    ///   is a fail-closed authority conflict decided before any precondition
+    ///   is consulted, whether or not one was sent.
+    /// - `temporarily-unavailable` is **503**, matching `/health/ready`, so a
+    ///   client sees the same status for "not ready yet" however it discovers
+    ///   it.
     #[must_use]
     pub const fn status(self) -> u16 {
         match self {

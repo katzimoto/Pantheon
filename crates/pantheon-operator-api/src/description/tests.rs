@@ -41,9 +41,9 @@ fn routed_paths() -> BTreeSet<String> {
         let end = rest.find('"').expect("an unterminated route path");
         let path = &rest[..end];
         // The versioned routes are registered under a `nest`, so their
-        // registered path is the suffix. Both spellings are recorded, and the
-        // comparison below accepts either — a health route really is served
-        // at both.
+        // registered path is the suffix. Both spellings are recorded; the
+        // health routes are registered unversioned only, and their prefixed
+        // spellings simply match nothing.
         paths.insert(path.to_string());
         paths.insert(format!("{API_PREFIX}{path}"));
         rest = &rest[end..];
@@ -56,9 +56,9 @@ fn every_route_the_daemon_serves_is_described() {
     let documented = documented_paths();
     let routed = routed_paths();
 
-    // A route is described if either its bare or its version-prefixed
-    // spelling appears. Pairing them is what keeps the health routes, which
-    // are genuinely served twice, from looking like a gap.
+    // A versioned route is described if either its suffixed or its
+    // fully-spelled form appears in the document. Health is registered
+    // unversioned only and never carries the prefix.
     let mut missing = Vec::new();
     for path in &routed {
         let Some(bare) = path.strip_prefix(API_PREFIX) else {
@@ -89,6 +89,24 @@ fn every_described_path_is_one_this_crate_actually_registers() {
     );
 }
 
+/// Every problem code this build's surface can return.
+///
+/// One list so the vocabulary test and the status tests cannot disagree about
+/// how many codes exist.
+fn implemented_codes() -> &'static [ProblemCode] {
+    &[
+        ProblemCode::NotFound,
+        ProblemCode::Validation,
+        ProblemCode::PreconditionRequired,
+        ProblemCode::StaleRevision,
+        ProblemCode::StaleCommandEpoch,
+        ProblemCode::Conflict,
+        ProblemCode::CursorGone,
+        ProblemCode::TemporarilyUnavailable,
+        ProblemCode::Internal,
+    ]
+}
+
 #[test]
 fn the_described_problem_codes_are_exactly_the_ones_this_build_can_return() {
     // The error vocabulary is a compatibility promise. A code in the document
@@ -103,29 +121,21 @@ fn the_described_problem_codes_are_exactly_the_ones_this_build_can_return() {
             .map(|value| value.as_str().expect("a code").to_string())
             .collect();
 
-    let implemented: BTreeSet<String> = [
-        ProblemCode::NotFound,
-        ProblemCode::Validation,
-        ProblemCode::PreconditionRequired,
-        ProblemCode::StaleRevision,
-        ProblemCode::StaleCommandEpoch,
-        ProblemCode::Conflict,
-        ProblemCode::CursorGone,
-        ProblemCode::TemporarilyUnavailable,
-        ProblemCode::Internal,
-    ]
-    .into_iter()
-    .map(|code| code.as_str().to_string())
-    .collect();
+    let implemented: BTreeSet<String> = implemented_codes()
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
 
     assert_eq!(described, implemented);
 }
 
 #[test]
 fn every_described_status_is_one_the_problem_code_actually_carries() {
-    // The status a code is served with is decided once, in `ProblemCode`.
-    // Documenting a different one would send clients branching on a status
-    // that never arrives.
+    // The status a code is served with is decided once, in the canonical
+    // contract's status table (`docs/architecture/operations/
+    // public-daemon-api-and-cli.md`, "Problem Details"), implemented by
+    // `ProblemCode::status`. Pinning each value here means a mapping that
+    // changes in either place without the other fails this test.
     for (code, expected) in [
         (ProblemCode::NotFound, 404),
         (ProblemCode::Validation, 400),
@@ -157,5 +167,42 @@ fn every_described_status_is_one_the_problem_code_actually_carries() {
     assert!(
         cancel.get("200").is_none(),
         "a 200 would imply the Goal reached Cancelled"
+    );
+}
+
+#[test]
+fn no_operation_promises_a_problem_status_no_code_carries() {
+    // Every response documented with a problem body must use one of the
+    // statuses the codes above actually map to. A `403` problem response, say,
+    // would promise an error shape nothing can produce.
+    let carried: BTreeSet<u16> = implemented_codes().iter().map(|c| c.status()).collect();
+
+    let mut offenders = Vec::new();
+    for (path, operations) in description()["paths"]
+        .as_object()
+        .expect("paths is an object")
+    {
+        for (method, operation) in operations.as_object().expect("operations are objects") {
+            for key in operation["responses"]
+                .as_object()
+                .expect("responses")
+                .keys()
+            {
+                let promises_problem = operation["responses"][key]["content"]
+                    .get("application/problem+json")
+                    .is_some();
+                if !promises_problem {
+                    continue;
+                }
+                let status: u16 = key.parse().expect("a numeric response key");
+                if !carried.contains(&status) {
+                    offenders.push(format!("{method} {path} -> {status}"));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these operations document problem responses under statuses no code carries: {offenders:?}"
     );
 }

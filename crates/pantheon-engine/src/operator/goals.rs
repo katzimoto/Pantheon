@@ -162,13 +162,15 @@ impl<S: Borrow<Store>> OperatorService<'_, S> {
     /// The result is the Goal in `Finalizing` with terminal target
     /// `Cancelled`, never a `Cancelled` Goal: reaching terminal requires the
     /// Goal Completion Controller to confirm obligations are finalized, and
-    /// that controller does not exist yet.
+    /// that controller does not exist yet. A Goal that was already finalizing
+    /// toward `Succeeded` or `Failed` is retargeted in place, per the Goal
+    /// lifecycle contract; one already targeting `Cancelled` changes nothing.
     ///
     /// # Errors
     ///
     /// [`OperatorError::NotFound`] when no such Goal exists, or
-    /// [`OperatorError::Conflict`] when the Goal is terminal or already
-    /// finalizing toward another outcome.
+    /// [`OperatorError::Conflict`] when the Goal is terminal — terminal
+    /// history never reopens.
     pub fn cancel_goal(
         &self,
         command: &CommandIdentity,

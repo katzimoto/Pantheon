@@ -85,11 +85,12 @@ pub enum StoreError {
     CommandConflict { command_id: String },
     /// The Goal cannot be driven toward `Cancelled` from the phase it is in.
     ///
-    /// Typed rather than a generic conflict because the two reasons are
-    /// different facts a caller must be able to tell apart from a stale
-    /// revision: a terminal Goal never reopens, and a Goal already finalizing
-    /// toward a different outcome would need a retarget transition the Goal
-    /// lifecycle contract does not grant. Nothing is written either way.
+    /// Typed rather than a generic conflict so a caller can tell it apart from
+    /// a stale revision. The Goal lifecycle contract grants cancellation to
+    /// every nonterminal phase — including retargeting a `Finalizing` Goal
+    /// that is heading for `Succeeded` or `Failed` — so the one refused case
+    /// is a terminal Goal: terminal history never reopens, and nothing is
+    /// written.
     GoalNotCancellable {
         goal_id: String,
         phase: &'static str,

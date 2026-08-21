@@ -80,12 +80,19 @@ replace: for (task_id, phase, revision, terminal_target) in rows.into_iter().tak
 scope: -p pantheon-store --lib
 test: planning::cancel::tests::cancellation_fences_every_nonterminal_task_in_the_same_transaction
 
+name: finalizing-retarget-becomes-a-no-op
+file: crates/pantheon-store/src/planning/cancel.rs
+find: (GoalPhase::Finalizing, Some("Succeeded") | Some("Failed")) => false,
+replace: (GoalPhase::Finalizing, Some("Succeeded") | Some("Failed")) => true,
+scope: -p pantheon-store --lib
+test: planning::cancel::tests::cancelling_a_finalizing_goal_retargets_it_to_cancelled_in_place
+
 name: terminal-goal-accepts-cancellation
 file: crates/pantheon-store/src/planning/cancel.rs
 find: (GoalPhase::Finalizing, Some("Cancelled")) => true,
 replace: (GoalPhase::Finalizing, Some("Cancelled")) => true, _ => true,
 scope: -p pantheon-store --lib
-test: planning::cancel::tests::a_goal_finalizing_toward_another_outcome_is_refused_and_nothing_is_written
+test: planning::cancel::tests::a_terminal_goal_refuses_cancellation_and_history_stays_exactly_as_committed
 
 name: goal-id-ignores-the-command-id
 file: crates/pantheon-engine/src/operator.rs
@@ -172,6 +179,20 @@ find: let value = headers
 replace: if headers.get(name).is_none() { return Ok("placeholder".to_string()); } let value = headers
 scope: -p pantheond --test operator_control
 test: a_mutation_without_command_identity_is_refused_as_a_missing_precondition
+
+name: canonical-live-probe-unregistered
+file: crates/pantheon-operator-api/src/lib.rs
+find: .route("/health/live", get(system::live))
+replace: .route("/health/elsewhere", get(system::live))
+scope: -p pantheond --test operator_control
+test: health_probes_are_unversioned_and_the_versioned_spelling_is_gone
+
+name: stale-command-epoch-mapped-to-precondition-failed
+file: crates/pantheon-operator-protocol/src/problem.rs
+find: Self::StaleCommandEpoch | Self::Conflict => 409,
+replace: Self::StaleCommandEpoch | Self::Conflict => 412,
+scope: -p pantheon-operator-api --lib
+test: description::tests::every_described_status_is_one_the_problem_code_actually_carries
 
 name: watch-opens-without-validating-its-cursor
 file: crates/pantheon-operator-api/src/events.rs
