@@ -402,6 +402,63 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX workspaces_one_current_per_task
             ON workspaces (task_id) WHERE phase != 'Released';",
     },
+    Migration {
+        version: 9,
+        name: "create_artifacts_and_workspace_revisions",
+        // The ARTIFACTS and WORKSPACE families from the canonical
+        // persistence contract's "Table families" section that Issue #32's
+        // sealing path needs: `workspace_revisions` (SANDBOX / WORKSPACE)
+        // and `blobs` / `artifacts` / `artifact_members` (ARTIFACTS). The
+        // remaining families named there — production records, retention,
+        // candidates — arrive with the behaviour that reads them.
+        //
+        // Content identity is separate from production metadata throughout:
+        // every row below is keyed by content or by an immutable binding,
+        // and the mutable provenance (`created_at`) is a column, never part
+        // of identity.
+        sql: "CREATE TABLE blobs (
+            -- Blob identity is digest + size; the digest is the key and the
+            -- size is checked against it on every publication.
+            digest     BLOB    NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            size       INTEGER NOT NULL CHECK (size >= 0),
+            created_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE artifacts (
+            -- Artifact identity is the digest of the canonical manifest.
+            -- Reaching the same manifest twice is one row, not two.
+            digest         BLOB    NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            artifact_kind  TEXT    NOT NULL CHECK (length(artifact_kind) BETWEEN 1 AND 128),
+            canonical_json TEXT    NOT NULL,
+            created_at     INTEGER NOT NULL
+        ) STRICT;
+
+        -- Relational reachability between an Artifact and the Blobs its
+        -- semantics require, so CAS completeness/GC has a graph to follow
+        -- that does not depend on re-parsing manifests.
+        CREATE TABLE artifact_members (
+            artifact_digest BLOB NOT NULL REFERENCES artifacts(digest),
+            blob_digest     BLOB NOT NULL REFERENCES blobs(digest),
+            PRIMARY KEY (artifact_digest, blob_digest)
+        ) STRICT;
+
+        CREATE TABLE workspace_revisions (
+            id             TEXT    NOT NULL PRIMARY KEY CHECK (length(id) = 32),
+            workspace_id   TEXT    NOT NULL REFERENCES workspaces(id),
+            -- The repository identity and immutable base this checkpoint was
+            -- captured against, copied from the Workspace's durable binding.
+            repository     TEXT    NOT NULL CHECK (length(repository) BETWEEN 1 AND 512),
+            resolved_base  TEXT    NOT NULL CHECK (length(resolved_base) IN (40, 64)),
+            -- The immutable semantic-state digest: deterministic over the
+            -- captured logical state alone. One Workspace cannot hold two
+            -- rows claiming different content for the same state digest, so
+            -- re-capturing identical state converges on the existing row.
+            state_digest   BLOB    NOT NULL CHECK (length(state_digest) = 32),
+            canonical_json TEXT    NOT NULL,
+            created_at     INTEGER NOT NULL,
+            UNIQUE (workspace_id, state_digest)
+        ) STRICT;",
+    },
 ];
 
 /// Runs the production migration set against `conn`.

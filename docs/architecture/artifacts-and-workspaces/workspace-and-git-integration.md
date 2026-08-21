@@ -214,6 +214,8 @@ undeclared mount / filesystem escape
 
 A symlink target may itself contain relative or absolute path text. Those bytes are repository content, not capture instructions. Whether the target is semantically acceptable is repository/project policy; privileged capture still never follows it.
 
+The Workspace root's own `.git` entry — whatever its filesystem type — is administrative state and is excluded from logical payload unconditionally; nothing inside it is ever opened, so no gitfile, config include, commondir or alternates indirection it declares can matter. A `.git` entry *below* the root is the opposite: it marks nested-repository (submodule) semantics that v1 does not support, and capture fails closed on it rather than silently flattening one repository's interior into another's content. An undeclared mount boundary crossed during traversal fails closed for the same reason.
+
 Declared gitlinks/submodules or other repository structures are handled only by an explicit supported materialization policy. Pantheon never silently traverses them into another filesystem/repository tree because an Agent-created path points there.
 
 If safe object resolution cannot be established, capture fails closed with `workspace.hostile-filesystem-state`. The Workspace remains fenced/quarantined as appropriate; Pantheon does not fall back to an ambient-privilege pathname read.

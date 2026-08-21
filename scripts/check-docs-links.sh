@@ -53,7 +53,11 @@ report() {
 # broken references in files nobody wrote, and would make the result depend on
 # whether the tree had been built — `scripts/verify.sh` runs this check and then
 # `cargo doc`, so the next run would be inspecting the previous run's output.
-files=$(find . -path ./.git -prune -o -path ./target -prune -o -name '*.md' -print |
+# Vendored tooling (for example an agent harness's node_modules) ships
+# Markdown whose relative links point inside its own package. It is not
+# Pantheon documentation and is not tracked as such, so it is pruned here
+# exactly like build output.
+files=$(find . -path ./.git -prune -o -path ./target -prune -o -path '*/node_modules' -prune -o -name '*.md' -print |
 	sed 's|^\./||' | sort)
 
 # 1. Inline-code references of the form `docs/.../file.md`, `schemas/file.json`,

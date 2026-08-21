@@ -1,0 +1,15 @@
+[package]
+name = "pantheon-cas"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The digest type Blob identity is defined over, and the port this crate
+# implements. Both edges are allowed by `docs/development/implementation.md`.
+pantheon-core = { path = "../pantheon-core" }
+pantheon-engine = { path = "../pantheon-engine" }
+
+[lints]
+workspace = true

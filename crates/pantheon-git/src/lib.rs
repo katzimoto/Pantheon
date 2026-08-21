@@ -38,10 +38,14 @@
 //! `docs/architecture/artifacts-and-workspaces/workspace-and-git-integration.md`
 //! for the contract it implements.
 
+mod capture;
 mod materializer;
 mod sterile;
 
 #[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
 mod tests;
 
+pub use capture::{ConfinedCapture, GitBaseReader, code};
 pub use materializer::{GitMaterializer, PANTHEON_BASE_REF};

@@ -50,6 +50,7 @@
 //! pruning are later missions' scope and are not implemented here. See
 //! `docs/development/implementation.md`.
 
+mod artifacts;
 mod command;
 mod configuration;
 mod error;
@@ -67,6 +68,7 @@ mod workspace;
 #[cfg(test)]
 mod test_support;
 
+pub use artifacts::{ArtifactRecord, SealOutcome, SealedChangeset};
 pub use command::{Command, Committed, JournalCursor};
 pub use configuration::{ActiveConfiguration, ConfigurationPointer};
 pub use error::StoreError;

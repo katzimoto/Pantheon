@@ -92,7 +92,7 @@ fn opening_a_database_with_an_unsupported_newer_schema_version_fails_closed() {
             err,
             StoreError::UnsupportedSchemaVersion {
                 found: 999,
-                max_known: 8
+                max_known: 9
             }
         ),
         "unexpected error: {err}"

@@ -208,7 +208,7 @@ FIFOs, Unix sockets, block/character devices and undeclared filesystem/mount esc
 
 Entries are sorted by canonical path bytes. Rename is not a distinct identity requirement in v1; it may be represented as delete+add because semantic candidate identity is resulting changed-path state, not a diff heuristic.
 
-For repositories whose paths are not representable losslessly as normal UTF-8 strings, the manifest uses an explicitly lossless byte encoding rather than lossy path normalization.
+For repositories whose paths are not representable losslessly as normal UTF-8 strings, the manifest uses an explicitly lossless byte encoding rather than lossy path normalization. The v1 encoding, settled by #32 so implementations do not re-derive it: a path spells itself literally when its bytes are valid UTF-8 and contain no `%`; otherwise it spells as `%` followed by lowercase hex pairs for *every* byte. Because literal form can never contain `%`, the two forms cannot be confused, decoding is total and injective, ordinary paths stay readable, and non-UTF-8 paths stay exact. Entries are ordered by raw path bytes, not by their encoded spellings.
 
 ### Changed-path preimage completeness
 

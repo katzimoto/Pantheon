@@ -299,3 +299,81 @@ replace: if false {
 occurrence: 2
 scope: -p pantheon-store --lib
 test: workspace::tests::a_workspace_that_has_been_mutable_cannot_be_recorded_as_a_materialization_failure
+
+name: capture-symlinks-folded-into-regular-files
+file: crates/pantheon-git/src/capture.rs
+find: const FT_SYMLINK: u64 = 0o120_000;
+replace: const FT_SYMLINK: u64 = 0o100_000;
+scope: -p pantheon-git --lib
+test: capture_tests::an_ordinary_tree_captures_files_modes_and_link_bytes
+
+name: capture-labels-link-payload-as-file-content
+file: crates/pantheon-git/src/capture.rs
+find: kind: EntryKind::Symlink,
+replace: kind: EntryKind::Regular,
+scope: -p pantheon-git --lib
+test: capture_tests::an_ordinary_tree_captures_files_modes_and_link_bytes
+
+name: capture-identity-binding-removed
+file: crates/pantheon-git/src/capture.rs
+find: opened.st_ino != inspected.st_ino || opened.st_dev != inspected.st_dev
+replace: true
+scope: -p pantheon-git --lib
+test: capture_tests::identity_binding_refuses_a_replaced_object_between_inspection_and_open
+
+name: workspace-git-state-becomes-payload
+file: crates/pantheon-git/src/capture.rs
+find: if prefix.is_empty() && component == b".git" {
+replace: if false {
+scope: -p pantheon-git --lib
+test: capture_tests::the_workspace_git_state_is_excluded_without_being_trusted_or_touched
+
+name: ambient-git-config-inherited-for-base-reads
+file: crates/pantheon-git/src/sterile.rs
+find: .env("GIT_CONFIG_GLOBAL", &self.empty_config)
+replace: .env("GIT_CONFIG_GLOBAL", std::env::var_os("HOME").unwrap_or_default())
+scope: -p pantheon-git --lib
+test: tests::the_sterile_profile_passes_only_an_allowlisted_environment
+
+name: freeze-fence-accepts-any-phase
+file: crates/pantheon-store/src/workspace.rs
+find: if phase != WorkspacePhase::Ready || materialization != Materialization::Present {
+replace: if false {
+scope: -p pantheon-store --lib
+test: workspace::tests::only_a_verified_ready_workspace_can_be_frozen
+
+name: seal-publication-skips-task-authority
+file: crates/pantheon-store/src/artifacts.rs
+find: if task_phase != TaskPhase::Ready.as_str() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: artifacts::tests::an_owner_or_task_authority_mismatch_fails_closed
+
+name: artifact-members-truncated
+file: crates/pantheon-store/src/artifacts.rs
+find: for (digest, _) in &seal.members {
+replace: for (digest, _) in &seal.members[..0] {
+scope: -p pantheon-store --lib
+test: artifacts::tests::every_member_of_the_manifest_is_recorded_for_reachability
+
+name: revision-state-hashing-ignores-ordering
+file: crates/pantheon-core/src/artifact.rs
+find: entries.sort_by(|a, b| a.path.sort_key().cmp(b.path.sort_key()));
+replace: entries.sort_by(|a, b| std::cmp::Ordering::Equal);
+scope: -p pantheon-core --lib
+test: artifact::tests::revision_state_identity_is_order_independent_and_content_determined
+
+name: changed-path-scope-ceiling-removed
+file: crates/pantheon-engine/src/sealing.rs
+find: if !scope.authorizes(&path) {
+replace: if false {
+occurrence: 1
+scope: -p pantheon-engine --lib
+test: sealing::tests::a_change_outside_declared_scope_is_refused_and_publishes_nothing
+
+name: seal-before-derived-from-empty-bytes
+file: crates/pantheon-engine/src/sealing.rs
+find: .blob_bytes(source, &before.oid)
+replace: .blob_bytes(source, "0000000000000000000000000000000000000000")
+scope: -p pantheond --test workspace_sealing
+test: a_sealed_changeset_is_cas_complete_and_survives_deletion_of_the_workspace
