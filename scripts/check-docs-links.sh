@@ -53,14 +53,17 @@ report() {
 # broken references in files nobody wrote, and would make the result depend on
 # whether the tree had been built — `scripts/verify.sh` runs this check and then
 # `cargo doc`, so the next run would be inspecting the previous run's output.
-# Other hidden directories are pruned for the same reason: tooling that lives
-# in dot-directories (editor state, local agent installs and their vendored
-# node_modules) is not repository documentation. `.agents` and `.github` are
+# A vendored `node_modules` is pruned wherever it sits, hidden or not: it ships
+# Markdown whose relative links point inside its own package, and it is not
+# Pantheon documentation. Other hidden directories are pruned for the same
+# reason: tooling that lives in dot-directories (editor state, local agent
+# installs) is not repository documentation. `.agents` and `.github` are
 # held out of that prune because they ARE tracked repository content — the
 # skills and the PR template are dense with checked references — and the
 # coverage assertion below fails closed if a future edit narrows the scan past
 # any tracked file.
 files=$(find . -path './.git' -prune -o -path './target' -prune \
+	-o -path '*/node_modules' -prune \
 	-o -path './.*' ! -path './.agents' ! -path './.agents/*' \
 	! -path './.github' ! -path './.github/*' -prune \
 	-o -name '*.md' -print |

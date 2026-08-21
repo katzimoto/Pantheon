@@ -506,3 +506,139 @@ fn a_partially_materialized_workspace_cannot_be_stored_as_ready() {
         WorkspacePhase::Materializing
     );
 }
+
+/// Drives one Workspace all the way to Ready, with a distinct durable
+/// command identity per transition.
+fn ready(store: &Store, id: &str, command_id: &str) -> WorkspaceRecord {
+    let opened = open(store, "task-1", id, &format!("{command_id}:open"));
+    let begun = begin(store, id, opened.revision, &format!("{command_id}:begin"));
+    executed(
+        complete(
+            store,
+            id,
+            begun.revision,
+            &resolved(BASE),
+            &format!("{command_id}:complete"),
+        )
+        .expect("Ready"),
+    )
+}
+
+fn freeze(
+    store: &Store,
+    id: &str,
+    expected: Revision,
+    command_id: &str,
+) -> Result<Committed<WorkspaceRecord>, StoreError> {
+    let epoch = store.restore_generation().expect("generation");
+    store.freeze_workspace(
+        &command(epoch.as_str(), command_id, &[11u8; 32], "workspace.frozen"),
+        id,
+        expected,
+    )
+}
+
+#[test]
+fn freezing_a_ready_workspace_suspends_mutation_authority_and_keeps_presence() {
+    let (_dir, store, _task) = store_with_ready_task("freeze-happy");
+    ready(&store, "workspace-1", "cmd-ready");
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+
+    let frozen =
+        executed(freeze(&store, "workspace-1", current.revision, "cmd-freeze").expect("freezes"));
+    assert_eq!(frozen.phase, WorkspacePhase::Frozen);
+    assert_eq!(
+        frozen.materialization,
+        Materialization::Present,
+        "a freeze is a fence, not an observation"
+    );
+    assert_eq!(frozen.revision.get(), current.revision.get() + 1);
+}
+
+#[test]
+fn only_a_verified_ready_workspace_can_be_frozen() {
+    let (_dir, store, _task) = store_with_ready_task("freeze-refuses");
+    // Still Requested: never materialized, nothing to capture.
+    open(&store, "task-1", "workspace-1", "cmd-open");
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    let err = freeze(&store, "workspace-1", current.revision, "cmd-freeze")
+        .expect_err("Requested cannot be frozen");
+    assert!(
+        matches!(err, StoreError::WorkspaceNotFreezable { .. }),
+        "{err}"
+    );
+
+    // And a row that does not exist at all is a revision conflict, not a
+    // freeze failure.
+    let err = freeze(&store, "no-such-workspace", Revision::new(1), "cmd-freeze")
+        .expect_err("must refuse");
+    assert!(matches!(err, StoreError::RevisionConflict { .. }), "{err}");
+}
+
+#[test]
+fn freezing_twice_from_the_same_observation_is_one_durable_transition() {
+    let (_dir, store, _task) = store_with_ready_task("freeze-replay");
+    ready(&store, "workspace-1", "cmd-ready");
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+
+    let first = freeze(&store, "workspace-1", current.revision, "same-command").expect("freezes");
+    // Same identity + same request hash: replayed, not re-executed.
+    let second = freeze(&store, "workspace-1", current.revision, "same-command").expect("replays");
+    assert!(!second.was_executed());
+    assert_eq!(
+        executed(first).revision,
+        store
+            .workspace_for_task("task-1")
+            .expect("read")
+            .expect("current")
+            .revision
+    );
+}
+
+#[test]
+fn capture_failure_evidence_requires_the_fence_it_claims() {
+    let (_dir, store, _task) = store_with_ready_task("capture-failure");
+    ready(&store, "workspace-1", "cmd-ready");
+    let epoch = store.restore_generation().expect("generation");
+    let record_failure = |expected: Revision| {
+        store.record_capture_failure(
+            &command(
+                epoch.as_str(),
+                "cmd-failed",
+                &[12u8; 32],
+                "workspace.capture-failed",
+            ),
+            "workspace-1",
+            expected,
+        )
+    };
+
+    // Not frozen yet: recording failure would claim a fence that does not
+    // hold.
+    let current = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    let err = record_failure(current.revision).expect_err("must refuse while not frozen");
+    assert!(matches!(err, StoreError::InvariantViolated(_)), "{err}");
+
+    // Frozen at the fenced revision: the evidence records without changing
+    // any lifecycle fact.
+    freeze(&store, "workspace-1", current.revision, "cmd-freeze").expect("freezes");
+    let frozen = store
+        .workspace_for_task("task-1")
+        .expect("read")
+        .expect("current");
+    let recorded = executed(record_failure(frozen.revision).expect("evidence records"));
+    assert_eq!(recorded.phase, WorkspacePhase::Frozen);
+    assert_eq!(recorded.materialization, Materialization::Present);
+}

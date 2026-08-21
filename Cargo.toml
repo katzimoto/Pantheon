@@ -17,6 +17,7 @@ resolver = "3"
 # crate adds its name here together with its boundary statement and its
 # allowlist line in `scripts/check-crate-deps.sh`.
 members = [
+    "crates/pantheon-cas",
     "crates/pantheon-cli",
     "crates/pantheon-core",
     "crates/pantheon-engine",

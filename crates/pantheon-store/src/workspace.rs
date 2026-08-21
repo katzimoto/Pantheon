@@ -307,6 +307,118 @@ impl Store {
         })
     }
 
+    /// Freezes a Ready Workspace: mutation authority is suspended while
+    /// authoritative capture runs.
+    ///
+    /// This is the durable half of capture quiescence (see the sealing
+    /// controller for the whole story): it CASes `Ready -> Frozen` under the
+    /// normal command envelope, and inside the same transaction it re-reads
+    /// the owning Task and requires the phase that authorizes no execution
+    /// owner — on this substrate a `Ready` Task provably has zero Runs, so a
+    /// committed freeze means every Pantheon-visible mutation path is closed
+    /// behind the serialized writer.
+    ///
+    /// Materialization stays exactly what it was (`Present` for a frozen
+    /// Ready Workspace). A freeze is a control-plane fence, not an
+    /// observation; nothing here claims or retracts external state.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::WorkspaceNotFreezable`] when the Workspace is not in the
+    /// verified-mutable state; [`StoreError::RevisionConflict`] when it has
+    /// moved or does not exist; plus the command envelope's failures.
+    pub fn freeze_workspace(
+        &self,
+        command: &Command<'_>,
+        workspace_id: &str,
+        expected: Revision,
+    ) -> Result<Committed<WorkspaceRecord>, StoreError> {
+        self.execute_command(command, |writer| {
+            let row: Option<(String, String)> = writer.query_optional(
+                "SELECT phase, materialization FROM workspaces WHERE id = ?1",
+                &[Value::from(workspace_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let Some((phase_text, materialization_text)) = row else {
+                return writer.fail(StoreError::RevisionConflict {
+                    table: TABLE,
+                    id: workspace_id.to_string(),
+                    expected: expected.get(),
+                    actual: None,
+                });
+            };
+            let phase = WorkspacePhase::parse(&phase_text).ok_or_else(|| {
+                StoreError::InvariantViolated(format!(
+                    "workspace {workspace_id} has unknown phase {phase_text}"
+                ))
+            })?;
+            let materialization =
+                Materialization::parse(&materialization_text).ok_or_else(|| {
+                    StoreError::InvariantViolated(format!(
+                        "workspace {workspace_id} has unknown materialization \
+                         {materialization_text}"
+                    ))
+                })?;
+            if phase != WorkspacePhase::Ready || materialization != Materialization::Present {
+                return writer.fail(StoreError::WorkspaceNotFreezable {
+                    workspace_id: workspace_id.to_string(),
+                    phase: phase.as_str(),
+                    materialization: materialization.as_str(),
+                });
+            }
+            transition(
+                writer,
+                workspace_id,
+                expected,
+                WorkspacePhase::Frozen,
+                Materialization::Present,
+            )
+        })
+    }
+
+    /// Records typed evidence that a capture attempt failed, without
+    /// changing any lifecycle fact.
+    ///
+    /// The Workspace stays `Frozen`: thawing after an unexplained failure
+    /// would hand mutation authority back while nobody knows what the
+    /// failure did, and rematerializing would destroy worker-writable state
+    /// that may be unsealed work. Recovery decides separately, from real
+    /// evidence, what happens next. The command envelope appends the Event;
+    /// this mutation writes nothing else on purpose.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::RevisionConflict`] when the Workspace has moved or does
+    /// not exist; [`StoreError::InvariantViolated`] when it is not frozen —
+    /// recording failure against a mutable Workspace would claim a fence
+    /// that does not hold; plus the command envelope's failures.
+    pub fn record_capture_failure(
+        &self,
+        command: &Command<'_>,
+        workspace_id: &str,
+        expected: Revision,
+    ) -> Result<Committed<WorkspaceRecord>, StoreError> {
+        self.execute_command(command, |writer| {
+            let row = read_in_transaction(writer, workspace_id)?;
+            if row.revision != expected {
+                return writer.fail(StoreError::RevisionConflict {
+                    table: TABLE,
+                    id: workspace_id.to_string(),
+                    expected: expected.get(),
+                    actual: Some(row.revision.get()),
+                });
+            }
+            if row.phase != WorkspacePhase::Frozen {
+                return writer.fail(StoreError::InvariantViolated(format!(
+                    "capture failure may only be recorded against a frozen \
+                     workspace, and {workspace_id} is {}",
+                    row.phase.as_str()
+                )));
+            }
+            Ok(row)
+        })
+    }
+
     /// The Task's current Workspace, if it owns one.
     ///
     /// "Current" means any phase other than `Released`, matching the partial

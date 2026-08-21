@@ -36,6 +36,9 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         tables,
         vec![
             "active_configuration".to_string(),
+            "artifact_members".to_string(),
+            "artifacts".to_string(),
+            "blobs".to_string(),
             "commands".to_string(),
             "configuration_components".to_string(),
             "configuration_revisions".to_string(),
@@ -58,6 +61,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "task_scheduling_state".to_string(),
             "task_specs".to_string(),
             "tasks".to_string(),
+            "workspace_revisions".to_string(),
             "workspaces".to_string(),
         ],
         "unexpected production table set"

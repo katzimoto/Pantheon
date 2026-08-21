@@ -11,5 +11,30 @@ publish.workspace = true
 pantheon-core = { path = "../pantheon-core" }
 pantheon-engine = { path = "../pantheon-engine" }
 
+# Root-confined, no-follow Workspace capture (#32). The canonical capture
+# boundary requires that validation and payload reads bind to the *same*
+# filesystem object identity: entries are inspected without being followed
+# (`fstatat(AT_SYMLINK_NOFOLLOW)`), regular files are read through the very
+# descriptor opened for them (`openat(O_NOFOLLOW)`), symlinks are read as
+# data (`readlinkat`), and directories are descended only through
+# descriptor-relative child handles (`fdopendir` on an `O_NOFOLLOW`
+# directory descriptor). `std` exposes none of these: every std read opens
+# by pathname and follows symlinks, which would reintroduce exactly the
+# check-then-reopen race the contract forbids as a security boundary.
+# `rustix` provides those syscalls as safe wrappers, so this crate needs no
+# `unsafe` of its own. Version 1.1.4 is pinned to the minor series: the
+# Bytecode Alliance maintains it actively, its MSRV policy (Debian stable,
+# currently 1.63) sits far below the workspace pin, its license
+# (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) is compatible, the
+# one historical advisory against it (CVE-2024-43806, a memory explosion in
+# the `Dir` iterator's linux_raw backend) affects only <= 0.38 and is fixed
+# from 0.38.19, and with default features off it adds only bitflags/libc/
+# linux-raw-sys beneath it.
+rustix = { version = "1.1.4", default-features = false, features = [
+    "fs",
+    "alloc",
+    "std",
+] }
+
 [lints]
 workspace = true

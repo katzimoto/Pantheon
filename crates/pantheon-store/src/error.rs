@@ -177,6 +177,44 @@ pub enum StoreError {
         bound: String,
         verified: String,
     },
+    /// The Workspace cannot be frozen from the phase it is in.
+    ///
+    /// Typed because "already frozen" and "not capturable" are different
+    /// situations for a sealing caller: the first may be an idempotent retry
+    /// of an earlier attempt, the second means the Workspace was never in
+    /// the verified-mutable state capture requires. `phase` carries what the
+    /// row actually said; `materialization` records whether external state
+    /// was still established present, which recovery needs to know either way.
+    WorkspaceNotFreezable {
+        workspace_id: String,
+        phase: &'static str,
+        materialization: &'static str,
+    },
+    /// An authoritative content claim collided with different stored
+    /// content under the same digest.
+    ///
+    /// Digest-keyed rows (`blobs`, `artifacts`, `workspace_revisions` by
+    /// `(workspace_id, state_digest)`) are immutable identities: inserting
+    /// content that hashes to an existing identity but disagrees with the
+    /// stored bytes/manifest means either corruption or a broken hash, and
+    /// both fail closed rather than being overwritten.
+    ContentIdentityConflict {
+        table: &'static str,
+        id: String,
+        detail: String,
+    },
+    /// A sealing publication failed an authority revalidation inside the
+    /// final transaction: the Workspace is no longer frozen at the fenced
+    /// revision, no longer owned by the named Task, or the owning Task has
+    /// moved past the phase that authorized capture.
+    ///
+    /// Distinct from [`StoreError::RevisionConflict`] so a caller can tell
+    /// "retry with fresh state" (a conflict) from "this seal's authority is
+    /// gone" without parsing text. Nothing is written.
+    SealAuthorityInvalid {
+        workspace_id: String,
+        detail: String,
+    },
     /// A connection Pantheon needs could not be used: the authoritative
     /// writer is poisoned by an earlier panic, or a caller attempted to
     /// re-enter the serialized authoritative writer it already holds.
@@ -279,6 +317,26 @@ impl fmt::Display for StoreError {
                 "workspace {workspace_id} is bound to base {bound} but \
                  materialization established {verified}"
             ),
+            Self::WorkspaceNotFreezable {
+                workspace_id,
+                phase,
+                materialization,
+            } => write!(
+                f,
+                "workspace {workspace_id} is {phase} (materialization {materialization}) \
+                 and cannot be frozen for capture"
+            ),
+            Self::ContentIdentityConflict { table, id, detail } => write!(
+                f,
+                "{table} row {id} already holds different content: {detail}"
+            ),
+            Self::SealAuthorityInvalid {
+                workspace_id,
+                detail,
+            } => write!(
+                f,
+                "sealing workspace {workspace_id} lost its authority: {detail}"
+            ),
             Self::DispatchPaused => write!(
                 f,
                 "dispatch is durably paused; new Run intents are fenced until resume"
@@ -329,6 +387,9 @@ impl std::error::Error for StoreError {
             | Self::WorkspaceAlreadyCurrent { .. }
             | Self::WorkspaceNotRematerializable { .. }
             | Self::WorkspaceBaseMismatch { .. }
+            | Self::WorkspaceNotFreezable { .. }
+            | Self::ContentIdentityConflict { .. }
+            | Self::SealAuthorityInvalid { .. }
             | Self::DispatchPaused
             | Self::DispatchSlotUnavailable { .. }
             | Self::TaskNotDispatchable { .. }

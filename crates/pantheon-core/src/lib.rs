@@ -28,6 +28,7 @@
 //! The crate map, the allowed dependency graph and the rule for when a new
 //! crate is justified are in `docs/development/implementation.md`.
 
+pub mod artifact;
 pub mod config;
 pub mod execution;
 pub mod planning;

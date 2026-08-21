@@ -267,7 +267,7 @@ impl From<StoreError> for WorkspaceError {
 }
 
 /// The longest command identity the durable command ledger accepts.
-const MAX_COMMAND_ID: usize = 128;
+pub(crate) const MAX_COMMAND_ID: usize = 128;
 
 /// Drives a Task's Workspace toward Ready against durable authority.
 pub struct WorkspaceController<'a> {

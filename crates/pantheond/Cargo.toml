@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 # The composition root names every concrete implementation exactly once.
+pantheon-cas = { path = "../pantheon-cas" }
 pantheon-engine = { path = "../pantheon-engine" }
 pantheon-operator-api = { path = "../pantheon-operator-api" }
 pantheon-store = { path = "../pantheon-store" }

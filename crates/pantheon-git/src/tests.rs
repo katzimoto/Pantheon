@@ -698,6 +698,34 @@ fn the_sterile_profile_passes_only_an_allowlisted_environment() {
         .collect();
     names.sort();
 
+    // Names alone are not the property: the controller-owned *values* are
+    // too. A global-config variable pointing at the host home would carry
+    // the user's real configuration into every Git process this profile
+    // runs.
+    let value_of = |name: &str| {
+        command
+            .get_envs()
+            .find(|(key, _)| key.to_string_lossy() == name)
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+    };
+    for name in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ] {
+        let value = value_of(name).unwrap_or_else(|| panic!("{name} must be set"));
+        assert!(
+            value
+                .as_encoded_bytes()
+                .starts_with(control.as_os_str().as_encoded_bytes()),
+            "{name} must point at controller-owned scratch under {control:?}, got {value:?}"
+        );
+        if let Some(host) = std::env::var_os("HOME") {
+            assert_ne!(value, host, "{name} must not inherit the host home");
+        }
+    }
+
     let mut expected = vec![
         "GIT_ATTR_NOSYSTEM",
         "GIT_CONFIG_GLOBAL",

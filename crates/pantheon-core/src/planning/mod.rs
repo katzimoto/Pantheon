@@ -28,6 +28,7 @@ pub mod direct;
 pub mod evaluators;
 pub mod goal;
 pub mod proposal;
+pub mod scope;
 pub mod task;
 pub mod validate;
 

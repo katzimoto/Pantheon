@@ -263,6 +263,8 @@ Task type must not dictate a concrete Agent or backend.
 
 Task scope narrows the maximum authority needed for this Task.
 
+For `scope.resources` patterns over Workspace paths, v1 fixes one deterministic matcher (#32): a pattern is `workspace://` followed by `/`-separated segments, where a literal segment matches itself exactly, `*` matches exactly one segment, and `**` matches zero or more segments. Component boundaries are load-bearing (`src/*` authorizes `src/a.txt` but never `src/a/b.txt`). Patterns outside this grammar — wrong scheme, empty segments, wildcards buried in a larger segment — are refused at compile time rather than guessed at, because every reading of an ambiguous grant is dangerous. A Task declaring no resource patterns authorizes nothing: files merely present in a Workspace are not automatically authorized output.
+
 Effective authority remains the intersection of enclosing policy and Task scope:
 
 ```text
