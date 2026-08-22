@@ -38,6 +38,11 @@ cd "$root"
 # harness kills what it already knows about, not that the matcher semantics
 # still hold.
 ./scripts/check-mutants-selftest.sh
+# The immunity stage proves verification depends only on the candidate tree:
+# it copies exactly the tracked files into a scratch tree, plants hostile
+# untracked decoys there, and reruns the documentation and dependency checks
+# from the copy (#94). Seconds; no build beyond cargo's own graph read.
+./scripts/check-untracked-immunity.sh
 ./scripts/check-hooks.sh
 
 cargo fmt --all -- --check
