@@ -8,81 +8,140 @@
 # because a real surviving mutant exposed exactly that.
 #
 # This is deliberately NOT part of `./scripts/verify.sh`, and that exception is
-# recorded in `AGENTS.md` rather than assumed here. verify.sh is the gate: one
+# recorded in AGENTS.md rather than assumed here. verify.sh is the gate: one
 # command, seconds, run after every change. This is evidence generation: it
 # rebuilds a scratch copy of the workspace once per mutant and takes minutes.
 # Folding it into the gate would make the gate something agents avoid running,
 # which is a worse outcome than a second command with a stated reason.
 #
-# For each record it copies the tree to a scratch directory, applies one
-# single-line edit, runs the named test, and requires that test to FAIL. A
-# mutant the test survives is reported: either the mutant no longer removes the
-# property, or the test never checked it.
+# The suite runs in two phases.
 #
-# A shared CARGO_TARGET_DIR across mutants keeps this to an incremental rebuild
-# of one crate per record rather than a full workspace build each time.
+# Preflight — always first, over the COMPLETE manifest, even when individual
+# mutants were selected by name: every record's shape, target file, anchor and
+# occurrence are validated structurally, and each mutation is proven to change
+# its target, without compiling or running anything. A stale record therefore
+# fails in seconds with a diagnostic naming the record and the file, instead of
+# surfacing partway through an hour of scratch rebuilds (#82).
+#
+# Execution — for each selected record: apply the mutation to the scratch tree
+# through the same engine that validated it (`scripts/mutants.awk`), run the
+# named test, and require that test to FAIL. A mutant the test survives is
+# reported: either the mutant no longer removes the property, or the test never
+# checked it.
+#
+# Anchors match in whitespace-normalized form: runs of blanks and line breaks
+# collapse to one space on both sides before comparison, so reformatting a
+# source with rustfmt — re-indentation, line wrapping — does not invalidate a
+# record whose anchor still names the same token sequence. Normalization never
+# widens what a mutation replaces: the matched region maps back onto exact
+# original coordinates, only that contiguous region is replaced, occurrence N
+# selects the Nth non-overlapping match deterministically, and ambiguity stays
+# visible through reported match counts.
+#
+# A shared CARGO_TARGET_DIR across mutants keeps execution to an incremental
+# rebuild of one crate per record rather than a full workspace build each time.
 #
 # Uses POSIX shell, standard POSIX utilities, rsync, and the pinned toolchain.
 #
 # Usage:
-#   scripts/check-mutants.sh              run every mutant
-#   scripts/check-mutants.sh <name> ...   run only the named mutants
+#   scripts/check-mutants.sh              preflight everything, run every mutant
+#   scripts/check-mutants.sh <name> ...   preflight everything, run only these
+#   scripts/check-mutants.sh --check      structural validation only; no build
+#
+# Environment overrides, for hermetic self-tests of the harness itself:
+#   MUTANTS_ROOT      repository root (default: derived from this script)
+#   MUTANTS_MANIFEST  manifest path relative to the root
 
 set -eu
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=${MUTANTS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$root"
 
-manifest=tests/mutants.txt
+manifest=${MUTANTS_MANIFEST:-tests/mutants.txt}
 [ -f "$manifest" ] || {
 	printf 'ERROR: %s does not exist.\n' "$manifest" >&2
+	exit 1
+}
+engine=scripts/mutants.awk
+[ -f "$engine" ] || {
+	printf 'ERROR: %s does not exist.\n' "$engine" >&2
 	exit 1
 }
 
 scratch=${TMPDIR:-/tmp}/pantheon-mutants.$$
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
-mkdir -p "$scratch/tree"
+mkdir -p "$scratch"
 CARGO_TARGET_DIR="$scratch/target"
 export CARGO_TARGET_DIR
 
-# One copy, reused. Each mutant restores the single file it touched rather than
-# re-copying the workspace.
+check_only=0
+selected=
+for arg in "$@"; do
+	case $arg in
+	--check) check_only=1 ;;
+	*) selected="$selected $arg" ;;
+	esac
+done
+
+# Parse once, through the engine every later step shares. Unknown keys,
+# duplicate names, missing defaults: all fail closed here.
+records=$(MUTANT_MODE=parse awk -f "$engine" "$manifest")
+[ -n "$records" ] || {
+	printf 'ERROR: %s contains no mutant records.\n' "$manifest" >&2
+	exit 1
+}
+
+total=$(printf '%s\n' "$records" | awk 'END { print NR }')
+
+# ---- phase one: structural preflight of the whole manifest -----------------
+
+preflight_failed=$scratch/preflight.failed
+: >"$preflight_failed"
+
+printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence; do
+	if [ -z "$name" ] || [ -z "$file" ] || [ -z "$find" ] || [ -z "$scope" ] || [ -z "$test" ]; then
+		printf 'ERROR [%s]: the record is missing a required field; name, file, find, scope and test must all be present.\n' \
+			"${name:-<unnamed>}" >&2
+		echo "${name:-<unnamed>}" >>"$preflight_failed"
+		continue
+	fi
+	if [ ! -f "$file" ]; then
+		printf 'ERROR [%s]: %s does not exist.\n' "$name" "$file" >&2
+		echo "$name" >>"$preflight_failed"
+		continue
+	fi
+	# The engine resolves the anchor against the real file and proves the
+	# mutation would change bytes. Its diagnostics name both on failure;
+	# nothing is written anywhere.
+	if ! MUTANT_MODE=check MUTANT_NAME="$name" MUTANT_FIND="$find" \
+		MUTANT_REPLACE="$replace" MUTANT_WANT="$occurrence" \
+		awk -f "$engine" "$file" >/dev/null; then
+		echo "$name" >>"$preflight_failed"
+	fi
+done
+
+if [ -s "$preflight_failed" ]; then
+	printf 'ERROR: %s of %s records failed structural validation; nothing was built or tested.\n' \
+		"$(wc -l <"$preflight_failed" | tr -d ' ')" "$total" >&2
+	printf 'Repair the records above, then rerun. `--check` reruns just this phase.\n' >&2
+	exit 1
+fi
+
+if [ "$check_only" -eq 1 ]; then
+	printf 'mutation preflight: OK (%s records structurally valid; nothing built or tested)\n' "$total"
+	exit 0
+fi
+
+# ---- phase two: execution ---------------------------------------------------
+
+mkdir -p "$scratch/tree"
+
+# One copy, reused. Each mutant restores the single file it touched rather
+# than re-copying the workspace.
 rsync -a --exclude target --exclude .git ./ "$scratch/tree/"
 
-selected=$*
 survivors=0
 checked=0
-
-# Emit each record as one tab-separated line so the shell loop below does not
-# have to parse a paragraph format.
-records=$(
-	awk '
-		function flush() {
-			if (name != "") {
-				if (runs == "") { runs = 3 }
-				if (occurrence == "") { occurrence = 1 }
-				printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, file, find, replace, scope, test, runs, occurrence
-			}
-			name = ""; file = ""; find = ""; replace = ""; scope = ""; test = ""; runs = ""; occurrence = ""
-		}
-		/^[[:space:]]*#/ { next }
-		/^[[:space:]]*$/ { flush(); next }
-		{
-			key = $0; sub(/:.*$/, "", key)
-			value = $0; sub(/^[^:]*:[[:space:]]?/, "", value)
-			if (key == "name") { name = value }
-			else if (key == "file") { file = value }
-			else if (key == "find") { find = value }
-			else if (key == "replace") { replace = value }
-			else if (key == "scope") { scope = value }
-			else if (key == "test") { test = value }
-			else if (key == "runs") { runs = value }
-			else if (key == "occurrence") { occurrence = value }
-			else { printf "ERROR: unknown key %s in %s\n", key, FILENAME > "/dev/stderr"; exit 1 }
-		}
-		END { flush() }
-	' "$manifest"
-)
 
 printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence; do
 	[ -n "$name" ] || continue
@@ -93,54 +152,24 @@ printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find rep
 		esac
 	fi
 
-	[ -f "$file" ] || {
-		printf 'ERROR [%s]: %s does not exist.\n' "$name" "$file" >&2
-		exit 1
-	}
-
-	matches=$(grep -cF "$find" "$file" || true)
-	if [ "$matches" -eq 0 ]; then
-		printf 'ERROR [%s]: the anchor was not found in %s.\nThe code moved; update the mutant so it still removes the property it names.\n' \
-			"$name" "$file" >&2
-		exit 1
-	fi
-	if [ "$matches" -lt "$occurrence" ]; then
-		printf 'ERROR [%s]: %s has %s matches, fewer than the requested occurrence %s.\n' \
-			"$name" "$file" "$matches" "$occurrence" >&2
-		exit 1
-	fi
-	# Apply to the copy, then run.
-	#
-	# `find` and `replace` travel through the environment rather than through
-	# `awk -v`, because awk expands escape sequences in a `-v` assignment: an
-	# anchor containing `\"` would silently stop matching, the mutant would not
-	# be applied, and the run would look like a surviving mutant rather than a
-	# broken one.
+	# Apply through the same engine that preflighted the record, so
+	# validation and execution cannot drift apart: identical parsing,
+	# matching, occurrence selection and replacement.
 	cp "$file" "$scratch/tree/$file"
-	MUTANT_FIND=$find MUTANT_REPLACE=$replace MUTANT_WANT=$occurrence awk '
-		BEGIN { find = ENVIRON["MUTANT_FIND"]; replace = ENVIRON["MUTANT_REPLACE"]; want = ENVIRON["MUTANT_WANT"] + 0; seen = 0 }
-		{
-			if (!done && index($0, find) > 0) {
-				seen++
-				if (seen == want) {
-					before = substr($0, 1, index($0, find) - 1)
-					after = substr($0, index($0, find) + length(find))
-					print before replace after
-					done = 1
-					next
-				}
-			}
-			print
-		}
-	' "$file" >"$scratch/tree/$file.mutant"
+	if ! MUTANT_MODE=apply MUTANT_NAME="$name" MUTANT_FIND="$find" \
+		MUTANT_REPLACE="$replace" MUTANT_WANT="$occurrence" \
+		awk -f "$engine" "$file" >"$scratch/tree/$file.mutant"; then
+		printf 'ERROR [%s]: application failed after a passing preflight; aborting before any test ran.\n' "$name" >&2
+		exit 1
+	fi
 	mv "$scratch/tree/$file.mutant" "$scratch/tree/$file"
 
 	# A mutant that changed nothing is not a surviving mutant, it is a broken
 	# one — and reporting it as a survivor would send someone hunting a test
-	# weakness that does not exist. Fail closed.
+	# weakness that does not exist. Fail closed. Unreachable while preflight
+	# and application share one engine, kept as the guard that proves it.
 	if cmp -s "$file" "$scratch/tree/$file"; then
-		printf 'ERROR [%s]: applying the mutant changed nothing.\nThe anchor matched the raw grep but not the substitution, so the run would have reported a surviving mutant for a mutant that was never applied.\n' \
-			"$name" >&2
+		printf 'ERROR [%s]: applying the mutant changed nothing.\n' "$name" >&2
 		exit 1
 	fi
 
@@ -194,7 +223,7 @@ done
 # The loop above runs in a subshell because of the pipe, so the tallies are
 # read back from the file it wrote rather than from variables.
 [ -f "$scratch/results" ] || {
-	printf 'ERROR: no mutants ran.%s\n' "${selected:+ No manifest entry matched: $selected}" >&2
+	printf 'ERROR: no mutants ran.%s\n' "${selected:+ No manifest entry matched:$selected}" >&2
 	exit 1
 }
 total=$(wc -l <"$scratch/results" | tr -d ' ')
