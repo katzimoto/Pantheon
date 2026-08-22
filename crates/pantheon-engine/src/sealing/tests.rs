@@ -136,6 +136,19 @@ impl WorkspaceTreeCapture for ScriptedCapture<'_> {
     }
 }
 
+/// A deterministic stand-in Git object name for captured content: the
+/// fixture's recorded OID exactly when the payload is the true preimage
+/// bytes, and a distinct valid name for anything else — the property the
+/// real implementation gets from Git's content addressing.
+fn fixture_identity(preimage_oid: &str, preimage: &[u8], contents: &[u8]) -> String {
+    if contents == preimage {
+        return preimage_oid.to_string();
+    }
+    let digest = Digest::of(contents).to_string();
+    // "sha256:<64 hex>" -> a fixed-width 40-hex object-name-shaped prefix.
+    digest[7..47].to_string()
+}
+
 /// The trusted base: one file, `app.txt`, whose preimage is known.
 struct MemoryBase;
 
@@ -155,6 +168,17 @@ impl TrustedBaseReader for MemoryBase {
             },
         );
         Ok(tree)
+    }
+
+    fn blob_object_names(
+        &self,
+        _source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        Ok(contents
+            .iter()
+            .map(|content| fixture_identity(APP_OID, b"original", content))
+            .collect())
     }
 
     fn blob_bytes(&self, _source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
@@ -913,6 +937,17 @@ impl TrustedBaseReader for BaseWithRootOnly {
         Ok(tree)
     }
 
+    fn blob_object_names(
+        &self,
+        _source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        Ok(contents
+            .iter()
+            .map(|content| fixture_identity(APP_OID, b"original", content))
+            .collect())
+    }
+
     fn blob_bytes(&self, _source: &Path, _oid: &str) -> Result<Vec<u8>, ExternalFault> {
         Ok(b"original".to_vec())
     }
@@ -977,6 +1012,228 @@ fn a_deleted_path_outside_scope_is_refused_at_its_own_gate() {
         matches!(error, SealError::ScopeViolated { ref path } if path.contains("outside.txt")),
         "{error}"
     );
+}
+
+// ---- Issue #75: identity and comparison evidence ---------------------------
+
+/// A trusted base carrying every representative shape at once: a plain
+/// file, an executable, a symlink and a path that will be deleted. The OIDs
+/// are stand-ins whose preimage bytes are known exactly.
+struct GoldenBase;
+
+const GOLDEN_APP_OID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const GOLDEN_SH_OID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const GOLDEN_LINK_OID: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const GOLDEN_GONE_OID: &str = "dddddddddddddddddddddddddddddddddddddddd";
+
+impl GoldenBase {
+    fn preimage_of(oid: &str) -> Option<&'static [u8]> {
+        match oid {
+            GOLDEN_APP_OID => Some(b"original"),
+            GOLDEN_SH_OID => Some(b"#!/bin/sh\n"),
+            GOLDEN_LINK_OID => Some(b"app.txt"),
+            GOLDEN_GONE_OID => Some(b"vanish"),
+            _ => None,
+        }
+    }
+
+    /// The name captured content would carry: the recorded OID exactly for
+    /// the true preimage bytes, a distinct valid name otherwise — the
+    /// property Git's content addressing gives the real implementation.
+    fn identity_of(contents: &[u8]) -> String {
+        for (oid, preimage) in [
+            (GOLDEN_APP_OID, b"original".as_slice()),
+            (GOLDEN_SH_OID, b"#!/bin/sh\n".as_slice()),
+            (GOLDEN_LINK_OID, b"app.txt".as_slice()),
+            (GOLDEN_GONE_OID, b"vanish".as_slice()),
+        ] {
+            if contents == preimage {
+                return oid.to_string();
+            }
+        }
+        fixture_identity(GOLDEN_APP_OID, b"original", contents)
+    }
+}
+
+impl TrustedBaseReader for GoldenBase {
+    fn base_tree(
+        &self,
+        _source: &Path,
+        _base: &ResolvedBase,
+    ) -> Result<BTreeMap<Vec<u8>, BaseObject>, ExternalFault> {
+        let mut tree = BTreeMap::new();
+        for (path, kind, oid, size) in [
+            (&b"app.txt"[..], EntryKind::Regular, GOLDEN_APP_OID, 8),
+            (
+                &b"run.sh"[..],
+                EntryKind::Executable,
+                GOLDEN_SH_OID,
+                b"#!/bin/sh\n".len() as u64,
+            ),
+            (
+                &b"link.txt"[..],
+                EntryKind::Symlink,
+                GOLDEN_LINK_OID,
+                b"app.txt".len() as u64,
+            ),
+            (
+                &b"gone.txt"[..],
+                EntryKind::Regular,
+                GOLDEN_GONE_OID,
+                b"vanish".len() as u64,
+            ),
+        ] {
+            tree.insert(
+                path.to_vec(),
+                BaseObject {
+                    kind,
+                    oid: oid.to_string(),
+                    size,
+                },
+            );
+        }
+        Ok(tree)
+    }
+
+    fn blob_object_names(
+        &self,
+        _source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        Ok(contents
+            .iter()
+            .map(|c| GoldenBase::identity_of(c))
+            .collect())
+    }
+
+    fn blob_bytes(&self, _source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
+        GoldenBase::preimage_of(oid)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| ExternalFault {
+                code: "workspace.base-unavailable".to_string(),
+                detail: format!("no fixture blob {oid}"),
+            })
+    }
+}
+
+/// The golden values below were produced by the #32/#76 implementation —
+/// fetch-and-hash of every same-size base candidate — on exactly this
+/// fixture, before the #75 comparison signal replaced it. They are absolute:
+/// the changed-path derivation may change how unchanged is proven, never
+/// what identity comes out.
+#[test]
+fn changed_path_derivation_reproduces_the_pre_change_identity_bit_for_bit() {
+    let (_dir, store, workspace_root) = prepared("golden", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    // One modify with a content change, one mode-only modify (same bytes,
+    // executable bit cleared), one symlink retarget, one add, one delete.
+    let capture = ScriptedCapture::new(
+        &store,
+        vec![
+            (b"app.txt".to_vec(), EntryKind::Regular, b"fixed".to_vec()),
+            (
+                b"run.sh".to_vec(),
+                EntryKind::Regular,
+                b"#!/bin/sh\n".to_vec(),
+            ),
+            (
+                b"link.txt".to_vec(),
+                EntryKind::Symlink,
+                b"elsewhere".to_vec(),
+            ),
+            (
+                b"new.txt".to_vec(),
+                EntryKind::Regular,
+                b"brand new".to_vec(),
+            ),
+        ],
+    );
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+    let sealer = ChangesetSealer::new(&store, &capture, &GoldenBase, &cas, &workspace_root);
+    let sealed = sealer
+        .seal(&seal_command(epoch.as_str(), "cmd-golden"), &seal_request())
+        .expect("seals");
+
+    assert_eq!(
+        sealed.revision_state_digest.to_string(),
+        "sha256:7e31b1b1eae357ffdb35a44342b16ed1fa0f35662997f00fb0f484973972da51",
+        "the revision-state digest must match the pre-change implementation"
+    );
+    assert_eq!(
+        sealed.artifact_digest.to_string(),
+        "sha256:322d89fd3b7baca13fb2c759f06eaddd842937684dc1dec18b777d5a7ffe1611",
+        "the Artifact identity must match the pre-change implementation"
+    );
+
+    let json = store
+        .artifact(sealed.artifact_digest)
+        .expect("read")
+        .expect("sealed")
+        .canonical_json;
+    assert_eq!(
+        json,
+        r#"{"artifactKind":"code.changeset","baseCommit":"dc6fcd729d1c3b0426712ab6985f28c19be95d55","entries":[{"after":{"blob":"sha256:992a93455c71fedd36ac9bbc439952c041cf61445958472af479269b8d873513","mode":"regular","size":5,"state":"present"},"before":{"blob":"sha256:0682c5f2076f099c34cfdd15a9e063849ed437a49677e6fcc5b4198c76575be5","mode":"regular","size":8,"state":"present"},"operation":"modify","path":"app.txt"},{"after":{"state":"absent"},"before":{"blob":"sha256:93ce248b8b9c8758eb556d6a9a17646e8ce48bf78d386cf47993e5f10ff19c0b","mode":"regular","size":6,"state":"present"},"operation":"delete","path":"gone.txt"},{"after":{"blob":"sha256:7b1b763ee8f62eb88e4742a760f912d0b19bcd58b2b948999784bacc15a7f4d7","mode":"symlink","size":9,"state":"present"},"before":{"blob":"sha256:62d0a0ae93133a7aad1a08cff7ba0fcdcece91e4ebbc588a556d03e9f5b2a8f2","mode":"symlink","size":7,"state":"present"},"operation":"modify","path":"link.txt"},{"after":{"blob":"sha256:479ae89bba70675d077baab30d6b1873310f16b229e2856e0d0177680db43380","mode":"regular","size":9,"state":"present"},"before":{"state":"absent"},"operation":"add","path":"new.txt"},{"after":{"blob":"sha256:a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf","mode":"regular","size":10,"state":"present"},"before":{"blob":"sha256:a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf","mode":"executable","size":10,"state":"present"},"operation":"modify","path":"run.sh"}],"repository":"repo://project","schemaVersion":1,"workspaceRevision":"sha256:7e31b1b1eae357ffdb35a44342b16ed1fa0f35662997f00fb0f484973972da51"}"#,
+        "the canonical manifest JSON must be byte-for-byte the pre-change one"
+    );
+
+    // The CAS member set: every after payload plus every changed/deleted
+    // preimage — and nothing else. run.sh contributes its bytes once per
+    // side (identical), so seven distinct objects.
+    for expected in [
+        b"fixed".as_slice(),
+        b"#!/bin/sh\n".as_slice(),
+        b"elsewhere".as_slice(),
+        b"brand new".as_slice(),
+        b"original".as_slice(),
+        b"app.txt".as_slice(),
+        b"vanish".as_slice(),
+    ] {
+        assert!(cas.contains(expected), "{:?} missing from CAS", expected);
+    }
+    assert_eq!(
+        cas.objects.borrow().len(),
+        7,
+        "exactly the required members, no extras"
+    );
+}
+
+/// A same-path, same-kind, same-size entry with different bytes is a
+/// Modify — decided through the object-name comparison alone, with the
+/// authoritative preimage fetched from the base.
+#[test]
+fn a_same_size_collision_is_a_modify_with_its_authoritative_preimage() {
+    let (_dir, store, workspace_root) = prepared("collision-unit", &["workspace://**"]);
+    let _repo = worker_repo(&workspace_root);
+    let capture = ScriptedCapture::new(
+        &store,
+        vec![(
+            b"app.txt".to_vec(),
+            EntryKind::Regular,
+            b"mutated!".to_vec(), // 8 bytes, like b"original"
+        )],
+    );
+    let cas = MemoryCas::new();
+    let epoch = store.restore_generation().expect("generation");
+
+    let sealed = sealer(&store, &capture, &cas, &workspace_root)
+        .seal(
+            &seal_command(epoch.as_str(), "cmd-collide"),
+            &seal_request(),
+        )
+        .expect("seals");
+    let json = store
+        .artifact(sealed.artifact_digest)
+        .expect("read")
+        .expect("sealed")
+        .canonical_json;
+    assert!(json.contains(r#""operation":"modify""#), "{json}");
+    assert!(
+        !json.contains(r#""operation":"add""#),
+        "the collision is not an add: {json}"
+    );
+    assert!(cas.contains(b"original"), "preimage in CAS");
+    assert!(cas.contains(b"mutated!"), "after bytes in CAS");
 }
 
 // ---- Issue #76: the seal authority itself ---------------------------------

@@ -83,7 +83,9 @@ execution owner, so nothing settled exists to seal. `pantheon-engine` owns the
 sealing order (freeze or revalidate under Run authority, confined capture,
 CAS-first publication, trusted-base preimages, scope enforcement) and the three ports it
 needs; `pantheon-git` implements root-confined no-follow capture and sterile
-base reads; and `pantheon-cas` is the concrete local content-addressed store
+base reads — including the Git object names of captured bytes, computed under
+the source repository's own object format, that decide changed paths without
+reading unchanged same-size base blobs (#75); and `pantheon-cas` is the concrete local content-addressed store
 behind the CAS port. There is still no Candidate and no acceptance: sealing
 produces durable output, and what accepts it is a later boundary.
 
@@ -253,7 +255,7 @@ the implementation.
 | `pantheon-core` | Provider-neutral semantic types; rules that are pure computation | Persistence, transport, process, filesystem or network effects; concrete provider, model or harness names; daemon startup; sandbox behaviour |
 | `pantheon-store` | Connection policy, migrations, transaction boundaries, queries, row/domain mapping, invariant checks, backup/restore database mechanics | Any external effect: network, Git, process, container, executor, sandbox, secret provider |
 | `pantheon-engine` | Scheduling, run/attempt control, recovery, authorization, evaluation, configuration, artifact and integration workflows; the abstract ports to outside systems | Concrete implementations behind its own ports; HTTP routing and wire formats |
-| `pantheon-git` | Concrete Git materialization of a Task Workspace: repository creation, observation, discard, and the sterile non-interactive execution profile every Git process runs under; root-confined no-follow capture of a settled Workspace's logical tree; sterile reads of the trusted immutable base | Durable authority; orchestration; deciding what happens after a failure; Sandbox behaviour |
+| `pantheon-git` | Concrete Git materialization of a Task Workspace: repository creation, observation, discard, and the sterile non-interactive execution profile every Git process runs under; root-confined no-follow capture of a settled Workspace's logical tree; sterile reads of the trusted immutable base, and the sterile identity computations over captured bytes those reads compare against | Durable authority; orchestration; deciding what happens after a failure; Sandbox behaviour |
 | `pantheon-cas` | The concrete local content-addressed store behind the engine's CAS port: hash, stage durably, publish atomically into the digest namespace, verify what lands | Durable authority; ordering between CAS durability and DB commits; any orchestration |
 | `pantheon-operator-protocol` | Request/response bodies, public resource representations, error envelopes, query and pagination types | Any internal dependency; transport; persistence shapes |
 | `pantheon-operator-api` | Routes, Unix-socket HTTP, middleware, wire/domain conversion, sensitive request handling, API description assembly | Business decisions; direct persistence access |

@@ -35,7 +35,8 @@ use pantheon_core::scheduling::{ContextSourceSnapshot, ExecutionBinding};
 use pantheon_engine::configuration::{ConfigurationAuthority, SourceSet};
 use pantheon_engine::planning::PlanningController;
 use pantheon_engine::sealing::{
-    ChangesetSealer, ContentObjectStore, SealCommand, SealRequest, WorkspaceTreeCapture,
+    ChangesetSealer, ContentObjectStore, ExternalFault, SealCommand, SealRequest,
+    TrustedBaseReader, WorkspaceTreeCapture,
 };
 use pantheon_engine::workspace::{WorkspaceCommand, WorkspaceController, WorkspaceRequest};
 use pantheon_git::{ConfinedCapture, GitBaseReader, GitMaterializer};
@@ -217,6 +218,16 @@ fn ensure_workspace(
     source: &Path,
     request_id: &str,
 ) -> pantheon_store::WorkspaceRecord {
+    ensure_workspace_with(store, materializer, root, source, request_id)
+}
+
+fn ensure_workspace_with(
+    store: &Store,
+    materializer: &impl pantheon_engine::workspace::RepositoryMaterializer,
+    root: &Path,
+    source: &Path,
+    request_id: &str,
+) -> pantheon_store::WorkspaceRecord {
     let epoch = store.restore_generation().expect("generation");
     let requested = pantheon_core::workspace::RequestedBase::parse("refs/heads/main").expect("ref");
     WorkspaceController::new(store, materializer, root)
@@ -239,7 +250,7 @@ fn ensure_workspace(
 fn sealer<'a>(
     store: &'a Store,
     capture: &'a dyn WorkspaceTreeCapture,
-    base: &'a GitBaseReader,
+    base: &'a dyn TrustedBaseReader,
     cas: &'a LocalFsCas,
     workspace_root: &'a Path,
 ) -> ChangesetSealer<'a> {
@@ -333,7 +344,7 @@ fn dispatch(store: &Store) {
 fn seal(
     store: &Store,
     capture: &dyn WorkspaceTreeCapture,
-    base: &GitBaseReader,
+    base: &dyn TrustedBaseReader,
     cas: &LocalFsCas,
     workspace_root: &Path,
     command_id: &str,
@@ -723,4 +734,323 @@ fn hostile_git_control_state_is_inert_data_and_source_refs_stay_untouched() {
         .find(|(name, _, _)| name == "app.txt")
         .expect("app.txt changed");
     assert_eq!(app_after.as_deref(), Some(b"fixed\n".as_slice()));
+}
+
+// ---- Issue #75: base-blob read accounting ----------------------------------
+
+use std::cell::Cell;
+use std::collections::BTreeMap;
+
+use pantheon_core::workspace::ResolvedBase;
+use pantheon_engine::sealing::BaseObject;
+
+/// Wraps the real sterile base reader and counts what sealing asks of it,
+/// distinguishing base-blob payload reads (the per-file fetch) from
+/// identity computations and the one-shot tree listing. This is the
+/// operation counter the mission's performance property is stated against.
+struct CountingBase<'a> {
+    inner: &'a GitBaseReader,
+    blob_reads: Cell<usize>,
+    identity_calls: Cell<usize>,
+}
+
+impl TrustedBaseReader for CountingBase<'_> {
+    fn base_tree(
+        &self,
+        source: &Path,
+        base: &ResolvedBase,
+    ) -> Result<BTreeMap<Vec<u8>, BaseObject>, ExternalFault> {
+        self.inner.base_tree(source, base)
+    }
+
+    fn blob_object_names(
+        &self,
+        source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        self.identity_calls.set(self.identity_calls.get() + 1);
+        self.inner.blob_object_names(source, contents)
+    }
+
+    fn blob_bytes(&self, source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
+        self.blob_reads.set(self.blob_reads.get() + 1);
+        self.inner.blob_bytes(source, oid)
+    }
+}
+
+/// Deterministic 4096-byte payload, distinct per index: no two bulk files
+/// share content with each other or with anything else in the fixture.
+fn bulk_content(index: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; BULK_BYTES];
+    let mut state = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for byte in &mut bytes {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_896_407);
+        *byte = (state >> 33) as u8;
+    }
+    bytes
+}
+
+const BULK_FILES: usize = 300;
+const BULK_BYTES: usize = 4096;
+
+#[test]
+fn base_blob_reads_track_changes_not_the_base_tree() {
+    let dir = TempDir::new("read-accounting");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(source.join("bulk")).expect("source");
+    git(&source, &["init", "--quiet", "-b", "main"]);
+    for index in 0..BULK_FILES {
+        std::fs::write(
+            source.join(format!("bulk/file-{index:03}.bin")),
+            bulk_content(index),
+        )
+        .expect("bulk file");
+    }
+    // Both same-size collision candidates: `collision.txt` (64 bytes) and
+    // `modified.txt` — same size as their preimages, different bytes.
+    std::fs::write(source.join("bulk/collision.txt"), b"A".repeat(64)).expect("collision base");
+    std::fs::write(source.join("modified.txt"), b"before-version").expect("modified base");
+    std::fs::write(source.join("deleted.txt"), b"doomed\n").expect("deleted base");
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "--quiet", "-m", "base"]);
+
+    let control = dir.path().join("control");
+    let workspace_root = dir.path().join("workspaces");
+    let cas_root = dir.path().join("cas");
+    let materializer = GitMaterializer::new(&control).expect("materializer");
+    let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
+    ready_coding_task(&store, &["workspace://**"]);
+    ensure_workspace(&store, &materializer, &workspace_root, &source, "ws-req-1");
+    dispatch(&store);
+
+    // The worker touches almost nothing: every bulk file keeps its exact
+    // bytes; the two same-size rewrites are the only content collisions; one
+    // path is deleted and one added.
+    let repo = workspace_root.join("workspace-1").join("repo");
+    std::fs::write(repo.join("bulk/collision.txt"), b"B".repeat(64)).expect("collision after");
+    std::fs::write(repo.join("modified.txt"), b"after-version!").expect("modified after");
+    std::fs::remove_file(repo.join("deleted.txt")).expect("delete");
+    std::fs::write(repo.join("added.txt"), b"brand new\n").expect("add");
+
+    let cas = LocalFsCas::open(&cas_root).expect("cas");
+    let real_reader = GitBaseReader::new(&control).expect("base reader");
+    let counting = CountingBase {
+        inner: &real_reader,
+        blob_reads: Cell::new(0),
+        identity_calls: Cell::new(0),
+    };
+    let capture = ConfinedCapture::new();
+
+    let sealed = seal(
+        &store,
+        &capture,
+        &counting,
+        &cas,
+        &workspace_root,
+        "seal-accounting",
+    )
+    .expect("seals");
+
+    // Every unchanged bulk path stays out of the changeset; the four real
+    // changes carry exactly the right operations.
+    let reconstructed = reconstruct(&store, &cas, sealed.artifact_digest);
+    let changed_paths: Vec<&str> = reconstructed
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        changed_paths,
+        vec![
+            "added.txt",
+            "bulk/collision.txt",
+            "deleted.txt",
+            "modified.txt"
+        ],
+        "exactly the changed paths, canonically ordered"
+    );
+
+    let (_, modified_before, modified_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "modified.txt")
+        .expect("modified entry");
+    assert_eq!(
+        modified_before.as_deref(),
+        Some(b"before-version".as_slice())
+    );
+    assert_eq!(
+        modified_after.as_deref(),
+        Some(b"after-version!".as_slice())
+    );
+
+    let (_, collision_before, collision_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "bulk/collision.txt")
+        .expect("collision entry");
+    assert_eq!(
+        collision_before.as_deref(),
+        Some(b"A".repeat(64).as_slice()),
+        "the authoritative preimage of the same-size collision"
+    );
+    assert_eq!(collision_after.as_deref(), Some(b"B".repeat(64).as_slice()));
+
+    let (_, deleted_before, deleted_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "deleted.txt")
+        .expect("deleted entry");
+    assert_eq!(deleted_before.as_deref(), Some(b"doomed\n".as_slice()));
+    assert!(deleted_after.is_none());
+
+    assert_eq!(
+        counting.blob_reads.get(),
+        3,
+        "base-blob payload reads track the changeset: one preimage each for \
+         the two same-size modifies and the delete. The 300 unchanged \
+         same-size files cost zero reads (pre-change baseline: 305 — one \
+         per unchanged candidate, two per same-size modify, one for the \
+         delete)"
+    );
+    assert_eq!(
+        counting.identity_calls.get(),
+        1,
+        "all comparison identities derive from one batched computation over \
+         captured bytes"
+    );
+}
+
+#[test]
+fn changed_path_derivation_works_through_a_sha256_source_repository() {
+    // The comparison signal must follow the source repository's actual
+    // object format, never a 40-hex assumption. Base listing, identity
+    // computation, unchanged verdicts, capture, CAS and publication all
+    // run here against a real SHA-256 repository.
+    //
+    // Only the Workspace materialization step is substituted, and only
+    // because `GitMaterializer` cannot yet seed a Workspace from a 64-hex
+    // base (`git init` defaults to SHA-1, so its fetch cannot name the
+    // source commit) — a #32-era limitation outside #75's scope, reported
+    // rather than fixed here. Capture does not need a worker-side Git
+    // repository at all: it reads the settled tree through the confined
+    // boundary.
+    let dir = TempDir::new("sha256-seal");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).expect("source");
+    git(
+        &source,
+        &["init", "--quiet", "--object-format=sha256", "-b", "main"],
+    );
+    std::fs::write(source.join("app.txt"), b"original\n").expect("write");
+    std::fs::write(source.join("same.txt"), b"untouched\n").expect("write");
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "--quiet", "-m", "base"]);
+    let base_oid = git(&source, &["rev-parse", "HEAD"]);
+
+    let control = dir.path().join("control");
+    let workspace_root = dir.path().join("workspaces");
+    let cas_root = dir.path().join("cas");
+    let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
+    ready_coding_task(&store, &["workspace://**"]);
+    ensure_workspace_with(
+        &store,
+        &PlainDirMaterializer,
+        &workspace_root,
+        &source,
+        "ws-req-1",
+    );
+    dispatch(&store);
+
+    let repo = workspace_root.join("workspace-1").join("repo");
+    std::fs::create_dir_all(&repo).expect("workspace tree");
+    std::fs::write(repo.join("app.txt"), b"fixed\n").expect("modify");
+    std::fs::write(repo.join("same.txt"), b"untouched\n").expect("unchanged");
+    std::fs::write(repo.join("added.txt"), b"brand new\n").expect("add");
+
+    let cas = LocalFsCas::open(&cas_root).expect("cas");
+    let sealed = seal(
+        &store,
+        &ConfinedCapture::new(),
+        &GitBaseReader::new(&control).expect("base reader"),
+        &cas,
+        &workspace_root,
+        "seal-sha256",
+    )
+    .expect("seals");
+
+    assert!(sealed.artifact_json.contains(base_oid.trim()));
+    let reconstructed = reconstruct(&store, &cas, sealed.artifact_digest);
+    let names: Vec<&str> = reconstructed
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["added.txt", "app.txt"],
+        "exactly the changed paths; the unchanged same-size path stays out"
+    );
+    let (_, app_before, app_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "app.txt")
+        .expect("app.txt");
+    assert_eq!(app_before.as_deref(), Some(b"original\n".as_slice()));
+    assert_eq!(app_after.as_deref(), Some(b"fixed\n".as_slice()));
+}
+
+/// Materializes nothing but the destination directory, so a test can drive
+/// the full real sealing stack against a Workspace whose seeding strategy
+/// is not the subject under test.
+struct PlainDirMaterializer;
+
+impl pantheon_engine::workspace::RepositoryMaterializer for PlainDirMaterializer {
+    fn resolve_base(
+        &self,
+        source: &Path,
+        requested: &pantheon_core::workspace::RequestedBase,
+    ) -> Result<pantheon_core::workspace::ResolvedBase, pantheon_engine::workspace::MaterializerError>
+    {
+        let revision = format!("{}^{{commit}}", requested.as_str());
+        let resolved = git(source, &["rev-parse", "--verify", "--quiet", &revision]);
+        pantheon_core::workspace::ResolvedBase::parse(resolved.trim()).map_err(|err| {
+            pantheon_engine::workspace::MaterializerError {
+                code: "workspace.base-unresolvable".to_string(),
+                detail: format!("{requested} did not resolve to a commit: {err}"),
+            }
+        })
+    }
+
+    fn materialize(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<pantheon_core::workspace::ResolvedBase, pantheon_engine::workspace::MaterializerError>
+    {
+        std::fs::create_dir_all(target.destination).map_err(|err| {
+            pantheon_engine::workspace::MaterializerError {
+                code: "workspace.materialization-failed".to_string(),
+                detail: format!("could not create the workspace directory: {err}"),
+            }
+        })?;
+        Ok(target.base.clone())
+    }
+
+    fn observe(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<
+        pantheon_core::workspace::Materialization,
+        pantheon_engine::workspace::MaterializerError,
+    > {
+        Ok(if target.destination.exists() {
+            pantheon_core::workspace::Materialization::Present
+        } else {
+            pantheon_core::workspace::Materialization::Absent
+        })
+    }
+
+    fn discard(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<(), pantheon_engine::workspace::MaterializerError> {
+        let _ = std::fs::remove_dir_all(target.destination);
+        Ok(())
+    }
 }

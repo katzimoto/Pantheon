@@ -558,3 +558,188 @@ fn bounded_reads_refuse_growth_shrink_and_ceiling_exactly() {
         Err(ReadFault::OverCeiling)
     ));
 }
+
+// ---- captured-identity substrate (#75) -------------------------------------
+//
+// The changed-path comparison rests on one claim about Git rather than
+// Pantheon code: the object name `git hash-object` computes for raw bytes,
+// in a repository's own object format and without filters or writes, is the
+// same name the repository's trees record for that content. These tests pin
+// exactly that, because if it stopped holding, sealing's unchanged verdicts
+// would be built on sand.
+
+#[test]
+fn captured_payload_names_match_the_base_trees_recorded_identities() {
+    let dir = TempDir::new("identity-consistency");
+    let control = dir.path().join("control");
+    std::fs::create_dir_all(&control).expect("control");
+    let source = source_repository(&dir);
+    let base = ResolvedBase::parse(&git(&source, &["rev-parse", "HEAD"])).expect("base");
+
+    let tree = reader(&control)
+        .base_tree(&source, &base)
+        .expect("the base tree reads");
+
+    // The exact bytes of each recorded entry — regular, executable and
+    // symlink alike — must name to exactly what the tree records.
+    let names = reader(&control)
+        .blob_object_names(&source, &[b"original\n", b"#!/bin/sh\n", b"app.txt"])
+        .expect("names compute");
+    assert_eq!(names.len(), 3, "one name per payload");
+    assert_eq!(names[0], tree.get(b"app.txt".as_slice()).expect("app").oid);
+    assert_eq!(names[1], tree.get(b"run.sh".as_slice()).expect("sh").oid);
+    assert_eq!(
+        names[2],
+        tree.get(b"latest".as_slice()).expect("link").oid,
+        "a symlink's target bytes carry its identity"
+    );
+
+    // And different bytes cannot pass as the same content.
+    let other = reader(&control)
+        .blob_object_names(&source, &[b"different bytes entirely"])
+        .expect("name");
+    assert_ne!(other[0], tree.get(b"app.txt".as_slice()).expect("app").oid);
+}
+
+fn sha256_source_repository(dir: &TempDir) -> PathBuf {
+    let source = dir.path().join("source256");
+    std::fs::create_dir_all(&source).expect("source");
+    git(
+        &source,
+        &["init", "--quiet", "--object-format=sha256", "-b", "main"],
+    );
+    std::fs::write(source.join("app.txt"), b"original\n").expect("write");
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "--quiet", "-m", "base"]);
+    source
+}
+
+#[test]
+fn captured_names_follow_the_repositories_own_object_format() {
+    let dir = TempDir::new("identity-sha256");
+    let control = dir.path().join("control");
+    std::fs::create_dir_all(&control).expect("control");
+    let source = sha256_source_repository(&dir);
+    assert_eq!(
+        git(&source, &["rev-parse", "--show-object-format"]),
+        "sha256",
+        "fixture really is a SHA-256 repository"
+    );
+    let base = ResolvedBase::parse(&git(&source, &["rev-parse", "HEAD"])).expect("base");
+
+    let tree = reader(&control)
+        .base_tree(&source, &base)
+        .expect("the base tree reads");
+    let app = tree.get(b"app.txt".as_slice()).expect("app.txt");
+    assert_eq!(app.oid.len(), 64, "the base names are 64 hex digits");
+
+    let names = reader(&control)
+        .blob_object_names(&source, &[b"original\n"])
+        .expect("names compute");
+    assert_eq!(
+        names[0], app.oid,
+        "the comparison signal works through the repository's actual format"
+    );
+}
+
+#[test]
+fn naming_captured_blobs_writes_nothing_into_the_source() {
+    let dir = TempDir::new("identity-nowrite");
+    let control = dir.path().join("control");
+    std::fs::create_dir_all(&control).expect("control");
+    let source = source_repository(&dir);
+
+    let inventory_before = git(
+        &source,
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+    );
+    let refs_before = git(&source, &["show-ref"]);
+
+    // Novel payloads that exist nowhere in the source's object database.
+    reader(&control)
+        .blob_object_names(
+            &source,
+            &[b"never committed anywhere", b"nor this one either"],
+        )
+        .expect("names compute");
+
+    assert_eq!(
+        git(
+            &source,
+            &["cat-file", "--batch-all-objects", "--batch-check"]
+        ),
+        inventory_before,
+        "no object appeared in the source"
+    );
+    assert_eq!(git(&source, &["show-ref"]), refs_before, "refs untouched");
+}
+
+#[test]
+fn a_source_configured_filter_cannot_influence_captured_identity() {
+    // The identity of captured bytes must be their raw content alone. The
+    // filter here is wired repo-wide (info/attributes matches any path) so
+    // it would apply even to staged scratch paths if filters were in play;
+    // if it ever ran during naming, the computed name would stop matching
+    // the OID the tree already recorded for these very bytes.
+    let dir = TempDir::new("identity-filter");
+    let control = dir.path().join("control");
+    std::fs::create_dir_all(&control).expect("control");
+    let source = source_repository(&dir);
+    let base = ResolvedBase::parse(&git(&source, &["rev-parse", "HEAD"])).expect("base");
+    let recorded = reader(&control)
+        .base_tree(&source, &base)
+        .expect("tree")
+        .get(b"app.txt".as_slice())
+        .expect("app")
+        .oid
+        .clone();
+
+    std::fs::create_dir_all(source.join(".git/info")).expect("info dir");
+    std::fs::write(source.join(".git/info/attributes"), b"* filter=ident\n").expect("attributes");
+    git(&source, &["config", "filter.ident.clean", "sed s/$/FILTH/"]);
+
+    let names = reader(&control)
+        .blob_object_names(&source, &[b"original\n"])
+        .expect("names compute");
+    assert_eq!(
+        names[0], recorded,
+        "attributes and configured filters stay out of the identity"
+    );
+}
+
+#[test]
+fn malformed_identity_output_fails_closed() {
+    use super::capture::{is_canonical_object_name, parse_object_names};
+
+    assert_eq!(
+        parse_object_names(b"0123456789abcdef0123456789abcdef01234567\n"),
+        Some(vec!["0123456789abcdef0123456789abcdef01234567".to_string()])
+    );
+    assert_eq!(
+        parse_object_names(
+            b"0123456789abcdef0123456789abcdef01234567\n\
+              0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        )
+        .map(|names| names.len()),
+        Some(2),
+        "both formats parse"
+    );
+    assert_eq!(
+        parse_object_names(b""),
+        Some(Vec::new()),
+        "an empty answer parses as empty"
+    );
+    // Any non-canonical shape is refused wholesale.
+    assert_eq!(parse_object_names(b"zz\n"), None);
+    assert_eq!(parse_object_names(b"0123\n"), None);
+    assert_eq!(
+        parse_object_names(b"0123456789ABCDEF0123456789abcdef01234567\n"),
+        None,
+        "uppercase is not canonical"
+    );
+    assert_eq!(
+        parse_object_names(b"not even hex\n0123456789abcdef0123456789abcdef01234567\n"),
+        None
+    );
+    assert!(!is_canonical_object_name(""));
+}

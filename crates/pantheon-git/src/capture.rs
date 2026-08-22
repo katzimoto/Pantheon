@@ -539,9 +539,124 @@ impl GitBaseReader {
             ))
         }
     }
+
+    /// Stages each payload as a scratch file and asks Git to name them all
+    /// in one invocation.
+    fn hash_staged_blobs(
+        &self,
+        source: &Path,
+        stage: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        let mut paths = String::new();
+        for (index, bytes) in contents.iter().enumerate() {
+            let staged = stage.join(format!("payload-{index:06}"));
+            std::fs::write(&staged, bytes).map_err(|err| {
+                fault(
+                    code::CAPTURE_IO,
+                    format!("could not stage comparison payload: {err}"),
+                )
+            })?;
+            paths.push_str(&staged.to_string_lossy());
+            paths.push('\n');
+        }
+
+        // The path list is written from a thread so neither pipe can fill
+        // and block the other; a write failure surfaces through Git's own
+        // exit status, which is checked below anyway.
+        let mut child = self
+            .sterile
+            .command()
+            .args([
+                std::ffi::OsStr::new("-C"),
+                source.as_os_str(),
+                std::ffi::OsStr::new("hash-object"),
+                std::ffi::OsStr::new("--stdin-paths"),
+                std::ffi::OsStr::new("--no-filters"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                fault(
+                    code::BASE_UNAVAILABLE,
+                    format!("could not run git while naming captured blobs: {err}"),
+                )
+            })?;
+        let writer = {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| fault(code::BASE_UNAVAILABLE, "git stdin was not piped"))?;
+            std::thread::spawn(move || {
+                use std::io::Write;
+                stdin.write_all(paths.as_bytes())
+            })
+        };
+        let output = child.wait_with_output().map_err(|err| {
+            fault(
+                code::BASE_UNAVAILABLE,
+                format!("could not read object names from git: {err}"),
+            )
+        })?;
+        if writer.join().is_err() {
+            return Err(fault(
+                code::BASE_UNAVAILABLE,
+                "could not feed paths to git hash-object",
+            ));
+        }
+        if !output.status.success() {
+            return Err(fault(
+                code::BASE_UNAVAILABLE,
+                format!(
+                    "git failed while naming captured blobs: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+        parse_object_names(&output.stdout).ok_or_else(|| {
+            fault(
+                code::BASE_UNAVAILABLE,
+                "git hash-object output is not one canonical object name per payload",
+            )
+        })
+    }
 }
 
 impl TrustedBaseReader for GitBaseReader {
+    fn blob_object_names(
+        &self,
+        source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        if contents.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The payloads are staged as files beneath controller-owned scratch
+        // state — paths this process derived, never anything an Agent can
+        // write — so one Git invocation can name all of them. `hash-object`
+        // without `-w` writes no object anywhere, in the source or out of
+        // it; it consults the source repository only for its configured
+        // object format, which is exactly what makes the names comparable
+        // with the base tree's. `--no-filters` pins the identity to raw
+        // bytes alone: no clean filter, CRLF conversion or attribute rule
+        // may influence what a captured payload's name is. The exclusion is
+        // safe because its failure direction is harmless: a filter that
+        // *would* have transformed content can only make an unchanged file
+        // look changed — costing one extra preimage fetch that then
+        // classifies correctly — it can never make a changed file look
+        // unchanged.
+        let stage = self.sterile.scratch_dir("base-compare").map_err(|err| {
+            fault(
+                code::CAPTURE_IO,
+                format!("could not create comparison staging: {err}"),
+            )
+        })?;
+        let result = self.hash_staged_blobs(source, &stage, contents);
+        let _ = std::fs::remove_dir_all(&stage);
+        result
+    }
+
     fn base_tree(
         &self,
         source: &Path,
@@ -639,11 +754,7 @@ impl TrustedBaseReader for GitBaseReader {
     fn blob_bytes(&self, source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
         // Validated before it can reach a command line: it came from our own
         // listing, and refusing non-canonical forms costs nothing.
-        if !matches!(oid.len(), 40 | 64)
-            || !oid
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !is_canonical_object_name(oid) {
             return Err(fault(
                 code::HOSTILE_REPOSITORY,
                 format!("{oid:?} is not a canonical object name"),
@@ -661,6 +772,33 @@ impl TrustedBaseReader for GitBaseReader {
             ],
         )
     }
+}
+
+/// Whether `name` is a canonical Git object name: 40 hex digits for a
+/// SHA-1 repository, 64 for a SHA-256 one. The reader accepts both because
+/// the source repository's object format is its own decision, never an
+/// assumption.
+pub(crate) fn is_canonical_object_name(name: &str) -> bool {
+    matches!(name.len(), 40 | 64)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Parses `git hash-object --stdin-paths` output: one canonical object
+/// name per line, in input order. Any other shape is unusable — a partial
+/// or malformed answer must fail closed rather than let a candidate entry
+/// pass as unchanged.
+pub(crate) fn parse_object_names(output: &[u8]) -> Option<Vec<String>> {
+    let text = std::str::from_utf8(output).ok()?;
+    let mut names = Vec::new();
+    for line in text.lines() {
+        if !is_canonical_object_name(line) {
+            return None;
+        }
+        names.push(line.to_string());
+    }
+    Some(names)
 }
 
 /// Why a bounded payload read refused.
