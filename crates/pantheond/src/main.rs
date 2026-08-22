@@ -31,6 +31,7 @@
 //! ordinary restart would invalidate every in-flight operator retry for no
 //! reason.
 
+mod fake;
 mod options;
 
 use std::process::ExitCode;
@@ -39,6 +40,7 @@ use std::time::Duration;
 
 use pantheon_engine::configuration::{ConfigurationAuthority, ConfigurationStatus, SourceSet};
 use pantheon_engine::operator::{OperatorRuntime, ScheduleOutcome};
+use pantheon_engine::run::{MinRecoveryPolicy, ReconciliationDeps, RunController};
 use pantheon_store::{Command, Store};
 
 use crate::options::{Options, USAGE};
@@ -77,6 +79,7 @@ fn run(options: &Options) -> Result<(), String> {
     let status = publish(options, &store, &authority)?;
     report(&status);
 
+    let runtime_store = Arc::clone(&store);
     let runtime = Arc::new(OperatorRuntime::new(store, authority));
     let router = pantheon_operator_api::router(Arc::clone(&runtime));
 
@@ -86,13 +89,26 @@ fn run(options: &Options) -> Result<(), String> {
         .map_err(|err| format!("could not start the runtime: {err}"))?;
 
     let served = executor.block_on(async {
-        // The scheduler controller is supervised here because this is the
-        // composition root's job: the engine owns the cycle, the daemon
-        // decides when it runs and with which concrete backends. None are
-        // registered in this build, so every cycle honestly ends before
-        // routing with nothing eligible to admit; a later mission supplies
-        // real backends here.
-        let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&runtime)));
+        // Controllers are supervised here because this is the composition
+        // root's job: the engine owns each cycle, the daemon decides when it
+        // runs and with which concrete backends. Without --executor fake no
+        // backend exists, so every scheduling cycle honestly ends before
+        // routing; a later mission supplies real executors.
+        let tick = Duration::from_millis(options.tick_millis);
+        let backend_choice = if options.fake_executor {
+            BackendChoice::Fake
+        } else {
+            BackendChoice::None
+        };
+        let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&runtime), backend_choice, tick));
+        let runs = if options.fake_executor {
+            Some(std::thread::spawn({
+                let store = Arc::clone(&runtime_store);
+                move || run_controller_thread(store, tick)
+            }))
+        } else {
+            None
+        };
         println!(
             "pantheond: operator control on {}",
             options.socket.display()
@@ -101,6 +117,7 @@ fn run(options: &Options) -> Result<(), String> {
             .await
             .map_err(|err| format!("{err}"));
         scheduler.abort();
+        drop(runs); // the run-controller thread exits with the process
         served
     });
 
@@ -114,15 +131,20 @@ fn run(options: &Options) -> Result<(), String> {
 /// Aborting between ticks is safe by construction: a cycle performs no
 /// external effect, so the only thing that can be interrupted is either a
 /// read or one authoritative transaction, which commits or rolls back whole.
-/// The tick period is deliberately coarse — scheduling is not latency-bound,
-/// and each cycle is a full re-derivation from durable state.
-async fn scheduler_loop(runtime: Arc<OperatorRuntime>) {
-    const TICK: Duration = Duration::from_secs(10);
+async fn scheduler_loop(runtime: Arc<OperatorRuntime>, backends: BackendChoice, tick: Duration) {
     loop {
-        tokio::time::sleep(TICK).await;
+        tokio::time::sleep(tick).await;
         let runtime = Arc::clone(&runtime);
-        let outcome =
-            tokio::task::spawn_blocking(move || runtime.service().schedule_once(&[])).await;
+        let outcome = tokio::task::spawn_blocking(move || match backends {
+            BackendChoice::None => runtime.service().schedule_once(&[]),
+            // The fake executor is the only registered backend; without it
+            // routing honestly finds nothing to admit.
+            BackendChoice::Fake => {
+                let fake = crate::fake::FakeExecutor::new();
+                runtime.service().schedule_once(&[fake.port()])
+            }
+        })
+        .await;
         match outcome {
             // Idle and Suppressed are steady states: printing them every tick
             // would be noise, not observability.
@@ -130,6 +152,54 @@ async fn scheduler_loop(runtime: Arc<OperatorRuntime>) {
             Ok(Ok(outcome)) => println!("pantheond: scheduler: {outcome:?}"),
             Ok(Err(err)) => eprintln!("pantheond: scheduler cycle failed: {err}"),
             Err(err) => eprintln!("pantheond: scheduler task failed: {err}"),
+        }
+    }
+}
+
+/// Which concrete backends the composition root registers.
+#[derive(Debug, Clone, Copy)]
+enum BackendChoice {
+    None,
+    Fake,
+}
+
+/// Runs Run Controller reconciliation on its own thread until shutdown.
+///
+/// A dedicated OS thread rather than a spawned task: the controller object
+/// must persist across ticks so bearer memory survives between passes (a
+/// fresh controller per tick would rekey before every launch), and its
+/// transactions belong on blocking threads anyway. Losing the object is what
+/// a crash does, and recovery is the tested restart path.
+fn run_controller_thread(store: Arc<Store>, tick: Duration) {
+    // The minimum deterministic recovery policy and the fake Sandbox gate
+    // are composition facts of this build, not per-tick decisions.
+    let policy = MinRecoveryPolicy::default();
+    let mut controller = RunController::new(
+        &store,
+        pantheon_engine::run::OsRandom,
+        format!("pantheond-{}", std::process::id()),
+    );
+    loop {
+        std::thread::sleep(tick);
+        let fake = crate::fake::FakeExecutor::new();
+        let deps = ReconciliationDeps {
+            launcher: &fake,
+            sandbox: &fake,
+            policy: &policy,
+        };
+        match controller.reconcile_all(&deps) {
+            Ok(results) if results.is_empty() => {}
+            Ok(results) => {
+                for (run_id, result) in results {
+                    match result {
+                        Ok(outcome) => println!("pantheond: run-controller: {run_id}: {outcome:?}"),
+                        Err(err) => {
+                            eprintln!("pantheond: run-controller: {run_id}: failed: {err}")
+                        }
+                    }
+                }
+            }
+            Err(err) => eprintln!("pantheond: run controller inventory failed: {err}"),
         }
     }
 }

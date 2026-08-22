@@ -63,6 +63,7 @@ mod command;
 mod configuration;
 mod context;
 mod error;
+mod execution;
 mod migrations;
 mod operator;
 mod planning;
@@ -87,6 +88,10 @@ pub use context::{
     RunRecord,
 };
 pub use error::StoreError;
+pub use execution::{
+    AgentControlSessionView, AttemptCreated, AttemptCreation, AttemptLineageView, AttemptRecord,
+    ObservationUpdate, RunExecutionView, RunInventoryEntry,
+};
 pub use operator::{Cursor, CursorError, EventRecord, GoalDetail, GoalSnapshot};
 pub use planning::{
     Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,

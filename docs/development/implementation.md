@@ -104,23 +104,58 @@ built from exactly the source snapshot its Run froze; `pantheon-engine` owns
 the `ContextPreparationController`, which reconstructs every frozen source by
 immutable identity (never through an active pointer), digest-verifies it,
 builds the plan deterministically, attaches it exactly once, and reconciles a
-same-plan retry after restart. There is still no Attempt, no Run Controller
-execution lifecycle, no Sandbox, no production executor, no Agent Control, no
-Candidate submission, no evaluation and no acceptance: preparation ends at
-durable readiness evidence for the later lifecycle to compose.
+same-plan retry after restart.
 
-There is still no endpoint surface beyond Goals/dispatch/events, no Attempt,
-no Sandbox and no concrete execution backend: T3 creates durable
-responsibility, not execution. The store's schema is limited to
+On top of that the same crates carry the restart-safe Run/Attempt lineage
+(#31): `pantheon-core` holds the Attempt-lineage vocabulary — normalized
+execution `Observation`s (ABSENT/STARTING/RUNNING/EXITED/UNKNOWN) and the
+monotonic launch-contact states. `pantheon-store` owns the `attempts`,
+`attempt_status` and `agent_control_sessions` families plus the holder-safe
+`run_status.current_attempt_id` pointer (composite FK; `run_status` was
+rebuilt in migration 13 to attach it), and the T4/T4a/T4b transaction set:
+T4 creates one Attempt with a Run-local ordinal, a globally unique LaunchKey
+and an Attempt-scoped session bound to the transaction's RestoreGeneration,
+under a command identity whose request hash deliberately excludes random
+launch material so lost-response retries replay instead of minting lineage;
+T4a rotates only a session's verifier/revision while its Attempt is durably
+NOT_CONTACTED in the current generation under current Run authority; T4b is
+the monotonic contact boundary, bound to the exact current credential
+revision; terminalization requires durable contact; one nonterminal Attempt
+per Run is both a controller check and a partial unique index.
+`pantheon-engine` owns the `RunController` — preparation gates
+(WorkspaceReady against the frozen snapshot's own Workspace, fake-only
+SandboxReadiness behind an explicit port, ContextReady via #30's controller,
+PolicyReady re-deriving the Binding's sandbox identity from the frozen
+execution-profiles component), bearer memory behind an injectable entropy
+port (`OsRandom` reads the kernel CSPRNG at `/dev/urandom`; tests substitute
+deterministic sources), post-contact reconciliation by LaunchKey alone,
+UNKNOWN fencing without replacement or slot release, deliberate
+new-attempt retry under an unchanged Binding/plan through a minimum
+deterministic recovery policy, and the raw-bearer secrecy rule (bearer lives
+only in process-local transient state and the launch package; only SHA-256
+verifiers persist). `pantheond` composes the deterministic fake executor
+behind `--executor fake`: routing descriptor, keyed-idempotent launcher and
+fake Sandbox gate in one object making no production claim (strict container
+backend remains #34, production local executor #35). There is still no
+Candidate submission (#33), no evaluation/acceptance, no cancellation
+surface, no ControlLease rotation, and no startup recovery barrier (#38):
+conclusion records a durable terminal target directly, and restart
+reconciliation is the ordinary controller path over durable inventory.
+
+There is still no endpoint surface beyond Goals/dispatch/events, no
+SandboxInstance table family and no concrete production execution backend:
+T3 creates durable responsibility, and #31's fake backend exercises lineage
+semantics without changing that. The store's schema is limited to
 migration bookkeeping, installation identity, the command ledger, Event
 Journal and journal epoch/sequence state, the configuration
 component/revision/active-pointer families, the Goal, planning, TaskGraph
 and Task families, the `workspaces` family, the scheduler/Run-intent families
 that path requires, the `blobs`/`artifacts`/`artifact_members`/
-`workspace_revisions` families sealing publishes into, and the
+`workspace_revisions` families sealing publishes into, the
 `context_plans`/`run_context_plans` families context preparation publishes
-into; the future conceptual production schema is not implemented ahead of the
-behaviour that needs it.
+into, and the `attempts`/`attempt_status`/`agent_control_sessions` families
+the Attempt lineage publishes into; the future conceptual production schema is
+not implemented ahead of the behaviour that needs it.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite), `pantheon-core`
 depends on `sha2` for the SHA-256 digests identity requires, and

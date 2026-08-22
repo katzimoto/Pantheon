@@ -352,5 +352,46 @@ fn record_command(
     Ok(())
 }
 
+/// Appends an Event for an authoritative mutation that carries no operator
+/// command identity (controller recovery bookkeeping such as T4a rekeys, T4b
+/// contact markers and terminalization).
+///
+/// Same journal, same singleton sequence allocator, same transaction as the
+/// command path; only the `(command_epoch, command_id)` provenance pair is
+/// NULL, which `event_journal`'s all-or-none CHECK permits.
+pub(crate) fn append_internal_event(
+    writer: &Writer<'_>,
+    event_type: &'static str,
+) -> Result<JournalCursor, StoreError> {
+    let cursor = allocate_sequence(writer)?;
+
+    let event_id: String = writer
+        .query_optional("SELECT lower(hex(randomblob(16)))", &[], |row| row.get(0))?
+        .ok_or_else(|| {
+            StoreError::InvariantViolated("could not generate an event id".to_string())
+        })?;
+    let recorded_at: i64 = writer
+        .query_optional("SELECT unixepoch()", &[], |row| row.get(0))?
+        .ok_or_else(|| {
+            StoreError::InvariantViolated("could not read the current time".to_string())
+        })?;
+
+    writer.execute(
+        "INSERT INTO event_journal
+             (event_id, journal_epoch, sequence, event_type, recorded_at,
+              command_epoch, command_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL)",
+        &[
+            Value::from(event_id),
+            Value::from(cursor.epoch.as_str()),
+            Value::Integer(cursor.sequence),
+            Value::from(event_type),
+            Value::Integer(recorded_at),
+        ],
+    )?;
+
+    Ok(cursor)
+}
+
 #[cfg(test)]
 mod tests;

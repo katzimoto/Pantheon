@@ -610,6 +610,76 @@ replace: Self::AgentGuidance => 0,
 scope: -p pantheon-core --test context
 test: composed_sections_are_ordered_by_class_then_authority_then_kind
 
+name: t4b-idempotent-reconcile-removed
+file: crates/pantheon-store/src/execution.rs
+find: if contact_text == LaunchContactState::ContactMayHaveOccurred.as_str() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: execution::tests::the_contact_marker_commits_monotonically_and_binds_the_current_revision
+
+name: terminalization-without-contact-allowed
+file: crates/pantheon-store/src/execution.rs
+find: if contact.as_deref() != Some(LaunchContactState::ContactMayHaveOccurred.as_str()) {
+replace: if false {
+scope: -p pantheon-store --lib
+test: execution::tests::terminalization_requires_durable_contact_and_revokes_the_session
+
+name: contacted-session-rekey-allowed
+file: crates/pantheon-store/src/execution.rs
+find: if contact_text != LaunchContactState::NotContacted.as_str() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: execution::tests::rekey_is_frozen_once_contact_may_have_occurred
+
+name: rekey-generation-fence-removed
+file: crates/pantheon-store/src/execution.rs
+find: if bound_generation != current_generation {
+replace: if false {
+scope: -p pantheon-store --lib
+test: execution::tests::rekey_refuses_an_old_generation_session
+
+name: t4-skips-the-plan-requirement
+file: crates/pantheon-store/src/execution.rs
+find: if attached.is_none() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: execution::tests::attempt_creation_requires_the_attached_context_plan
+
+name: second-live-attempt-accepted
+file: crates/pantheon-store/src/execution.rs
+find: "SELECT attempt_id FROM attempt_status WHERE run_id = ?1 AND terminal = 0",
+replace: "SELECT attempt_id FROM attempt_status WHERE 0 = 1",
+scope: -p pantheon-store --lib
+test: execution::tests::one_nonterminal_attempt_per_run_is_enforced_by_controller_and_database
+
+name: t4-current-pointer-dropped
+file: crates/pantheon-store/src/execution.rs
+find: &[("current_attempt_id", Value::from(creation.attempt_id))],
+replace: &[],
+scope: -p pantheon-store --lib
+test: execution::tests::t4_commits_the_whole_lineage_in_one_transaction
+
+name: precontact-bearer-recovery-skipped
+file: crates/pantheon-engine/src/run.rs
+find: self.ensure_current_bearer(run_id, &lineage)?;
+replace: let _ = &lineage;
+scope: -p pantheon-engine --lib
+test: run::tests::a_crash_after_t4_before_contact_rekeys_the_same_session_and_continues
+
+name: unknown-observation-terminalizes
+file: crates/pantheon-engine/src/run.rs
+find: ObservationUpdate::Observe(Observation::Unknown)
+replace: ObservationUpdate::Terminal(Observation::Exited)
+scope: -p pantheon-engine --lib
+test: run::tests::unknown_fences_repeatedly_without_release_or_replacement
+
+name: policy-gate-accepts-anything
+file: crates/pantheon-engine/src/run.rs
+find: .find(|profile| profile.digest() == identity.sandbox_profile_digest);
+replace: .find(|_profile| true);
+scope: -p pantheon-engine --lib
+test: run::tests::policy_readiness_refuses_a_binding_whose_profile_identity_vanished
+
 name: unchanged-verdict-ignores-the-object-name
 file: crates/pantheon-engine/src/sealing.rs
 find: .is_some_and(|name| name == &before.oid)

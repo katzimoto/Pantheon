@@ -1,0 +1,170 @@
+//! The deterministic fake execution backend.
+//!
+//! **Test/fake infrastructure.** This module exists so the Scheduler can
+//! commit real T3 intents and the Run Controller can exercise the full
+//! restart-safe Attempt lifecycle — LaunchKey, AgentControlSession, the
+//! durable contact boundary and same-lineage reconciliation — without any
+//! production executor behind the ports. It makes no production isolation or
+//! execution-readiness claim whatsoever; the strict container backend is
+//! Issue #34 and the production local executor is Issue #35.
+//!
+//! Factual semantics it *does* provide, because the controller depends on
+//! them:
+//!
+//! - `KEYED_IDEMPOTENT` launch semantics: exactly one logical lineage per
+//!   `LaunchKey`, so repeated `ensureExecution` calls address one execution;
+//! - keyed inspection by LaunchKey alone;
+//! - deterministic state progression (`STARTING -> RUNNING -> EXITED`), one
+//!   step per inspection;
+//! - a Sandbox readiness gate that is factually ready for anything (and can
+//!   be observed refusing nothing — it is a fake).
+//!
+//! The world lives in process memory. A daemon restart therefore loses it,
+//! which is itself honest external-world behavior: the restarted controller
+//! inventories durable nonterminal state, inspects by LaunchKey against the
+//! (now empty) external world, receives proven absence, and reconciles
+//! through the ordinary path.
+
+use std::sync::Arc;
+
+use pantheon_core::attempt::Observation;
+use pantheon_core::execution::{
+    BackendDescriptor, ControllerSafetyFacts, ExecutionOffer, ExecutionRequest, LaunchSemantics,
+};
+use pantheon_engine::routing::{BackendError, ExecutorBackend, ExecutorBackendPort};
+use pantheon_engine::run::{
+    ExecutionLauncher, LaunchPackage, LauncherFailure, SandboxCheck, SandboxReadiness,
+};
+
+/// One logical external execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lineage {
+    Starting,
+    Running,
+    Exited,
+}
+
+/// The fake backend's entire external world.
+#[derive(Debug, Default)]
+struct World {
+    lineages: std::collections::BTreeMap<String, Lineage>,
+}
+
+impl World {
+    fn advance(lin: Lineage) -> Lineage {
+        match lin {
+            Lineage::Starting => Lineage::Running,
+            Lineage::Running => Lineage::Exited,
+            Lineage::Exited => Lineage::Exited,
+        }
+    }
+
+    fn observe(&self, lin: Lineage) -> Observation {
+        match lin {
+            Lineage::Starting => Observation::Starting,
+            Lineage::Running => Observation::Running,
+            Lineage::Exited => Observation::Exited,
+        }
+    }
+}
+
+/// The fake backend: routing descriptor, launcher and Sandbox gate in one
+/// deliberately small object.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FakeExecutor {
+    world: Arc<std::sync::Mutex<World>>,
+}
+
+impl FakeExecutor {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The port the Scheduler routes through.
+    #[must_use]
+    pub(crate) fn port(&self) -> ExecutorBackendPort<'_> {
+        ExecutorBackendPort::new(
+            self,
+            ControllerSafetyFacts {
+                isolation_guarantees: vec!["isolation.control-plane".to_string()],
+                observational_launch_safe: false,
+            },
+        )
+    }
+}
+
+impl ExecutorBackend for FakeExecutor {
+    fn describe(&self) -> BackendDescriptor {
+        BackendDescriptor {
+            backend_id: "fake-local".to_string(),
+            revision: 1,
+            available_for_offers: true,
+            placement: vec![],
+            supported_execution_features: vec!["exec.shell".to_string()],
+            context_capacity_tokens: 32_000,
+            isolation_facts: vec!["isolation.control-plane".to_string()],
+            resources: vec![],
+            launch_semantics: LaunchSemantics::KeyedIdempotent,
+        }
+    }
+
+    fn offer(&self, request: &ExecutionRequest) -> Result<Vec<ExecutionOffer>, BackendError> {
+        Ok(vec![ExecutionOffer {
+            request_digest: request.digest(),
+            backend_id: "fake-local".to_string(),
+            descriptor_revision: 1,
+            descriptor_digest: self.describe().digest(),
+            supported_execution_features: vec!["exec.shell".to_string()],
+            context_capacity_tokens: 32_000,
+            placement: vec![],
+            isolation_facts: vec!["isolation.control-plane".to_string()],
+            resources: vec![],
+            launch_semantics: LaunchSemantics::KeyedIdempotent,
+            offer_reference: format!("fake://{}", request.task_id),
+        }])
+    }
+}
+
+impl ExecutionLauncher for FakeExecutor {
+    fn backend_id(&self) -> &str {
+        "fake-local"
+    }
+
+    fn launch_semantics(&self) -> LaunchSemantics {
+        LaunchSemantics::KeyedIdempotent
+    }
+
+    fn ensure_execution(
+        &self,
+        package: &LaunchPackage<'_>,
+    ) -> Result<Observation, LauncherFailure> {
+        let mut world = self.world.lock().expect("fake world");
+        world
+            .lineages
+            .entry(package.launch_key.to_string())
+            .or_insert(Lineage::Starting);
+        Ok(Observation::Starting)
+    }
+
+    fn inspect_execution(&self, launch_key: &str) -> Result<Observation, LauncherFailure> {
+        let mut world = self.world.lock().expect("fake world");
+        let next = match world.lineages.get(launch_key).copied() {
+            Some(lineage) => World::advance(lineage),
+            // A keyed-idempotent backend can prove absence in its own
+            // namespace; an unknown key means no lineage exists.
+            None => return Ok(Observation::Absent),
+        };
+        world.lineages.insert(launch_key.to_string(), next);
+        Ok(world.observe(next))
+    }
+}
+
+impl SandboxReadiness for FakeExecutor {
+    fn verify_ready(&self, _check: SandboxCheck<'_>) -> Result<(), String> {
+        // The fake Sandbox is always factually ready. It proves nothing
+        // about production isolation, and must never be described as doing
+        // so.
+        Ok(())
+    }
+}

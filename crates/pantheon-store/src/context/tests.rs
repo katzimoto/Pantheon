@@ -557,15 +557,15 @@ fn preparation_leaves_no_attempt_surface_behind() {
 
     world.close_store();
     let conn = rusqlite::Connection::open(db_path).expect("raw connection");
+    // Since #31 these families exist; what preparation must never do is put
+    // anything in them. Context readiness is not launch authority.
     for table in ["attempts", "attempt_status", "agent_control_sessions"] {
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-                rusqlite::params![table],
-                |row| row.get(0),
-            )
+        let rows: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert!(!exists, "{table} must not exist before its behaviour does");
+        assert_eq!(rows, 0, "{table} must hold no Attempt lineage before T4");
     }
     let phase: String = conn
         .query_row(

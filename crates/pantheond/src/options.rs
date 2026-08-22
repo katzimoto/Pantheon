@@ -11,6 +11,16 @@ pub(crate) struct Options {
     pub socket: PathBuf,
     /// The configuration source this installation compiles from.
     pub configuration: PathBuf,
+    /// Run the fake executor: a deterministic test backend that lets the
+    /// Scheduler commit T3 and the Run Controller exercise full Attempt
+    /// lineage without any production executor. Never a production
+    /// isolation or execution claim.
+    pub fake_executor: bool,
+    /// The controller tick period in milliseconds. Diagnostics/testing knob:
+    /// production cadence is the default; shorter ticks let integration
+    /// tests observe multi-pass lifecycles without wall-clock sleeps of
+    /// their own.
+    pub tick_millis: u64,
 }
 
 /// A refusal to start.
@@ -36,6 +46,7 @@ pantheond — the Pantheon daemon
 
 Usage:
   pantheond [--data-dir <path>] [--socket <path>] [--config <path>]
+            [--executor fake] [--tick-millis <ms>]
 
 Options:
   --data-dir <path>  Directory holding the authoritative database.
@@ -44,11 +55,19 @@ Options:
                      Default: <data-dir>/run/pantheond.sock
   --config <path>    Configuration source file.
                      Default: <data-dir>/configuration.json
+  --executor fake    Run the deterministic fake execution backend. Test
+                     infrastructure only: it makes no production isolation
+                     or execution claim.
+  --tick-millis <ms> Controller tick period (default 10000). Diagnostics
+                     and integration testing; not a correctness input.
   -h, --help         Print this message.
 
 pantheond serves Operator Control on a local Unix-domain socket only. There is
 no address or port to configure.
 ";
+
+/// The default controller tick period.
+const DEFAULT_TICK_MILLIS: u64 = 10_000;
 
 impl Options {
     /// Parses command-line arguments over environment defaults.
@@ -67,19 +86,34 @@ impl Options {
         let mut data_dir: Option<PathBuf> = None;
         let mut socket: Option<PathBuf> = None;
         let mut configuration: Option<PathBuf> = None;
+        let mut fake_executor = false;
+        let mut tick_millis: Option<u64> = None;
 
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let mut value = |name: &str| {
                 args.next()
-                    .map(PathBuf::from)
-                    .ok_or_else(|| OptionsError(format!("{name} needs a path")))
+                    .ok_or_else(|| OptionsError(format!("{name} needs a value")))
             };
             match arg.as_str() {
                 "-h" | "--help" => return Ok(None),
-                "--data-dir" => data_dir = Some(value("--data-dir")?),
-                "--socket" => socket = Some(value("--socket")?),
-                "--config" => configuration = Some(value("--config")?),
+                "--data-dir" => data_dir = Some(value("--data-dir")?.into()),
+                "--socket" => socket = Some(value("--socket")?.into()),
+                "--config" => configuration = Some(value("--config")?.into()),
+                "--executor" => match value("--executor")?.as_str() {
+                    "fake" => fake_executor = true,
+                    other => {
+                        return Err(OptionsError(format!(
+                            "unknown executor {other}; only 'fake' exists"
+                        )));
+                    }
+                },
+                "--tick-millis" => {
+                    let raw = value("--tick-millis")?;
+                    tick_millis = Some(raw.parse().map_err(|_| {
+                        OptionsError(format!("--tick-millis expects a number, got {raw}"))
+                    })?);
+                }
                 other => {
                     return Err(OptionsError(format!("unrecognized argument {other}")));
                 }
@@ -92,6 +126,8 @@ impl Options {
         let options = Self {
             socket: socket.unwrap_or_else(|| data_dir.join("run").join("pantheond.sock")),
             configuration: configuration.unwrap_or_else(|| data_dir.join("configuration.json")),
+            fake_executor,
+            tick_millis: tick_millis.unwrap_or(DEFAULT_TICK_MILLIS),
             data_dir,
         };
 

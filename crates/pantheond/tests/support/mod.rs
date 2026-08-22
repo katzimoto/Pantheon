@@ -68,6 +68,11 @@ impl Installation {
     }
 
     /// Starts a daemon against this installation and waits for its socket.
+    pub async fn start(&self) -> Daemon {
+        self.start_with(&[]).await
+    }
+
+    /// Starts a daemon with additional command-line arguments.
     // The child is moved into `Daemon` before this function can fail, and
     // `Daemon` both kills and waits in `Drop`. Clippy cannot see through the
     // struct field, so the lint is opted out of here rather than satisfied by
@@ -76,12 +81,13 @@ impl Installation {
         clippy::zombie_processes,
         reason = "Daemon::drop kills and waits on every path"
     )]
-    pub async fn start(&self) -> Daemon {
+    pub async fn start_with(&self, extra: &[&str]) -> Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_pantheond"))
             .arg("--data-dir")
             .arg(&self.dir)
             .arg("--socket")
             .arg(self.socket())
+            .args(extra)
             // Discarded rather than piped: nothing reads these, and a daemon
             // that filled a pipe nobody drains would block on its own output.
             .stdout(Stdio::null())
