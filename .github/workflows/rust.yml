@@ -54,6 +54,8 @@ jobs:
       # branch); `save-if` additionally avoids writing a full cache entry per
       # PR that nothing else could ever read.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Exactly the command a developer runs locally. Docs checks, crate
       # boundary checks, formatting, Clippy with warnings denied, tests and
@@ -75,6 +77,8 @@ jobs:
       # architecture and the job name, so this restores only macOS arm64
       # artifacts, and saves stay restricted to pushes to main.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `macos-latest` is arm64, so this is a different OS and a different
       # architecture from the Linux job. Building and running the tests is the
