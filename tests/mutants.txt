@@ -679,6 +679,7 @@ find: .find(|profile| profile.digest() == identity.sandbox_profile_digest);
 replace: .find(|_profile| true);
 scope: -p pantheon-engine --lib
 test: run::tests::policy_readiness_refuses_a_binding_whose_profile_identity_vanished
+
 name: unchanged-verdict-ignores-the-object-name
 file: crates/pantheon-engine/src/sealing.rs
 find: .is_some_and(|name| name == &before.oid)
