@@ -35,7 +35,8 @@ use pantheon_core::scheduling::{ContextSourceSnapshot, ExecutionBinding};
 use pantheon_engine::configuration::{ConfigurationAuthority, SourceSet};
 use pantheon_engine::planning::PlanningController;
 use pantheon_engine::sealing::{
-    ChangesetSealer, ContentObjectStore, SealCommand, SealRequest, WorkspaceTreeCapture,
+    ChangesetSealer, ContentObjectStore, ExternalFault, SealCommand, SealRequest,
+    TrustedBaseReader, WorkspaceTreeCapture,
 };
 use pantheon_engine::workspace::{WorkspaceCommand, WorkspaceController, WorkspaceRequest};
 use pantheon_git::{ConfinedCapture, GitBaseReader, GitMaterializer};
@@ -239,7 +240,7 @@ fn ensure_workspace(
 fn sealer<'a>(
     store: &'a Store,
     capture: &'a dyn WorkspaceTreeCapture,
-    base: &'a GitBaseReader,
+    base: &'a dyn TrustedBaseReader,
     cas: &'a LocalFsCas,
     workspace_root: &'a Path,
 ) -> ChangesetSealer<'a> {
@@ -333,7 +334,7 @@ fn dispatch(store: &Store) {
 fn seal(
     store: &Store,
     capture: &dyn WorkspaceTreeCapture,
-    base: &GitBaseReader,
+    base: &dyn TrustedBaseReader,
     cas: &LocalFsCas,
     workspace_root: &Path,
     command_id: &str,
@@ -723,4 +724,157 @@ fn hostile_git_control_state_is_inert_data_and_source_refs_stay_untouched() {
         .find(|(name, _, _)| name == "app.txt")
         .expect("app.txt changed");
     assert_eq!(app_after.as_deref(), Some(b"fixed\n".as_slice()));
+}
+
+// ---- Issue #75: base-blob read accounting ----------------------------------
+
+use std::cell::Cell;
+use std::collections::BTreeMap;
+
+use pantheon_core::workspace::ResolvedBase;
+use pantheon_engine::sealing::BaseObject;
+
+/// Wraps the real sterile base reader and counts what sealing asks of it,
+/// distinguishing base-blob payload reads (the per-file fetch) from the
+/// one-shot tree listing. This is the operation counter the mission's
+/// performance property is stated against.
+struct CountingBase<'a> {
+    inner: &'a GitBaseReader,
+    blob_reads: Cell<usize>,
+}
+
+impl TrustedBaseReader for CountingBase<'_> {
+    fn base_tree(
+        &self,
+        source: &Path,
+        base: &ResolvedBase,
+    ) -> Result<BTreeMap<Vec<u8>, BaseObject>, ExternalFault> {
+        self.inner.base_tree(source, base)
+    }
+
+    fn blob_bytes(&self, source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
+        self.blob_reads.set(self.blob_reads.get() + 1);
+        self.inner.blob_bytes(source, oid)
+    }
+}
+
+/// Deterministic 4096-byte payload, distinct per index: no two bulk files
+/// share content with each other or with anything else in the fixture.
+fn bulk_content(index: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; 4096];
+    let mut state = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for byte in &mut bytes {
+        state = state
+            .wrapping_mul(6364_1362_2384_6793_005)
+            .wrapping_add(1442_6950_4088_8896_3407);
+        *byte = (state >> 33) as u8;
+    }
+    bytes
+}
+
+const BULK_FILES: usize = 300;
+const BULK_BYTES: usize = 4096;
+
+#[test]
+fn base_blob_reads_track_changes_not_the_base_tree() {
+    let dir = TempDir::new("read-accounting");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(source.join("bulk")).expect("source");
+    git(&source, &["init", "--quiet", "-b", "main"]);
+    for index in 0..BULK_FILES {
+        std::fs::write(
+            source.join(format!("bulk/file-{index:03}.bin")),
+            bulk_content(index),
+        )
+        .expect("bulk file");
+    }
+    // Both same-size collision candidates: `collision.txt` (64 bytes) and
+    // `modified.txt` — same size as their preimages, different bytes.
+    std::fs::write(source.join("bulk/collision.txt"), b"A".repeat(64)).expect("collision base");
+    std::fs::write(source.join("modified.txt"), b"before-version").expect("modified base");
+    std::fs::write(source.join("deleted.txt"), b"doomed\n").expect("deleted base");
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "--quiet", "-m", "base"]);
+
+    let control = dir.path().join("control");
+    let workspace_root = dir.path().join("workspaces");
+    let cas_root = dir.path().join("cas");
+    let materializer = GitMaterializer::new(&control).expect("materializer");
+    let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
+    ready_coding_task(&store, &["workspace://**"]);
+    ensure_workspace(&store, &materializer, &workspace_root, &source, "ws-req-1");
+    dispatch(&store);
+
+    // The worker touches almost nothing: every bulk file keeps its exact
+    // bytes; the two same-size rewrites are the only content collisions; one
+    // path is deleted and one added.
+    let repo = workspace_root.join("workspace-1").join("repo");
+    std::fs::write(repo.join("bulk/collision.txt"), b"B".repeat(64)).expect("collision after");
+    std::fs::write(repo.join("modified.txt"), b"after-version!").expect("modified after");
+    std::fs::remove_file(repo.join("deleted.txt")).expect("delete");
+    std::fs::write(repo.join("added.txt"), b"brand new\n").expect("add");
+
+    let cas = LocalFsCas::open(&cas_root).expect("cas");
+    let real_reader = GitBaseReader::new(&control).expect("base reader");
+    let counting = CountingBase {
+        inner: &real_reader,
+        blob_reads: Cell::new(0),
+    };
+    let capture = ConfinedCapture::new();
+
+    let sealed = seal(
+        &store,
+        &capture,
+        &counting,
+        &cas,
+        &workspace_root,
+        "seal-accounting",
+    )
+    .expect("seals");
+
+    // Every unchanged bulk path stays out of the changeset; the four real
+    // changes carry exactly the right operations.
+    let reconstructed = reconstruct(&store, &cas, sealed.artifact_digest);
+    let changed_paths: Vec<&str> = reconstructed
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        changed_paths,
+        vec!["added.txt", "bulk/collision.txt", "deleted.txt", "modified.txt"],
+        "exactly the changed paths, canonically ordered"
+    );
+
+    let (_, modified_before, modified_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "modified.txt")
+        .expect("modified entry");
+    assert_eq!(modified_before.as_deref(), Some(b"before-version".as_slice()));
+    assert_eq!(modified_after.as_deref(), Some(b"after-version!".as_slice()));
+
+    let (_, collision_before, collision_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "bulk/collision.txt")
+        .expect("collision entry");
+    assert_eq!(
+        collision_before.as_deref(),
+        Some(b"A".repeat(64).as_slice()),
+        "the authoritative preimage of the same-size collision"
+    );
+    assert_eq!(collision_after.as_deref(), Some(b"B".repeat(64).as_slice()));
+
+    let (_, deleted_before, deleted_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "deleted.txt")
+        .expect("deleted entry");
+    assert_eq!(deleted_before.as_deref(), Some(b"doomed\n".as_slice()));
+    assert!(deleted_after.is_none());
+
+    assert_eq!(
+        counting.blob_reads.get(),
+        305,
+        "pre-change baseline: each of the 300 unchanged same-size candidates \
+         pays one base-blob read, each same-size modify pays two (compare, \
+         then preimage), and the delete pays one"
+    );
 }
