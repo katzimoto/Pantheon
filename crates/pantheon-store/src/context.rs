@@ -481,7 +481,7 @@ fn apply_attachment(
     })
 }
 
-fn digest(bytes: &[u8], column: &str) -> Result<Digest, StoreError> {
+pub(crate) fn digest(bytes: &[u8], column: &str) -> Result<Digest, StoreError> {
     let array: [u8; 32] = bytes.try_into().map_err(|_| {
         StoreError::InvariantViolated(format!(
             "{column} is {} bytes, not a 32-byte digest",

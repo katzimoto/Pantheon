@@ -248,6 +248,29 @@ pub enum StoreError {
         attached_plan: String,
         proposed_plan: String,
     },
+    /// Attempt creation was refused because the Run is not LaunchReady: it
+    /// does not exist, is not Active, carries no attached ContextPlan, or
+    /// already owns a nonterminal Attempt.
+    ///
+    /// Typed so the controller can distinguish "preparation incomplete" and
+    /// "lineage already exists" from ordinary revision staleness without
+    /// parsing text. Nothing is written.
+    AttemptNotLaunchReady { run_id: String, detail: String },
+    /// The pre-contact credential rekey (T4a) was refused: the Attempt is
+    /// terminal or foreign, launch contact may have occurred (freezing the
+    /// credential forever), the session is not ACTIVE in the current
+    /// RestoreGeneration, or the Attempt is no longer the Run's current one.
+    ///
+    /// Distinct from [`StoreError::RevisionConflict`] because the remedy is
+    /// never "retry with fresh state": after contact may have occurred the
+    /// answer is reconciliation of the existing lineage, not rotation.
+    AgentControlRekeyForbidden { attempt_id: String, detail: String },
+    /// The launch-contact marker (T4b) could not commit because current
+    /// authority no longer backs this launch: the Attempt is not the Run's
+    /// current nonterminal one, the Run is not Active, or the session's
+    /// current credential revision differs from the one the launch package
+    /// was built for.
+    LaunchContactStaleAuthority { attempt_id: String, detail: String },
 }
 
 impl fmt::Display for StoreError {
@@ -416,6 +439,18 @@ impl fmt::Display for StoreError {
                 "run {run_id} already has plan {attached_plan} attached; the different \
                  plan {proposed_plan} cannot replace it"
             ),
+            Self::AttemptNotLaunchReady { run_id, detail } => write!(
+                f,
+                "run {run_id} is not LaunchReady for Attempt creation: {detail}"
+            ),
+            Self::AgentControlRekeyForbidden { attempt_id, detail } => write!(
+                f,
+                "the pre-contact rekey of attempt {attempt_id} is forbidden: {detail}"
+            ),
+            Self::LaunchContactStaleAuthority { attempt_id, detail } => write!(
+                f,
+                "launch contact for attempt {attempt_id} lost current authority: {detail}"
+            ),
         }
     }
 }
@@ -447,6 +482,9 @@ impl std::error::Error for StoreError {
             | Self::RunNotFound { .. }
             | Self::ContextSourceMismatch { .. }
             | Self::RunContextPlanConflict { .. }
+            | Self::AttemptNotLaunchReady { .. }
+            | Self::AgentControlRekeyForbidden { .. }
+            | Self::LaunchContactStaleAuthority { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

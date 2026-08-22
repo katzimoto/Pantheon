@@ -986,7 +986,7 @@ fn canonical_json(value: &pantheon_core::config::canonical::Value) -> String {
     String::from_utf8(value.to_canonical_bytes()).unwrap_or_default()
 }
 
-fn now(writer: &Writer<'_>) -> Result<i64, StoreError> {
+pub(crate) fn now(writer: &Writer<'_>) -> Result<i64, StoreError> {
     writer
         .query_optional("SELECT unixepoch()", &[], |row| row.get::<_, i64>(0))?
         .ok_or_else(|| StoreError::InvariantViolated("could not read the current time".to_string()))

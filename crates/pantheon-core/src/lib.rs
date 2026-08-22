@@ -31,6 +31,7 @@
 //! crate is justified are in `docs/development/implementation.md`.
 
 pub mod artifact;
+pub mod attempt;
 pub mod config;
 pub mod context;
 pub mod execution;

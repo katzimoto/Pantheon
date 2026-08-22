@@ -685,6 +685,134 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
                 REFERENCES context_plans(digest, source_snapshot_digest)
         ) STRICT;",
     },
+    Migration {
+        version: 13,
+        name: "create_attempt_lineage",
+        // The execution-lineage families Issue #31's Run Controller needs,
+        // from the canonical persistence contract's "Attempt and
+        // launch-contact state" and "Agent Control" sections:
+        //
+        // - `attempts` — immutable identity: one ordinal within its Run and
+        //   one globally unique LaunchKey;
+        // - `attempt_status` — mutable lifecycle carrying an immutable copy of
+        //   `run_id`, so the one-nonterminal-Attempt rule can be a partial
+        //   unique index where terminality lives;
+        // - `agent_control_sessions` — the Attempt-scoped worker identity.
+        //   Only the SHA-256 *verifier* of the raw bearer is ever stored;
+        //   bearer material never reaches this database at all.
+        //
+        // `run_status.current_attempt_id` also arrives here. SQLite cannot
+        // attach a foreign key to an existing table without rebuilding it, so
+        // unlike migration 12's additive columns this migration rebuilds
+        // `run_status`: identical columns and constraints plus the new
+        // nullable pointer, constrained through the same holder-safe composite
+        // FK shape the contract specifies — `(current_attempt_id, run_id)`
+        // must name exactly this Run's Attempt. Existing rows are copied in
+        // the same transaction, so the rebuild commits or rolls back whole.
+        sql: "CREATE TABLE attempts (
+            id         TEXT    NOT NULL PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+            run_id     TEXT    NOT NULL REFERENCES runs(id),
+            -- Position of this Attempt within its Run's history, 1-based,
+            -- assigned inside T4/T8. Not unique across Runs.
+            ordinal    INTEGER NOT NULL CHECK (ordinal >= 1),
+            -- The immutable external-launch idempotency key. 64 hex
+            -- characters = 256 bits drawn from the installation's entropy
+            -- source before any external contact.
+            launch_key TEXT    NOT NULL UNIQUE CHECK (length(launch_key) = 64),
+            created_at INTEGER NOT NULL,
+            -- Composite parent key for the holder-safe FKs below.
+            UNIQUE (id, run_id)
+        ) STRICT;
+
+        CREATE TABLE attempt_status (
+            attempt_id               TEXT    NOT NULL PRIMARY KEY,
+            -- Immutable copy of attempts.run_id, constrained to agree by the
+            -- composite FK: Attempt holder identity cannot drift.
+            run_id                   TEXT    NOT NULL,
+            observed_execution       TEXT    NOT NULL CHECK (observed_execution IN (
+                                         'ABSENT', 'STARTING', 'RUNNING',
+                                         'EXITED', 'UNKNOWN')),
+            terminal                 INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+            revision                 INTEGER NOT NULL CHECK (revision > 0),
+            launch_contact_state     TEXT    NOT NULL CHECK (launch_contact_state IN (
+                                         'NOT_CONTACTED', 'CONTACT_MAY_HAVE_OCCURRED')),
+            launch_contact_initiated_at INTEGER,
+            -- Provenance of the controller incarnation that crossed the
+            -- boundary, recorded with the state it belongs to.
+            launch_contact_epoch     TEXT,
+            started_at               INTEGER,
+            finished_at              INTEGER,
+            updated_at               INTEGER NOT NULL,
+            CHECK ((launch_contact_state = 'NOT_CONTACTED')
+                   = (launch_contact_initiated_at IS NULL)
+                   AND (launch_contact_state = 'NOT_CONTACTED')
+                   = (launch_contact_epoch IS NULL)),
+            CHECK (terminal != 0 OR finished_at IS NULL),
+            FOREIGN KEY (attempt_id, run_id) REFERENCES attempts(id, run_id)
+        ) STRICT;
+
+        -- V1 permits at most one nonterminal Attempt per Run. Enforced here,
+        -- on the status table where terminality lives, not only by the T4/T8
+        -- transaction that re-reads it.
+        CREATE UNIQUE INDEX one_nonterminal_attempt_per_run
+            ON attempt_status (run_id) WHERE terminal = 0;
+
+        CREATE TABLE agent_control_sessions (
+            id                  TEXT    NOT NULL PRIMARY KEY
+                                        CHECK (length(id) BETWEEN 1 AND 128),
+            attempt_id          TEXT    NOT NULL UNIQUE REFERENCES attempts(id),
+            -- Immutable authority fencing: the RestoreGeneration this session
+            -- was created under, copied from system_state inside T4/T8.
+            restore_generation  TEXT    NOT NULL CHECK (length(restore_generation) = 32),
+            credential_revision INTEGER NOT NULL CHECK (credential_revision >= 1),
+            -- One-way verifier of the raw bearer; the bearer itself is never
+            -- persisted anywhere.
+            credential_hash     BLOB    NOT NULL CHECK (length(credential_hash) = 32),
+            credential_rekeyed_at INTEGER,
+            state               TEXT    NOT NULL CHECK (state IN ('ACTIVE', 'REVOKED')),
+            created_at          INTEGER NOT NULL,
+            revoked_at          INTEGER,
+            revocation_reason   TEXT,
+            CHECK ((state = 'ACTIVE') = (revoked_at IS NULL))
+        ) STRICT;
+
+        CREATE TABLE run_status_new (
+            run_id             TEXT    NOT NULL PRIMARY KEY,
+            task_id            TEXT    NOT NULL,
+            phase              TEXT    NOT NULL CHECK (phase IN (
+                'Active', 'Finalizing', 'Completed', 'Failed',
+                'Cancelled', 'Yielded')),
+            terminal_target    TEXT,
+            revision           INTEGER NOT NULL CHECK (revision > 0),
+            active_slot        TEXT,
+            current_attempt_id TEXT,
+            updated_at         INTEGER NOT NULL,
+            FOREIGN KEY (run_id, task_id) REFERENCES runs(id, task_id),
+            -- Holder safety for the current-Attempt pointer: it may only name
+            -- an Attempt that exists and belongs to exactly this Run.
+            FOREIGN KEY (current_attempt_id, run_id) REFERENCES attempts(id, run_id),
+            CHECK (
+                phase != 'Finalizing' OR terminal_target IS NOT NULL
+            ),
+            CHECK (
+                (phase IN ('Active', 'Finalizing') AND active_slot = 'global')
+                OR (phase NOT IN ('Active', 'Finalizing') AND active_slot IS NULL)
+            )
+        ) STRICT;
+
+        INSERT INTO run_status_new
+            SELECT run_id, task_id, phase, terminal_target, revision,
+                   active_slot, NULL, updated_at
+            FROM run_status;
+        DROP TABLE run_status;
+        ALTER TABLE run_status_new RENAME TO run_status;
+
+        CREATE UNIQUE INDEX one_nonterminal_run_per_task
+            ON run_status (task_id) WHERE phase IN ('Active', 'Finalizing');
+
+        CREATE UNIQUE INDEX one_active_execution_slot
+            ON run_status (active_slot) WHERE active_slot IS NOT NULL;",
+    },
 ];
 
 /// Runs the production migration set against `conn`.

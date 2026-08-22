@@ -36,8 +36,11 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         tables,
         vec![
             "active_configuration".to_string(),
+            "agent_control_sessions".to_string(),
             "artifact_members".to_string(),
             "artifacts".to_string(),
+            "attempt_status".to_string(),
+            "attempts".to_string(),
             "blobs".to_string(),
             "commands".to_string(),
             "configuration_components".to_string(),
@@ -305,6 +308,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         columns(&dir.db_path(), "run_status"),
         [
             "active_slot",
+            "current_attempt_id",
             "phase",
             "revision",
             "run_id",
@@ -312,7 +316,45 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "terminal_target",
             "updated_at"
         ],
-        "no Attempt, lease or Candidate column exists before its behaviour does"
+        "Run lifecycle plus the holder-safe current-Attempt pointer, and nothing else"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "attempts"),
+        ["created_at", "id", "launch_key", "ordinal", "run_id"],
+        "immutable Attempt identity: one ordinal per Run, one global LaunchKey"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "attempt_status"),
+        [
+            "attempt_id",
+            "finished_at",
+            "launch_contact_epoch",
+            "launch_contact_initiated_at",
+            "launch_contact_state",
+            "observed_execution",
+            "revision",
+            "run_id",
+            "started_at",
+            "terminal",
+            "updated_at"
+        ],
+        "mutable Attempt status carries the durable contact boundary; no bearer column exists"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "agent_control_sessions"),
+        [
+            "attempt_id",
+            "created_at",
+            "credential_hash",
+            "credential_rekeyed_at",
+            "credential_revision",
+            "id",
+            "restore_generation",
+            "revocation_reason",
+            "revoked_at",
+            "state"
+        ],
+        "only the one-way verifier is persisted; the raw bearer has no column at all"
     );
 
     assert_eq!(
@@ -486,5 +528,129 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             ),
         ],
         "run_context_plans must prove Run→frozen snapshot and plan→same snapshot"
+    );
+
+    // The one-nonterminal-Attempt rule is a real partial unique index on the
+    // status table where terminality lives, exactly as the persistence
+    // contract specifies — not controller discipline.
+    let one_attempt: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'one_nonterminal_attempt_per_run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        one_attempt.contains("UNIQUE") && one_attempt.contains("WHERE terminal = 0"),
+        "one nonterminal Attempt per Run must stay a partial unique index: {one_attempt}"
+    );
+
+    // The LaunchKey is globally unique across every Run and Attempt.
+    // Declared inline as UNIQUE, so it is an auto-index; the guard pins it
+    // through pragma introspection rather than a mutable internal name.
+    let mut stmt = conn
+        .prepare("SELECT name, \"unique\", origin FROM pragma_index_list('attempts')")
+        .unwrap();
+    let mut attempt_indexes: Vec<(String, bool)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? == 1))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    attempt_indexes.sort();
+    let launch_key_unique = attempt_indexes.iter().any(|(name, unique)| {
+        *unique && {
+            let mut stmt = conn
+                .prepare(&format!("SELECT name FROM pragma_index_info('{name}')"))
+                .unwrap();
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            columns == ["launch_key"]
+        }
+    });
+    assert!(
+        launch_key_unique,
+        "the LaunchKey must stay globally unique via its own unique index"
+    );
+
+    // The Attempt families' holder-safe foreign keys, as the contract
+    // specifies them: attempt_status cannot drift off its immutable Attempt,
+    // the session cannot outlive-or-migrate its Attempt, and the Run's
+    // current-Attempt pointer can only name an Attempt of that same Run.
+    let attempt_fks = |table: &str| -> Vec<(String, String, Option<String>)> {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list('{table}')"
+            ))
+            .unwrap();
+        let mut fks: Vec<(String, String, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        fks.sort();
+        fks
+    };
+    assert_eq!(
+        attempt_fks("attempt_status"),
+        vec![
+            (
+                "attempt_id".to_string(),
+                "attempts".to_string(),
+                Some("id".to_string())
+            ),
+            (
+                "run_id".to_string(),
+                "attempts".to_string(),
+                Some("run_id".to_string())
+            ),
+        ],
+        "attempt_status holder identity must be composite-constrained to its own Attempt"
+    );
+    assert_eq!(
+        attempt_fks("agent_control_sessions"),
+        vec![(
+            "attempt_id".to_string(),
+            "attempts".to_string(),
+            Some("id".to_string())
+        )],
+        "each AgentControlSession belongs to exactly one Attempt"
+    );
+    assert_eq!(
+        attempt_fks("run_status"),
+        vec![
+            (
+                "current_attempt_id".to_string(),
+                "attempts".to_string(),
+                Some("id".to_string())
+            ),
+            (
+                "run_id".to_string(),
+                "attempts".to_string(),
+                Some("run_id".to_string())
+            ),
+            (
+                "run_id".to_string(),
+                "runs".to_string(),
+                Some("id".to_string())
+            ),
+            (
+                "task_id".to_string(),
+                "runs".to_string(),
+                Some("task_id".to_string())
+            ),
+        ],
+        "run_status.current_attempt_id must be holder-safe: this Run's Attempt only"
     );
 }
