@@ -49,6 +49,12 @@ use crate::transaction::{Revision, Value, Writer};
 
 const REQUEST_TABLE: &str = "agent_requests";
 
+/// The raw `(hash, state, result_ref, problem_code)` projection of one
+/// request-ledger row before it is interpreted.
+type RequestRowRaw = Option<(Vec<u8>, String, Option<String>, Option<String>)>;
+/// The raw run-status projection T6 reads.
+type RunStatusRow = Option<(String, String, Option<String>, i64, Option<String>)>;
+
 /// The two consequential worker operations this schema knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentOperation {
@@ -279,7 +285,107 @@ fn authenticate_agent_session(
     }
 }
 
+/// The stable identity facts a submission payload is built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionContext {
+    pub run_id: String,
+    pub task_id: String,
+}
+
 impl Store {
+    /// Authenticated identity context for building a submission payload.
+    ///
+    /// Unlike [`Self::describe_agent_session`] this read gates only on
+    /// authentication, RestoreGeneration currency and Attempt existence —
+    /// deliberately NOT on Run/Task lifecycle phases. An exact replay of a
+    /// committed submission must stay constructible after the original commit
+    /// moved the lifecycle; whether the request may *act* remains T6's
+    /// decision alone, and every fact read here is re-proven there.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::AgentControlUnauthorized`] on any failed fence;
+    /// [`StoreError::SubmissionStaleAuthority`] when the Attempt has no
+    /// lineage.
+    pub fn agent_submission_context(
+        &self,
+        credential: AgentCredential<'_>,
+    ) -> Result<SubmissionContext, StoreError> {
+        self.read_snapshot(|conn| {
+            let facts: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT state,
+                            (restore_generation
+                             = (SELECT restore_generation FROM system_state WHERE id = 1))
+                     FROM agent_control_sessions WHERE attempt_id = ?1",
+                    rusqlite::params![credential.attempt_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map(Some)
+                .or_else(|err| match err {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(StoreError::Sqlite(other)),
+                })?;
+            let Some((state, generation_current)) = facts else {
+                return Err(StoreError::AgentControlUnauthorized {
+                    attempt_id: credential.attempt_id.to_string(),
+                    reason: "no AgentControlSession exists for the Attempt",
+                });
+            };
+            if generation_current == 0 {
+                return Err(StoreError::AgentControlUnauthorized {
+                    attempt_id: credential.attempt_id.to_string(),
+                    reason: "the session belongs to an older RestoreGeneration",
+                });
+            }
+            if state != "ACTIVE" {
+                return Err(StoreError::AgentControlUnauthorized {
+                    attempt_id: credential.attempt_id.to_string(),
+                    reason: "the session is not ACTIVE",
+                });
+            }
+            let verified: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM agent_control_sessions
+                     WHERE attempt_id = ?1 AND credential_hash = ?2",
+                    rusqlite::params![credential.attempt_id, credential.verifier.as_slice()],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|err| match err {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(StoreError::Sqlite(other)),
+                })?;
+            if verified.is_none() {
+                return Err(StoreError::AgentControlUnauthorized {
+                    attempt_id: credential.attempt_id.to_string(),
+                    reason: "the presented bearer does not match the session verifier",
+                });
+            }
+
+            let lineage: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT rs.run_id, rs.task_id FROM attempts a
+                     JOIN run_status rs ON rs.run_id = a.run_id
+                     WHERE a.id = ?1",
+                    rusqlite::params![credential.attempt_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map(Some)
+                .or_else(|err| match err {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(StoreError::Sqlite(other)),
+                })?;
+            let Some((run_id, task_id)) = lineage else {
+                return Err(StoreError::SubmissionStaleAuthority {
+                    attempt_id: credential.attempt_id.to_string(),
+                    detail: "the Attempt has no Run".to_string(),
+                });
+            };
+            Ok(SubmissionContext { run_id, task_id })
+        })
+    }
+
     /// Describes the execution lineage behind an authenticated session.
     ///
     /// Read-only, so it performs no request-ledger work and creates nothing.
@@ -438,13 +544,12 @@ impl Store {
     ) -> Result<AgentRequestOpened, StoreError> {
         self.write(|writer| {
             authenticate_agent_session(writer, &credential)?;
-            let existing_raw: Option<(Vec<u8>, String, Option<String>, Option<String>)> = writer
-                .query_optional(
-                    "SELECT request_hash, state, result_ref, problem_code
+            let existing_raw: RequestRowRaw = writer.query_optional(
+                "SELECT request_hash, state, result_ref, problem_code
                      FROM agent_requests WHERE attempt_id = ?1 AND request_id = ?2",
-                    &[Value::from(credential.attempt_id), Value::from(request_id)],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )?;
+                &[Value::from(credential.attempt_id), Value::from(request_id)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
             let existing = match existing_raw {
                 Some((hash, state, result_ref, problem_code)) => {
                     Some((hash, request_state_from(state, result_ref, problem_code)?))
@@ -597,16 +702,15 @@ fn apply_candidate_submission(
     authenticate_agent_session(writer, &submission.credential)?;
 
     // ---- Request idempotency, after the fence. ----
-    let existing_raw: Option<(Vec<u8>, String, Option<String>, Option<String>)> = writer
-        .query_optional(
-            "SELECT request_hash, state, result_ref, problem_code
+    let existing_raw: RequestRowRaw = writer.query_optional(
+        "SELECT request_hash, state, result_ref, problem_code
              FROM agent_requests WHERE attempt_id = ?1 AND request_id = ?2",
-            &[
-                Value::from(submission.credential.attempt_id),
-                Value::from(submission.request_id),
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+        &[
+            Value::from(submission.credential.attempt_id),
+            Value::from(submission.request_id),
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
     let existing = match existing_raw {
         Some((hash, state, result_ref, problem_code)) => {
             Some((hash, request_state_from(state, result_ref, problem_code)?))
@@ -670,21 +774,20 @@ fn apply_candidate_submission(
         }
     };
 
-    let run: Option<(String, String, Option<String>, i64, Option<String>)> = writer
-        .query_optional(
-            "SELECT task_id, phase, active_slot, revision, current_attempt_id
+    let run: RunStatusRow = writer.query_optional(
+        "SELECT task_id, phase, active_slot, revision, current_attempt_id
          FROM run_status WHERE run_id = ?1",
-            &[Value::from(run_id.as_str())],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
+        &[Value::from(run_id.as_str())],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
     let Some((task_id, run_phase, active_slot, run_revision, current_attempt)) = run else {
         return writer.fail(StoreError::SubmissionStaleAuthority {
             attempt_id: submission.credential.attempt_id.to_string(),

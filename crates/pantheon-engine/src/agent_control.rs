@@ -307,12 +307,17 @@ impl<'a> AgentControlGateway<'a> {
         credential: &WorkerCredential<'_>,
         request: &SubmitResultRequest<'_>,
     ) -> Result<SubmittedCandidate, AgentControlError> {
-        let description = self.describe(credential)?;
-        let candidate = CandidateResult::new(
-            description.task_id.clone(),
-            description.run_id.clone(),
-            request.outputs.iter().cloned(),
-        )?;
+        // Identity, not currency: the payload must bind the same Task and Run
+        // the authenticated lineage derives, but a committed replay must stay
+        // constructible after the original commit moved the lifecycle. T6
+        // alone decides whether this request may act.
+        let verifier = credential.verifier();
+        let context = self
+            .store
+            .agent_submission_context(store_view(credential, &verifier))?;
+        let candidate = CandidateResult::new(context.task_id.clone(), context.run_id.clone(), {
+            request.outputs.iter().cloned()
+        })?;
 
         let mut pairs: Vec<(String, String)> = Vec::with_capacity(request.outputs.len() + 2);
         pairs.push(("attempt".into(), credential.attempt_id.to_string()));
@@ -391,7 +396,7 @@ impl<'a> AgentControlGateway<'a> {
 /// The canonical request hash: SHA-256 over the normalized operation and its
 /// semantic payload. Never over the bearer or any secret-derived material —
 /// the credential participates in authentication, not in request identity.
-fn canonical_request_hash(
+pub(crate) fn canonical_request_hash(
     operation: &str,
     attempt_id: &str,
     request_id: &str,
@@ -433,7 +438,11 @@ fn canonical_request_hash_pairs(
 /// sealing sub-operations: server-generated Attempt id plus a digest of the
 /// request id. Caller text never enters another authority namespace raw, and
 /// the derivation is stable across restarts so publication replays converge.
-fn internal_command_id(attempt_id: &str, request_id: &str, request_hash: &[u8; 32]) -> String {
+pub(crate) fn internal_command_id(
+    attempt_id: &str,
+    request_id: &str,
+    request_hash: &[u8; 32],
+) -> String {
     let _ = request_id; // covered by the hash below
     let short = Digest::of(request_hash).to_hex();
     format!("acs:{attempt_id}:{}", &short[..16])
@@ -480,3 +489,6 @@ fn problem_code_of(error: &AgentControlError) -> &'static str {
         AgentControlError::RequestRefused { .. } => "already-refused",
     }
 }
+
+#[cfg(test)]
+mod tests;

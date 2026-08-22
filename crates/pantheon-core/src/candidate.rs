@@ -155,7 +155,7 @@ impl CandidateResult {
                     reason: "the slot name is empty",
                 });
             }
-            if output.slot.as_bytes().len() > MAX_OUTPUT_SLOT_BYTES {
+            if output.slot.len() > MAX_OUTPUT_SLOT_BYTES {
                 return Err(CandidateError::InvalidOutputSlot {
                     slot: output.slot.clone(),
                     reason: "the slot name exceeds the bounded length",

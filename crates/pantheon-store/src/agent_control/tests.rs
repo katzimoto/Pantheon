@@ -508,7 +508,7 @@ fn a_revoked_session_fails_closed_everywhere() {
         .expect("view")
         .unwrap();
     let lineage = status.attempt.expect("live lineage");
-    world
+    let _advanced = world
         .store()
         .record_execution_observation(
             &lineage.attempt.id,
@@ -908,7 +908,7 @@ fn a_terminal_attempt_cannot_submit_and_late_requests_cannot_act() {
         .expect("view")
         .unwrap();
     let lineage = status.attempt.expect("live lineage");
-    world
+    let _advanced = world
         .store()
         .record_execution_observation(
             &lineage.attempt.id,
@@ -1176,7 +1176,7 @@ fn incomplete_artifact_refuses() {
         "{{\"entries\":[{{\"after\":{{\"blob\":\"{}\",\"state\":\"present\"}},\
          \"operation\":\"add\",\"path\":\"src/main.rs\"}}],\
          \"schemaVersion\":1,\"variant\":\"1\"}}",
-        Digest::of(b"payload").to_string()
+        Digest::of(b"payload")
     );
     let conn = Connection::open(&world.db_path).expect("raw conn");
     conn.execute(
@@ -1224,7 +1224,7 @@ fn complete_refuses_after_midflight_revocation_and_leaves_the_row_inert() {
         .expect("view")
         .unwrap();
     let lineage = status.attempt.expect("live lineage");
-    world
+    let _advanced = world
         .store()
         .record_execution_observation(
             &lineage.attempt.id,
