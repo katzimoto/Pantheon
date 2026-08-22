@@ -357,6 +357,7 @@ fn seal(
             request_hash: &[6u8; 32],
         },
         &SealRequest {
+            producer_attempt_id: None,
             task_id: "task-1",
             output_slot: "changeset",
             authority: SealAuthority {

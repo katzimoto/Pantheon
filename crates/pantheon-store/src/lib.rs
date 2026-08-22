@@ -58,6 +58,7 @@
 //! pruning are later missions' scope and are not implemented here. See
 //! `docs/development/implementation.md`.
 
+mod agent_control;
 mod artifacts;
 mod command;
 mod configuration;
@@ -80,7 +81,12 @@ mod workspace;
 #[cfg(test)]
 mod test_support;
 
-pub use artifacts::{ArtifactRecord, SealOutcome, SealedChangeset};
+pub use agent_control::{
+    AgentCredential, AgentOperation, AgentRequestOpened, AgentRequestState,
+    AgentSessionDescription, CandidateCommitted, CandidateSubmission, DeclaredOutput,
+    SubmissionOutcome,
+};
+pub use artifacts::{ArtifactRecord, ProducerProvenance, SealOutcome, SealedChangeset};
 pub use command::{Command, Committed, JournalCursor};
 pub use configuration::{ActiveConfiguration, ConfigurationPointer};
 pub use context::{

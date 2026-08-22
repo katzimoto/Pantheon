@@ -271,6 +271,62 @@ pub enum StoreError {
     /// current credential revision differs from the one the launch package
     /// was built for.
     LaunchContactStaleAuthority { attempt_id: String, detail: String },
+    /// An Agent Control request failed its authentication or authority
+    /// fences: no AgentControlSession exists for the presented Attempt, the
+    /// presented bearer does not match the session's current verifier, the
+    /// session is not ACTIVE, or the session belongs to an older
+    /// RestoreGeneration.
+    ///
+    /// Fails closed before any request-idempotency lookup or semantic
+    /// mutation; nothing is written. The reason is a coarse class, never a
+    /// verifier fragment.
+    AgentControlUnauthorized {
+        attempt_id: String,
+        reason: &'static str,
+    },
+    /// The same `(attempt, request)` idempotency identity reached the store
+    /// again with a different canonical request hash.
+    ///
+    /// A request ID names exactly one worker intent for its Attempt. Reusing
+    /// it for different semantics is caller misuse, so it fails closed
+    /// without touching the stored identity — the same rule the operator
+    /// command ledger enforces.
+    AgentRequestConflict {
+        attempt_id: String,
+        request_id: String,
+    },
+    /// A second, different Candidate was submitted for a Run that already
+    /// carries one.
+    ///
+    /// One immutable Candidate per Run is both controller logic and a real
+    /// unique constraint on `candidates(run_id)`; this variant is the typed
+    /// form of that refusal.
+    CandidateExists {
+        run_id: String,
+        candidate_digest: String,
+    },
+    /// Candidate submission named an output mapping that cannot satisfy the
+    /// Task's immutable specification: a required slot omitted, an undeclared
+    /// slot submitted, or a referenced Artifact absent, incomplete, or of the
+    /// wrong kind for its slot.
+    CandidateInvalid { detail: String },
+    /// Candidate submission referenced an Artifact that exists as content but
+    /// has no ProductionRecord binding it to this Run and this exact output
+    /// slot.
+    ///
+    /// Content reuse across Runs is normal and recorded as distinct
+    /// provenance; it is never proof of current ownership. This variant is
+    /// the typed form of that boundary.
+    CandidateProvenanceInvalid { detail: String },
+    /// A Candidate submission arrived after the lifecycle moved underneath
+    /// the authenticated lineage: the Attempt is absent or terminal, the Run
+    /// is no longer Active with this Attempt current, the Task left Active,
+    /// the responsible-Run pointer moved, or the Goal fenced the work.
+    ///
+    /// Distinct from [`StoreError::RevisionConflict`] because no revision the
+    /// caller could have observed differently would help — authority itself
+    /// is gone. Nothing is written.
+    SubmissionStaleAuthority { attempt_id: String, detail: String },
 }
 
 impl fmt::Display for StoreError {
@@ -451,6 +507,37 @@ impl fmt::Display for StoreError {
                 f,
                 "launch contact for attempt {attempt_id} lost current authority: {detail}"
             ),
+            Self::AgentControlUnauthorized { attempt_id, reason } => write!(
+                f,
+                "agent control request for attempt {attempt_id} failed closed: {reason}"
+            ),
+            Self::AgentRequestConflict {
+                attempt_id,
+                request_id,
+            } => write!(
+                f,
+                "agent request {request_id} of attempt {attempt_id} was already used \
+                 with a different canonical request hash"
+            ),
+            Self::CandidateExists {
+                run_id,
+                candidate_digest,
+            } => write!(
+                f,
+                "run {run_id} already carries candidate {candidate_digest}; a Run \
+                 submits at most one Candidate"
+            ),
+            Self::CandidateInvalid { detail } => {
+                write!(f, "candidate submission is invalid: {detail}")
+            }
+            Self::CandidateProvenanceInvalid { detail } => write!(
+                f,
+                "candidate submission lacks current-lineage production provenance: {detail}"
+            ),
+            Self::SubmissionStaleAuthority { attempt_id, detail } => write!(
+                f,
+                "candidate submission for attempt {attempt_id} lost current authority: {detail}"
+            ),
         }
     }
 }
@@ -485,6 +572,12 @@ impl std::error::Error for StoreError {
             | Self::AttemptNotLaunchReady { .. }
             | Self::AgentControlRekeyForbidden { .. }
             | Self::LaunchContactStaleAuthority { .. }
+            | Self::AgentControlUnauthorized { .. }
+            | Self::AgentRequestConflict { .. }
+            | Self::CandidateExists { .. }
+            | Self::CandidateInvalid { .. }
+            | Self::CandidateProvenanceInvalid { .. }
+            | Self::SubmissionStaleAuthority { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

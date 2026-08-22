@@ -813,6 +813,158 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX one_active_execution_slot
             ON run_status (active_slot) WHERE active_slot IS NOT NULL;",
     },
+    Migration {
+        version: 14,
+        name: "create_candidate_submission",
+        // The families Issue #33's Agent Control submission path needs, from
+        // the canonical persistence contract's ARTIFACTS table family
+        // ("production_records", "candidates", "candidate_outputs") and its
+        // SCHEDULING / EXECUTION family ("agent_requests"), plus the
+        // `run_status.candidate_digest` fact the "Run status" section makes
+        // load-bearing (`Run Completed => candidate_digest not null`).
+        //
+        // Content identity stays separate from production provenance
+        // throughout, per the Artifact model: producing the same Artifact
+        // twice yields ONE content row and MULTIPLE ProductionRecords — one
+        // per (producing Run, output slot). The Candidate is keyed by the
+        // digest of its canonical semantic document and constrained to at
+        // most one per Run; its outputs reach Artifacts only *through* the
+        // producing Run's ProductionRecord for that exact slot, so content
+        // reuse across Runs can never masquerade as this Run's own work.
+        //
+        // `agent_requests` is the worker-facing idempotency/authority ledger.
+        // Its identity is `(attempt_id, request_id)`; RestoreGeneration is
+        // deliberately absent because a stale-generation session fails before
+        // request lookup/creation ever runs, and credential revision is
+        // deliberately absent because a successful worker request can occur
+        // only after launch contact froze the session credential.
+        //
+        // As in migration 13, `run_status` gains a column through a rebuild:
+        // SQLite cannot attach either a column-with-CHECK semantics change or
+        // a new table-level CHECK to an existing table. Existing rows are
+        // copied unchanged (their `candidate_digest` is NULL: nothing could
+        // legally complete a Run before this schema existed); the rebuild
+        // commits or rolls back whole.
+        sql: "CREATE TABLE agent_requests (
+            attempt_id   TEXT    NOT NULL CHECK (length(attempt_id) BETWEEN 1 AND 128),
+            request_id   TEXT    NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
+            -- One-way digest of the normalized operation and its semantic
+            -- payload. Raw bearer material is never persisted anywhere and
+            -- secret-derived material never enters this hash.
+            request_hash BLOB    NOT NULL CHECK (length(request_hash) = 32),
+            operation    TEXT    NOT NULL CHECK (operation IN
+                                     ('artifact.seal', 'task.submit_result')),
+            state        TEXT    NOT NULL CHECK (state IN
+                                     ('STARTED', 'SUCCEEDED', 'FAILED')),
+            result_ref   TEXT    CHECK (result_ref IS NULL
+                                     OR length(result_ref) BETWEEN 1 AND 128),
+            problem_code TEXT    CHECK (problem_code IS NULL
+                                     OR length(problem_code) BETWEEN 1 AND 64),
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL,
+            PRIMARY KEY (attempt_id, request_id),
+            FOREIGN KEY (attempt_id) REFERENCES attempts(id),
+            CHECK ((state = 'SUCCEEDED') = (result_ref IS NOT NULL)),
+            CHECK ((state = 'FAILED') = (problem_code IS NOT NULL))
+        ) STRICT;
+
+        CREATE TABLE production_records (
+            -- Identity is the producing Run and the exact TaskSpec output
+            -- slot: one Run produces one settled Artifact per slot (the
+            -- frozen-Workspace fence makes re-sealing converge), while the
+            -- same Artifact content may be produced independently by many
+            -- Runs. Content reuse is recorded, never conflated with current
+            -- ownership.
+            run_id                TEXT    NOT NULL,
+            output_slot           TEXT    NOT NULL
+                                          CHECK (length(output_slot) BETWEEN 1 AND 128),
+            task_id               TEXT    NOT NULL,
+            attempt_id            TEXT    NOT NULL,
+            workspace_revision_id TEXT    NOT NULL
+                                          REFERENCES workspace_revisions(id),
+            artifact_digest       BLOB    NOT NULL
+                                          REFERENCES artifacts(digest),
+            created_at            INTEGER NOT NULL,
+            PRIMARY KEY (run_id, output_slot),
+            -- Holder safety: the recorded Task owns the Run, and the recorded
+            -- Attempt belongs to that Run. Neither pointer can drift.
+            FOREIGN KEY (run_id, task_id) REFERENCES runs(id, task_id),
+            FOREIGN KEY (attempt_id, run_id) REFERENCES attempts(id, run_id),
+            -- Parent key for candidate_outputs' provenance foreign key: the
+            -- exact Artifact bound to this Run and this slot.
+            UNIQUE (run_id, output_slot, artifact_digest)
+        ) STRICT;
+
+        CREATE TABLE candidates (
+            -- Immutable content-addressed identity over the canonical
+            -- semantic document Pantheon computes; submitters cannot mint it.
+            digest         BLOB    NOT NULL PRIMARY KEY CHECK (length(digest) = 32),
+            task_id        TEXT    NOT NULL,
+            run_id         TEXT    NOT NULL,
+            canonical_json TEXT    NOT NULL,
+            created_at     INTEGER NOT NULL,
+            -- At most one Candidate per Run, enforced by the database rather
+            -- than controller discipline.
+            UNIQUE (run_id),
+            FOREIGN KEY (run_id, task_id) REFERENCES runs(id, task_id)
+        ) STRICT;
+
+        CREATE TABLE candidate_outputs (
+            candidate_digest BLOB    NOT NULL REFERENCES candidates(digest),
+            output_slot      TEXT    NOT NULL CHECK (length(output_slot) BETWEEN 1 AND 128),
+            artifact_digest  BLOB    NOT NULL REFERENCES artifacts(digest),
+            -- The Run whose sealed production the output claims. Provenance
+            -- is relational: the composite foreign key below admits only a
+            -- ProductionRecord that binds THIS exact Run, THIS exact slot,
+            -- and THIS exact Artifact. An Artifact that merely exists under
+            -- some other lineage's digest cannot be referenced here.
+            production_run_id TEXT   NOT NULL,
+            PRIMARY KEY (candidate_digest, output_slot),
+            FOREIGN KEY (candidate_digest) REFERENCES candidates(digest),
+            FOREIGN KEY (artifact_digest) REFERENCES artifacts(digest),
+            FOREIGN KEY (production_run_id, output_slot, artifact_digest)
+                REFERENCES production_records(run_id, output_slot, artifact_digest)
+        ) STRICT;
+
+        CREATE TABLE run_status_new (
+            run_id             TEXT    NOT NULL PRIMARY KEY,
+            task_id            TEXT    NOT NULL,
+            phase              TEXT    NOT NULL CHECK (phase IN (
+                'Active', 'Finalizing', 'Completed', 'Failed',
+                'Cancelled', 'Yielded')),
+            terminal_target    TEXT,
+            revision           INTEGER NOT NULL CHECK (revision > 0),
+            active_slot        TEXT,
+            current_attempt_id TEXT,
+            candidate_digest   BLOB    CHECK (length(candidate_digest) = 32),
+            updated_at         INTEGER NOT NULL,
+            FOREIGN KEY (run_id, task_id) REFERENCES runs(id, task_id),
+            FOREIGN KEY (current_attempt_id, run_id) REFERENCES attempts(id, run_id),
+            CHECK (
+                phase != 'Finalizing' OR terminal_target IS NOT NULL
+            ),
+            CHECK (
+                phase != 'Completed' OR candidate_digest IS NOT NULL
+            ),
+            CHECK (
+                (phase IN ('Active', 'Finalizing') AND active_slot = 'global')
+                OR (phase NOT IN ('Active', 'Finalizing') AND active_slot IS NULL)
+            )
+        ) STRICT;
+
+        INSERT INTO run_status_new
+            SELECT run_id, task_id, phase, terminal_target, revision,
+                   active_slot, current_attempt_id, NULL, updated_at
+            FROM run_status;
+        DROP TABLE run_status;
+        ALTER TABLE run_status_new RENAME TO run_status;
+
+        CREATE UNIQUE INDEX one_nonterminal_run_per_task
+            ON run_status (task_id) WHERE phase IN ('Active', 'Finalizing');
+
+        CREATE UNIQUE INDEX one_active_execution_slot
+            ON run_status (active_slot) WHERE active_slot IS NOT NULL;",
+    },
 ];
 
 /// Runs the production migration set against `conn`.

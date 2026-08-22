@@ -37,11 +37,14 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         vec![
             "active_configuration".to_string(),
             "agent_control_sessions".to_string(),
+            "agent_requests".to_string(),
             "artifact_members".to_string(),
             "artifacts".to_string(),
             "attempt_status".to_string(),
             "attempts".to_string(),
             "blobs".to_string(),
+            "candidate_outputs".to_string(),
+            "candidates".to_string(),
             "commands".to_string(),
             "configuration_components".to_string(),
             "configuration_revisions".to_string(),
@@ -55,6 +58,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "journal_epochs".to_string(),
             "planning_operations".to_string(),
             "planning_records".to_string(),
+            "production_records".to_string(),
             "run_context_plans".to_string(),
             "run_status".to_string(),
             "runs".to_string(),
@@ -308,6 +312,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
         columns(&dir.db_path(), "run_status"),
         [
             "active_slot",
+            "candidate_digest",
             "current_attempt_id",
             "phase",
             "revision",
@@ -316,7 +321,8 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "terminal_target",
             "updated_at"
         ],
-        "Run lifecycle plus the holder-safe current-Attempt pointer, and nothing else"
+        "Run lifecycle, the holder-safe current-Attempt pointer, and the \
+         Candidate fact a Completed Run must carry — and nothing else"
     );
     assert_eq!(
         columns(&dir.db_path(), "attempts"),

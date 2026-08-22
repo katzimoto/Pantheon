@@ -160,6 +160,7 @@ fn seal(fence: Revision, artifact_json: &'static str) -> SealedChangeset<'static
         artifact_digest: Digest::of(b"manifest"),
         artifact_json,
         members: vec![(Digest::of(b"bytes"), 5)],
+        producer: None,
     }
 }
 

@@ -274,6 +274,11 @@ pub struct SealRequest<'a> {
     /// The Run authority claimed for this seal. A claim, never a fact:
     /// every authoritative boundary re-reads and re-proves it.
     pub authority: SealAuthority,
+    /// The authenticated Attempt to record as the producer, when the seal was
+    /// requested through Agent Control; `None` keeps the controller-side
+    /// path producer-less. Publication binds provenance and content in one
+    /// transaction either way.
+    pub producer_attempt_id: Option<&'a str>,
 }
 
 /// Why a seal failed.
@@ -877,6 +882,9 @@ impl<'a> ChangesetSealer<'a> {
                 artifact_digest,
                 artifact_json: &artifact_json,
                 members: unique_members,
+                producer: request
+                    .producer_attempt_id
+                    .map(|attempt_id| pantheon_store::ProducerProvenance { attempt_id }),
             },
         );
 

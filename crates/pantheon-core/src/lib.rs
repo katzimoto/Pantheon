@@ -32,6 +32,7 @@
 
 pub mod artifact;
 pub mod attempt;
+pub mod candidate;
 pub mod config;
 pub mod context;
 pub mod execution;
