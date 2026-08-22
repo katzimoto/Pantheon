@@ -403,6 +403,96 @@ impl Store {
                 .map_err(StoreError::Sqlite)
         })
     }
+
+    /// The Workspace readiness facts a Run's frozen snapshot names.
+    ///
+    /// WorkspaceReady is judged against exactly the Workspace the Run froze
+    /// at T3 — never against whatever else the Task might own today.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when durable state cannot be read.
+    pub fn workspace_readiness(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT w.phase, w.materialization
+                 FROM runs r
+                 JOIN context_source_snapshots s ON s.digest = r.context_source_snapshot_digest
+                 JOIN workspaces w ON w.id = s.workspace_id
+                 WHERE r.id = ?1",
+                rusqlite::params![run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(StoreError::Sqlite(other)),
+            })
+        })
+    }
+
+    /// How many Attempts this Run has ever created, terminal or not.
+    ///
+    /// Recovery Policy reads this to bound same-Run execution retries.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when durable state cannot be read.
+    pub fn attempt_history_count(&self, run_id: &str) -> Result<i64, StoreError> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM attempts WHERE run_id = ?1",
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)
+        })
+    }
+
+    /// The stored canonical form of one immutable ExecutionBinding, by
+    /// digest. The caller decodes and verifies the fields it acts on.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when durable state cannot be read.
+    pub fn binding_canonical_json(
+        &self,
+        digest: pantheon_core::config::Digest,
+    ) -> Result<Option<String>, StoreError> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT canonical_json FROM execution_bindings WHERE digest = ?1",
+                rusqlite::params![digest.as_bytes().to_vec()],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(StoreError::Sqlite(other)),
+            })
+        })
+    }
+
+    /// The current revision of one Attempt's status row.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when durable state cannot be read or the Attempt does
+    /// not exist.
+    pub fn attempt_status_revision(&self, attempt_id: &str) -> Result<Revision, StoreError> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT revision FROM attempt_status WHERE attempt_id = ?1",
+                rusqlite::params![attempt_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(Revision::new)
+            .map_err(StoreError::Sqlite)
+        })
+    }
 }
 
 /// Loads the single nonterminal Attempt lineage for `run_id`, if any.

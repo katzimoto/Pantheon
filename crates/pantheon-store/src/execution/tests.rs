@@ -387,7 +387,7 @@ fn a_failed_t4_leaves_no_partial_lineage() {
         .store()
         .mark_launch_contact(RUN, "attempt-1", "epoch-R", Revision::new(1), 1)
         .expect("contact marker commits");
-    world
+    let _ = world
         .store()
         .record_execution_observation(
             "attempt-1",
@@ -577,7 +577,7 @@ fn retry_after_terminal_attempt_creates_a_new_distinct_lineage() {
         .store()
         .mark_launch_contact(RUN, "attempt-1", "epoch-A", Revision::new(1), 1)
         .expect("contact marker commits");
-    world
+    let _ = world
         .store()
         .record_execution_observation(
             "attempt-1",
@@ -847,7 +847,7 @@ fn terminalization_requires_durable_contact_and_revokes_the_session() {
         .store()
         .mark_launch_contact(RUN, "attempt-1", "epoch-E", Revision::new(1), 1)
         .expect("contact marker commits");
-    world
+    let _ = world
         .store()
         .record_execution_observation(
             "attempt-1",
@@ -862,7 +862,7 @@ fn terminalization_requires_durable_contact_and_revokes_the_session() {
 
     // Definitive end: terminal row, finished_at, revoked session, one Event.
     let events_before = event_total(&world);
-    world
+    let _ = world
         .store()
         .record_execution_observation(
             "attempt-1",
@@ -901,7 +901,7 @@ fn unknown_observation_keeps_the_attempt_nonterminal_and_unreplaced() {
         .mark_launch_contact(RUN, "attempt-1", "epoch-F", Revision::new(1), 1)
         .expect("contact marker commits");
 
-    world
+    let _ = world
         .store()
         .record_execution_observation(
             "attempt-1",
