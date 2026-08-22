@@ -270,7 +270,18 @@ impl World {
     }
 }
 
-fn committed_world(label: &str) -> World {
+/// An installation whose configuration is activated and whose single coding
+/// Task is Ready owning a verified Workspace, with `commit` deciding how the
+/// Run intent comes into being and which Run identity it produced.
+///
+/// The same activation already happened through one
+/// [`ConfigurationAuthority`] instance; a fresh authority carries no
+/// process-local snapshot, which is exactly the "nothing published" state a
+/// second instance would wrongly report.
+fn world_with_run(
+    label: &str,
+    commit: impl FnOnce(&ConfigurationAuthority<&Store>, &Store) -> String,
+) -> World {
     let dir = TempDir::new(label);
     let store = Store::open(dir.db_path()).expect("open store");
     let authority = ConfigurationAuthority::new(&store);
@@ -290,23 +301,30 @@ fn committed_world(label: &str) -> World {
         )
         .expect("activate configuration");
     ready_task_with_workspace(&store);
-    let outcome = SchedulingController::new(&store, &authority)
-        .schedule_once(&[ExecutorBackendPort::new(
-            &RoutingBackend,
-            ControllerSafetyFacts {
-                isolation_guarantees: vec!["isolation.control-plane".to_string()],
-                observational_launch_safe: false,
-            },
-        )])
-        .expect("the cycle runs");
-    let ScheduleOutcome::Committed { run_id, .. } = outcome else {
-        panic!("expected a committed Run intent, got {outcome:?}");
-    };
+    let run_id = commit(&authority, &store);
     World {
         dir,
         store: Some(store),
         run_id,
     }
+}
+
+fn committed_world(label: &str) -> World {
+    world_with_run(label, |authority, store| {
+        let outcome = SchedulingController::new(store, authority)
+            .schedule_once(&[ExecutorBackendPort::new(
+                &RoutingBackend,
+                ControllerSafetyFacts {
+                    isolation_guarantees: vec!["isolation.control-plane".to_string()],
+                    observational_launch_safe: false,
+                },
+            )])
+            .expect("the cycle runs");
+        let ScheduleOutcome::Committed { run_id, .. } = outcome else {
+            panic!("expected a committed Run intent, got {outcome:?}");
+        };
+        run_id
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +487,12 @@ impl ExecutionLauncher for FakeLauncher {
     }
 }
 
+fn injected_failure() -> LauncherFailure {
+    LauncherFailure {
+        detail: "injected fault".to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fake Sandbox (test infrastructure only)
 // ---------------------------------------------------------------------------
@@ -519,14 +543,6 @@ impl Harness {
 fn controller<'s>(store: &'s Store, seed: u64) -> RunController<'s, FixedRandom> {
     RunController::new(store, FixedRandom::new(seed), "test-incarnation")
 }
-
-fn injected_failure() -> LauncherFailure {
-    LauncherFailure {
-        detail: "injected fault".to_string(),
-    }
-} // ---------------------------------------------------------------------------
-// Evidence
-// ---------------------------------------------------------------------------
 
 #[test]
 fn scheduling_alone_creates_zero_attempts_and_zero_contact() {
@@ -1161,4 +1177,115 @@ fn bearer_material_never_reaches_disk_or_debug_output() {
             "no raw credential revision ever reaches durable bytes"
         );
     }
+}
+
+#[test]
+fn policy_readiness_refuses_a_binding_whose_profile_identity_vanished() {
+    let mut world = world_with_run("policy-refusal", |_authority, store| {
+        let active = store
+            .configuration_pointer()
+            .expect("pointer")
+            .active
+            .expect("active");
+        let agent = pantheon_core::execution::LogicalAgentVersion {
+            name: "builder".to_string(),
+            version: 1,
+        };
+        let agents_json = store
+            .revision_agents_component_json(active.activation_sequence)
+            .expect("read agents component")
+            .expect("agents component stored");
+        let value = pantheon_core::config::parse::parse(&agents_json).expect("fixture component");
+        let guidance =
+            pantheon_core::context::frozen_agent_guidance(&value, &agent).expect("guidance");
+
+        // A T3 commit whose Binding names a sandbox identity no frozen profile
+        // carries. The Scheduler would never produce this; a direct caller
+        // can. T3 itself does not validate the sandbox digest (feasibility is
+        // a pre-T3 routing fact), so PolicyReady is the gate that must refuse.
+        let snap = store.scheduling_snapshot().expect("snapshot");
+        let candidate = snap.candidates.first().expect("dispatchable Task").clone();
+        let binding_frozen = pantheon_core::scheduling::ExecutionBinding {
+            task_id: candidate.task_id.clone(),
+            agent: agent.clone(),
+            request_digest: Digest::of(b"request"),
+            offer_digest: Digest::of(b"offer"),
+            backend_id: "fake-local".to_string(),
+            descriptor_revision: 3,
+            descriptor_digest: Digest::of(b"descriptor"),
+            execution_profile_digest: active.components.execution_profile,
+            sandbox_profile_digest: Digest::of(b"never-a-configured-profile"),
+            route_policy_digest: active.components.routing,
+            configuration_activation_sequence: active.activation_sequence,
+            configuration_content_digest: active.content_digest,
+            component_digests: active.components,
+        };
+        let snapshot_frozen = pantheon_core::scheduling::ContextSourceSnapshot {
+            task_spec_digest: candidate.spec_digest,
+            goal_id: candidate.goal_id.clone(),
+            goal_revision: candidate.goal_current_revision,
+            graph_revision: candidate.graph_revision,
+            agent,
+            configuration_activation_sequence: active.activation_sequence,
+            context_policy_digest: active.components.context_policy,
+            agent_soul_digest: pantheon_core::context::guidance_digest(&guidance.soul),
+            agent_behavior_digest: pantheon_core::context::guidance_digest(&guidance.behavior),
+            workspace_id: "ws-1".to_string(),
+            workspace_resolved_base: "a".repeat(40),
+        };
+        let binding_digest = binding_frozen.digest();
+        let snapshot_digest = snapshot_frozen.digest();
+        let intent = pantheon_store::RunIntent {
+            run_id: "run-policy",
+            task_id: &candidate.task_id,
+            goal_id: &candidate.goal_id,
+            expected_task_revision: candidate.task_revision,
+            expected_goal_row_revision: candidate.goal_row_revision,
+            expected_goal_current_revision: candidate.goal_current_revision,
+            expected_graph_revision: candidate.graph_revision,
+            expected_workspace_revision: candidate.workspace_revision,
+            expected_scheduler_revision: snap.state.revision,
+            expected_goal_fairness_revision: None,
+            expected_task_scheduling_revision: candidate.scheduling_revision,
+            configuration_activation_sequence: active.activation_sequence,
+            binding_digest: &binding_digest,
+            binding: &binding_frozen,
+            snapshot_digest: &snapshot_digest,
+            snapshot: &snapshot_frozen,
+        };
+        match store
+            .commit_run_intent(
+                &command(
+                    store.restore_generation().expect("generation").as_str(),
+                    "cmd-t3-bogus",
+                    &[12u8; 32],
+                    "run.committed",
+                ),
+                &intent,
+            )
+            .expect("T3 accepts the frozen facts it validates")
+        {
+            pantheon_store::Committed::Executed { value, .. } => value.run_id,
+            other => panic!("got {other:?}"),
+        }
+    });
+
+    // Preparation reaches the PolicyReady gate and fails closed loudly: a
+    // Binding whose strategy cannot be re-derived from the frozen revision is
+    // corruption-shaped evidence, not an ordinary preparation failure.
+    let external = Arc::new(Mutex::new(ExternalWorld::default()));
+    let error = controller(world.s(), 1)
+        .reconcile_run(&world.run_id, &Harness::healthy(&external).deps())
+        .expect_err("an unverifiable sandbox identity must not reach LaunchReady");
+    let detail = match error {
+        super::RunControllerError::Store(pantheon_store::StoreError::InvariantViolated(detail)) => {
+            detail
+        }
+        other => panic!("expected the typed policy refusal, got {other:?}"),
+    };
+    assert!(
+        detail.contains("sandbox identity"),
+        "the refusal names the failing gate: {detail}"
+    );
+    assert!(external.lock().expect("world").contacts.is_empty());
 }
