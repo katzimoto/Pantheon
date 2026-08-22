@@ -262,7 +262,7 @@ pub enum RunOutcome {
     /// The Run is not Active (Finalizing or terminal); nothing to launch.
     Inactive { phase: String },
     /// Preparation failed and the Run concluded with zero Attempts.
-    ConcludedInPreparation { gate: &'static str },
+    ConcludedInPreparation { gate: String },
     /// T4 established the lineage durably; contact comes on a later pass.
     AttemptEstablished {
         attempt_id: String,
@@ -405,14 +405,19 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
                 if lineage.terminal {
                     return self.decide_after_terminal(run_id, &lineage.attempt.id, deps);
                 }
-                // Current bearer first: without it nothing downstream can
-                // prove which credential revision the launch package carries.
-                self.ensure_current_bearer(run_id, &lineage)?;
-                let refreshed = self.current_lineage(run_id, &attempt_id)?;
-                match refreshed.launch_contact_state {
-                    LaunchContactState::NotContacted => self.launch(run_id, &refreshed, deps),
+                match lineage.launch_contact_state {
+                    // Pre-contact: the raw bearer is load-bearing, so lost
+                    // memory rotates through T4a before anything launches.
+                    LaunchContactState::NotContacted => {
+                        self.ensure_current_bearer(run_id, &lineage)?;
+                        let refreshed = self.current_lineage(run_id, &attempt_id)?;
+                        self.launch(run_id, &refreshed, deps)
+                    }
+                    // Post-contact the credential is frozen and inspection
+                    // addresses the lineage by LaunchKey alone; no bearer is
+                    // needed, and none may be minted for this Attempt.
                     LaunchContactState::ContactMayHaveOccurred => {
-                        self.reconcile_contacted(&refreshed, deps)
+                        self.reconcile_contacted(&lineage, deps)
                     }
                 }
             }
@@ -434,43 +439,54 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
                 return self.conclude_in_preparation(
                     run_id,
                     view.revision,
-                    Box::leak(format!("workspace:{phase}/{materialization}").into_boxed_str()),
+                    format!("workspace:{phase}/{materialization}"),
                 );
             }
             None => {
                 return self.conclude_in_preparation(
                     run_id,
                     view.revision,
-                    "workspace:frozen-workspace-unavailable",
+                    "workspace:frozen-workspace-unavailable".to_string(),
                 );
             }
         }
 
-        // SandboxReady — fake/test infrastructure until #34.
+        // SandboxReady — fake/test infrastructure until #34. A refusal keeps
+        // the gate shut and concludes the Run with zero Attempts; it is never
+        // retried into existence.
         let binding = self.binding_profile_identity(view)?;
-        deps.sandbox
-            .verify_ready(SandboxCheck {
+        if let Err(detail) = deps.sandbox.verify_ready(SandboxCheck {
+            run_id,
+            sandbox_profile_digest: &binding.sandbox_profile_digest,
+        }) {
+            return self.conclude_in_preparation(
                 run_id,
-                sandbox_profile_digest: &binding.sandbox_profile_digest,
-            })
-            .map_err(|detail| {
-                RunControllerError::Store(StoreError::InvariantViolated(format!(
-                    "sandbox readiness refused run {run_id}: {detail}"
-                )))
-            })?;
+                view.revision,
+                format!("sandbox:{detail}"),
+            );
+        }
 
         // ContextReady: deterministic preparation against the exact frozen
-        // snapshot, attaching exactly once. Idempotent on retry.
-        let prepared = crate::context::ContextPreparationController::new(self.store)
+        // snapshot, attaching exactly once. Idempotent on retry. A frozen-
+        // source failure concludes the Run rather than substituting anything;
+        // a genuine storage failure propagates without concluding anything.
+        if let Err(error) = crate::context::ContextPreparationController::new(self.store)
             .prepare_run_context(run_id)
-            .map_err(|error| match error {
+        {
+            return match error {
                 crate::context::ContextPreparationError::Store(store) => {
-                    RunControllerError::Store(store)
+                    Err(RunControllerError::Store(store))
                 }
-                other => RunControllerError::Store(StoreError::InvariantViolated(format!(
-                    "context preparation failed for run {run_id}: {other}"
-                ))),
-            })?;
+                other => {
+                    self.conclude_in_preparation(
+                        run_id,
+                        // The status revision did not move while preparing.
+                        view.revision,
+                        format!("context:{other}"),
+                    )
+                }
+            };
+        }
 
         // PolicyReady: the frozen revision still yields the exact sandbox
         // profile identity the Binding froze.
@@ -526,7 +542,6 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
             // exactly right while the Attempt is NOT_CONTACTED.
             Committed::Replayed { .. } => {}
         }
-        let _ = prepared;
 
         Ok(RunOutcome::AttemptEstablished {
             attempt_id,
@@ -538,7 +553,7 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
         &mut self,
         run_id: &str,
         revision: Revision,
-        gate: &'static str,
+        gate: String,
     ) -> Result<RunOutcome, RunControllerError> {
         self.store.conclude_run(run_id, "Failed", revision)?;
         Ok(RunOutcome::ConcludedInPreparation { gate })
@@ -564,8 +579,13 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
                 "stored binding is unreadable: {error}"
             )))
         })?;
-        let field = |name: &str| -> Result<Digest, RunControllerError> {
-            Digest::from_display(string_field(&value, name).ok_or_else(|| {
+        let Some(components) = value.get("componentDigests") else {
+            return Err(RunControllerError::Store(StoreError::InvariantViolated(
+                "stored binding has no componentDigests".to_string(),
+            )));
+        };
+        let field = |name: &str, source: &Value| -> Result<Digest, RunControllerError> {
+            Digest::from_display(string_field(source, name).ok_or_else(|| {
                 StoreError::InvariantViolated(format!("stored binding has no readable {name}"))
             })?)
             .ok_or_else(|| {
@@ -576,8 +596,8 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
             .map_err(RunControllerError::Store)
         };
         Ok(FrozenBindingIdentity {
-            sandbox_profile_digest: field("sandboxProfileDigest")?,
-            execution_profiles_component: field("executionProfiles")?,
+            sandbox_profile_digest: field("sandboxProfileDigest", &value)?,
+            execution_profiles_component: field("executionProfiles", components)?,
         })
     }
 
@@ -957,3 +977,6 @@ fn array_field<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;
