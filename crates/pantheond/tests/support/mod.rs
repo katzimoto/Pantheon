@@ -77,11 +77,17 @@ impl Installation {
         reason = "Daemon::drop kills and waits on every path"
     )]
     pub async fn start(&self) -> Daemon {
+        self.start_with(&[]).await
+    }
+
+    /// Starts a daemon with additional command-line arguments.
+    pub async fn start_with(&self, extra: &[&str]) -> Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_pantheond"))
             .arg("--data-dir")
             .arg(&self.dir)
             .arg("--socket")
             .arg(self.socket())
+            .args(extra)
             // Discarded rather than piped: nothing reads these, and a daemon
             // that filled a pipe nobody drains would block on its own output.
             .stdout(Stdio::null())
