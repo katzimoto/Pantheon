@@ -234,6 +234,21 @@ printf '%s' "$applied" | awk '/^fn b/,/^}/' | grep -qF 'x + 2' ||
 	fail "second occurrence was not mutated"
 ok "preflight-accepted record applies at the requested occurrence, changing bytes"
 
+# An anchor on an INDENTED line is the exact coordinate-mapping hazard:
+# normalization strips leading blanks, and a column recorded against the
+# stripped text would silently corrupt the mutation. Pin the full expected
+# output byte for byte.
+make_root indented
+printf 'fn make(x: u8) -> u8 {\n    Ok(Cursor {\n        sequence: next - 1,\n    })\n}\n' \
+	>"$root/src/lib.rs"
+applied=$(MUTANT_MODE=apply MUTANT_NAME=indented MUTANT_FIND='sequence: next - 1,' \
+	MUTANT_REPLACE='sequence: next,' MUTANT_WANT=1 awk -f "$engine" "$root/src/lib.rs") ||
+	fail "indented-anchor record refused at application time"
+expected=$(printf 'fn make(x: u8) -> u8 {\n    Ok(Cursor {\n        sequence: next,\n    })\n}')
+[ "$applied" = "$expected" ] ||
+	fail "indented anchor corrupted surrounding bytes"
+ok "anchors on indented lines mutate exactly their own region"
+
 # ---- diagnostics ------------------------------------------------------------
 
 diag_fail() {

@@ -88,28 +88,41 @@ function normalize_anchor(raw) {
 # one newline on both the original and mutated sides, which keeps the
 # change-proof comparison byte-exact; every current target is
 # newline-terminated text.
-function load(file,    line, raw, i, n) {
+function load(file,    line, i, n, c, pending, ws_l, ws_c) {
 	srclast = 0
 	norm = ""
 	npos = 0
+	pending = 0
 	while ((getline line < file) > 0) {
 		srclast++
 		src[srclast] = line
-		raw = collapse(line)
-		if (raw == "") continue
-		if (npos > 0) {
-			npos++
-			norm = norm " "
-			oline[npos] = srclast
-			ocol[npos] = 1
-		}
-		n = length(raw)
+		# Walk the ORIGINAL line so every recorded column is exact; the
+		# offset map is what maps a normalized match back onto bytes.
+		n = length(line)
 		for (i = 1; i <= n; i++) {
-			npos++
-			norm = norm substr(raw, i, 1)
-			oline[npos] = srclast
-			ocol[npos] = i
+			c = substr(line, i, 1)
+			if (c == " " || c == "\t") {
+				if (!pending) {
+					ws_l = srclast
+					ws_c = i
+				}
+				pending = 1
+			} else {
+				if (pending && npos > 0) {
+					npos++
+					norm = norm " "
+					oline[npos] = ws_l
+					ocol[npos] = ws_c
+				}
+				npos++
+				norm = norm c
+				oline[npos] = srclast
+				ocol[npos] = i
+				pending = 0
+			}
 		}
+		# The line break itself is whitespace: it joins the run.
+		pending = 1
 	}
 	close(file)
 	if (srclast == 0) fail(FILENAME ": empty or unreadable target")
