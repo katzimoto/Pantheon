@@ -218,6 +218,16 @@ fn ensure_workspace(
     source: &Path,
     request_id: &str,
 ) -> pantheon_store::WorkspaceRecord {
+    ensure_workspace_with(store, materializer, root, source, request_id)
+}
+
+fn ensure_workspace_with(
+    store: &Store,
+    materializer: &impl pantheon_engine::workspace::RepositoryMaterializer,
+    root: &Path,
+    source: &Path,
+    request_id: &str,
+) -> pantheon_store::WorkspaceRecord {
     let epoch = store.restore_generation().expect("generation");
     let requested = pantheon_core::workspace::RequestedBase::parse("refs/heads/main").expect("ref");
     WorkspaceController::new(store, materializer, root)
@@ -735,12 +745,13 @@ use pantheon_core::workspace::ResolvedBase;
 use pantheon_engine::sealing::BaseObject;
 
 /// Wraps the real sterile base reader and counts what sealing asks of it,
-/// distinguishing base-blob payload reads (the per-file fetch) from the
-/// one-shot tree listing. This is the operation counter the mission's
-/// performance property is stated against.
+/// distinguishing base-blob payload reads (the per-file fetch) from
+/// identity computations and the one-shot tree listing. This is the
+/// operation counter the mission's performance property is stated against.
 struct CountingBase<'a> {
     inner: &'a GitBaseReader,
     blob_reads: Cell<usize>,
+    identity_calls: Cell<usize>,
 }
 
 impl TrustedBaseReader for CountingBase<'_> {
@@ -752,6 +763,15 @@ impl TrustedBaseReader for CountingBase<'_> {
         self.inner.base_tree(source, base)
     }
 
+    fn blob_object_names(
+        &self,
+        source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault> {
+        self.identity_calls.set(self.identity_calls.get() + 1);
+        self.inner.blob_object_names(source, contents)
+    }
+
     fn blob_bytes(&self, source: &Path, oid: &str) -> Result<Vec<u8>, ExternalFault> {
         self.blob_reads.set(self.blob_reads.get() + 1);
         self.inner.blob_bytes(source, oid)
@@ -761,12 +781,12 @@ impl TrustedBaseReader for CountingBase<'_> {
 /// Deterministic 4096-byte payload, distinct per index: no two bulk files
 /// share content with each other or with anything else in the fixture.
 fn bulk_content(index: usize) -> Vec<u8> {
-    let mut bytes = vec![0u8; 4096];
+    let mut bytes = vec![0u8; BULK_BYTES];
     let mut state = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for byte in &mut bytes {
         state = state
-            .wrapping_mul(6364_1362_2384_6793_005)
-            .wrapping_add(1442_6950_4088_8896_3407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_896_407);
         *byte = (state >> 33) as u8;
     }
     bytes
@@ -819,6 +839,7 @@ fn base_blob_reads_track_changes_not_the_base_tree() {
     let counting = CountingBase {
         inner: &real_reader,
         blob_reads: Cell::new(0),
+        identity_calls: Cell::new(0),
     };
     let capture = ConfinedCapture::new();
 
@@ -841,7 +862,12 @@ fn base_blob_reads_track_changes_not_the_base_tree() {
         .collect();
     assert_eq!(
         changed_paths,
-        vec!["added.txt", "bulk/collision.txt", "deleted.txt", "modified.txt"],
+        vec![
+            "added.txt",
+            "bulk/collision.txt",
+            "deleted.txt",
+            "modified.txt"
+        ],
         "exactly the changed paths, canonically ordered"
     );
 
@@ -849,8 +875,14 @@ fn base_blob_reads_track_changes_not_the_base_tree() {
         .iter()
         .find(|(name, _, _)| name == "modified.txt")
         .expect("modified entry");
-    assert_eq!(modified_before.as_deref(), Some(b"before-version".as_slice()));
-    assert_eq!(modified_after.as_deref(), Some(b"after-version!".as_slice()));
+    assert_eq!(
+        modified_before.as_deref(),
+        Some(b"before-version".as_slice())
+    );
+    assert_eq!(
+        modified_after.as_deref(),
+        Some(b"after-version!".as_slice())
+    );
 
     let (_, collision_before, collision_after) = reconstructed
         .iter()
@@ -872,9 +904,153 @@ fn base_blob_reads_track_changes_not_the_base_tree() {
 
     assert_eq!(
         counting.blob_reads.get(),
-        305,
-        "pre-change baseline: each of the 300 unchanged same-size candidates \
-         pays one base-blob read, each same-size modify pays two (compare, \
-         then preimage), and the delete pays one"
+        3,
+        "base-blob payload reads track the changeset: one preimage each for \
+         the two same-size modifies and the delete. The 300 unchanged \
+         same-size files cost zero reads (pre-change baseline: 305 — one \
+         per unchanged candidate, two per same-size modify, one for the \
+         delete)"
     );
+    assert_eq!(
+        counting.identity_calls.get(),
+        1,
+        "all comparison identities derive from one batched computation over \
+         captured bytes"
+    );
+}
+
+#[test]
+fn changed_path_derivation_works_through_a_sha256_source_repository() {
+    // The comparison signal must follow the source repository's actual
+    // object format, never a 40-hex assumption. Base listing, identity
+    // computation, unchanged verdicts, capture, CAS and publication all
+    // run here against a real SHA-256 repository.
+    //
+    // Only the Workspace materialization step is substituted, and only
+    // because `GitMaterializer` cannot yet seed a Workspace from a 64-hex
+    // base (`git init` defaults to SHA-1, so its fetch cannot name the
+    // source commit) — a #32-era limitation outside #75's scope, reported
+    // rather than fixed here. Capture does not need a worker-side Git
+    // repository at all: it reads the settled tree through the confined
+    // boundary.
+    let dir = TempDir::new("sha256-seal");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).expect("source");
+    git(
+        &source,
+        &["init", "--quiet", "--object-format=sha256", "-b", "main"],
+    );
+    std::fs::write(source.join("app.txt"), b"original\n").expect("write");
+    std::fs::write(source.join("same.txt"), b"untouched\n").expect("write");
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "--quiet", "-m", "base"]);
+    let base_oid = git(&source, &["rev-parse", "HEAD"]);
+
+    let control = dir.path().join("control");
+    let workspace_root = dir.path().join("workspaces");
+    let cas_root = dir.path().join("cas");
+    let store = Store::open(dir.path().join("pantheon.db")).expect("open store");
+    ready_coding_task(&store, &["workspace://**"]);
+    ensure_workspace_with(
+        &store,
+        &PlainDirMaterializer,
+        &workspace_root,
+        &source,
+        "ws-req-1",
+    );
+    dispatch(&store);
+
+    let repo = workspace_root.join("workspace-1").join("repo");
+    std::fs::create_dir_all(&repo).expect("workspace tree");
+    std::fs::write(repo.join("app.txt"), b"fixed\n").expect("modify");
+    std::fs::write(repo.join("same.txt"), b"untouched\n").expect("unchanged");
+    std::fs::write(repo.join("added.txt"), b"brand new\n").expect("add");
+
+    let cas = LocalFsCas::open(&cas_root).expect("cas");
+    let sealed = seal(
+        &store,
+        &ConfinedCapture::new(),
+        &GitBaseReader::new(&control).expect("base reader"),
+        &cas,
+        &workspace_root,
+        "seal-sha256",
+    )
+    .expect("seals");
+
+    assert!(sealed.artifact_json.contains(base_oid.trim()));
+    let reconstructed = reconstruct(&store, &cas, sealed.artifact_digest);
+    let names: Vec<&str> = reconstructed
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["added.txt", "app.txt"],
+        "exactly the changed paths; the unchanged same-size path stays out"
+    );
+    let (_, app_before, app_after) = reconstructed
+        .iter()
+        .find(|(name, _, _)| name == "app.txt")
+        .expect("app.txt");
+    assert_eq!(app_before.as_deref(), Some(b"original\n".as_slice()));
+    assert_eq!(app_after.as_deref(), Some(b"fixed\n".as_slice()));
+}
+
+/// Materializes nothing but the destination directory, so a test can drive
+/// the full real sealing stack against a Workspace whose seeding strategy
+/// is not the subject under test.
+struct PlainDirMaterializer;
+
+impl pantheon_engine::workspace::RepositoryMaterializer for PlainDirMaterializer {
+    fn resolve_base(
+        &self,
+        source: &Path,
+        requested: &pantheon_core::workspace::RequestedBase,
+    ) -> Result<pantheon_core::workspace::ResolvedBase, pantheon_engine::workspace::MaterializerError>
+    {
+        let revision = format!("{}^{{commit}}", requested.as_str());
+        let resolved = git(source, &["rev-parse", "--verify", "--quiet", &revision]);
+        pantheon_core::workspace::ResolvedBase::parse(resolved.trim()).map_err(|err| {
+            pantheon_engine::workspace::MaterializerError {
+                code: "workspace.base-unresolvable".to_string(),
+                detail: format!("{requested} did not resolve to a commit: {err}"),
+            }
+        })
+    }
+
+    fn materialize(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<pantheon_core::workspace::ResolvedBase, pantheon_engine::workspace::MaterializerError>
+    {
+        std::fs::create_dir_all(target.destination).map_err(|err| {
+            pantheon_engine::workspace::MaterializerError {
+                code: "workspace.materialization-failed".to_string(),
+                detail: format!("could not create the workspace directory: {err}"),
+            }
+        })?;
+        Ok(target.base.clone())
+    }
+
+    fn observe(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<
+        pantheon_core::workspace::Materialization,
+        pantheon_engine::workspace::MaterializerError,
+    > {
+        Ok(if target.destination.exists() {
+            pantheon_core::workspace::Materialization::Present
+        } else {
+            pantheon_core::workspace::Materialization::Absent
+        })
+    }
+
+    fn discard(
+        &self,
+        target: &pantheon_engine::workspace::MaterializationTarget<'_>,
+    ) -> Result<(), pantheon_engine::workspace::MaterializerError> {
+        let _ = std::fs::remove_dir_all(target.destination);
+        Ok(())
+    }
 }

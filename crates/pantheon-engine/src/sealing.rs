@@ -7,10 +7,13 @@
 //! re-read Task + Run + Workspace authority      (durable truth, not caller claims)
 //!   ↓ freeze the Workspace                      Ready -> Frozen, under the command envelope
 //!   ↓ pin the capture root                      derived from durable identity + controller root
+//!   ↓ list the trusted base tree                (port: platform crate)
 //!   ↓ confined no-follow capture                (port: platform crate)
 //!   ↓ publish every payload to CAS              (port: CAS backend) — bytes durable FIRST
-//!   ↓ derive before-states from the immutable base through trusted repository state
-//!                                                 (port: platform crate)
+//!   ↓ compare same-kind/same-size entries       through Git object names of the captured
+//!                                                 bytes — no unchanged base blob is read
+//!   ↓ derive changed/deleted before-states from the immutable base through
+//!     trusted repository state                  (port: platform crate)
 //!   ↓ diff logical states, scope-check every changed path
 //!   ↓ build the canonical manifest              (pantheon-core, pure)
 //!   ↓ ONE authoritative transaction             re-read fence + Run authority, commit rows
@@ -178,6 +181,33 @@ pub trait TrustedBaseReader {
         source: &Path,
         base: &pantheon_core::workspace::ResolvedBase,
     ) -> Result<BTreeMap<Vec<u8>, BaseObject>, ExternalFault>;
+
+    /// Computes, without writing any object anywhere, the Git object name
+    /// each payload would carry as a blob under `source`'s own object
+    /// format.
+    ///
+    /// This is the changed-path comparison signal. A captured entry whose
+    /// canonical kind and size match its base entry is unchanged exactly
+    /// when this name equals the base entry's recorded name, so sealing
+    /// never needs the bytes of a same-size base blob that did not change.
+    /// The names are compared against base metadata only; they never enter
+    /// Artifact or CAS identity, which stay SHA-256 over exact bytes.
+    /// Implementations must consult only controller-owned state and the
+    /// source repository itself — never worker Workspace Git state — and
+    /// must derive names from payload bytes alone, so the result is
+    /// deterministic and independent of process-local cache warmth.
+    ///
+    /// Returns exactly one name per payload, in input order.
+    ///
+    /// # Errors
+    ///
+    /// [`ExternalFault`] when the source cannot be consulted or an answer
+    /// is not a canonical object name.
+    fn blob_object_names(
+        &self,
+        source: &Path,
+        contents: &[&[u8]],
+    ) -> Result<Vec<String>, ExternalFault>;
 
     /// The exact bytes of one base blob.
     ///
@@ -349,6 +379,12 @@ pub struct SealedArtifact {
 /// an explicit configuration decision, not silently.
 const MAX_ENTRIES: usize = 100_000;
 const MAX_TOTAL_BYTES: u64 = 1 << 30;
+
+/// How many captured bytes may sit in the identity batch before it is
+/// converted to Git object names. Bounds peak memory during comparison
+/// while keeping the number of identity computations proportional to
+/// candidate bytes rather than to the number of unchanged files.
+const MAX_IDENTITY_BATCH_BYTES: usize = 16 << 20;
 
 /// The fault code the capture sink uses to report an out-of-scope path, so
 /// the controller can surface it as the typed [`SealError::ScopeViolated`]
@@ -592,6 +628,16 @@ impl<'a> ChangesetSealer<'a> {
         scope: &pantheon_core::planning::scope::WorkspaceScope,
     ) -> Result<SealedArtifact, SealError> {
         let capture_root = self.capture_root_of(&workspace.id);
+        let source = PathBuf::from(&workspace.source_path);
+
+        // Authoritative before-state metadata comes from the trusted
+        // immutable base before capture runs: the walk then knows per entry
+        // whether its Git identity is needed for comparison, and a base
+        // that cannot be read fails before any Workspace byte is staged.
+        let base_tree = self
+            .base
+            .base_tree(&source, &workspace.resolved_base)
+            .map_err(SealError::Capture)?;
 
         // Confined capture streams straight into CAS: peak memory stays at
         // one object, and every payload is durable before anything
@@ -603,6 +649,16 @@ impl<'a> ChangesetSealer<'a> {
         // can never become changeset output.
         let mut unpublished: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         let mut total_bytes: u64 = 0;
+        // Captured entries whose content identity will be decided through
+        // Git object names: present in the base at the same canonical kind
+        // and size, so only content can still distinguish them. Their bytes
+        // are batched here and converted in as few calls as the budget
+        // allows; nothing is read from the base to compare them.
+        let mut identity_batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut identity_batch_bytes = 0usize;
+        // Path -> the Git object name of the captured bytes. Populated only
+        // for entries that needed the comparison signal.
+        let mut captured_identities: BTreeMap<Vec<u8>, String> = BTreeMap::new();
         self.capture
             .capture_tree(&capture_root, &mut |entry: CapturedEntry| {
                 // Scope decides RETENTION, not existence. Every captured
@@ -644,6 +700,26 @@ impl<'a> ChangesetSealer<'a> {
                     unpublished.insert(entry.path.sort_key().to_vec());
                 }
                 final_state.insert(entry.path.sort_key().to_vec(), (entry.kind, digest, size));
+                // A same-path, same-kind, same-size entry can still prove
+                // itself unchanged through its Git object name alone. Its
+                // bytes join the batch; no base blob is read for it here or
+                // below.
+                let comparison_candidate = base_tree
+                    .get(entry.path.sort_key())
+                    .is_some_and(|before| before.kind == entry.kind && before.size == size);
+                if comparison_candidate {
+                    identity_batch.push((entry.path.sort_key().to_vec(), entry.bytes.clone()));
+                    identity_batch_bytes += entry.bytes.len();
+                    if identity_batch_bytes >= MAX_IDENTITY_BATCH_BYTES {
+                        flush_identity_batch(
+                            &source,
+                            self.base,
+                            &mut identity_batch,
+                            &mut captured_identities,
+                        )?;
+                        identity_batch_bytes = 0;
+                    }
+                }
                 Ok(())
             })
             .map_err(|fault| {
@@ -653,14 +729,14 @@ impl<'a> ChangesetSealer<'a> {
                     SealError::Capture(fault)
                 }
             })?;
-
-        // Authoritative before-state: the trusted immutable base, never the
-        // worker's index/objects.
-        let source = PathBuf::from(&workspace.source_path);
-        let base_tree = self
-            .base
-            .base_tree(&source, &workspace.resolved_base)
-            .map_err(SealError::Capture)?;
+        // The last batch carries whatever the walk ended on.
+        flush_identity_batch(
+            &source,
+            self.base,
+            &mut identity_batch,
+            &mut captured_identities,
+        )
+        .map_err(SealError::Capture)?;
 
         // Diff the two logical states. Keys are raw path bytes in both maps,
         // so merged iteration is canonical order by construction.
@@ -685,9 +761,17 @@ impl<'a> ChangesetSealer<'a> {
                     ChangesetEntry::new(path, Operation::Add, EntryState::Absent, after_state)?
                 }
                 Some(before) => {
+                    // Unchanged is provable without any base-blob read:
+                    // same canonical kind, same size, and the Git object
+                    // name of the captured bytes equals the name the base
+                    // tree records. Equal names prove equal content; a
+                    // same-size collision carries a different name and
+                    // falls through as a Modify.
                     let unchanged = before.kind == *after_kind
                         && before.size == *after_size
-                        && self.blob_matches(&source, &before.oid, *after_digest)?;
+                        && captured_identities
+                            .get(path_bytes)
+                            .is_some_and(|name| name == &before.oid);
                     if unchanged {
                         continue;
                     }
@@ -801,15 +885,6 @@ impl<'a> ChangesetSealer<'a> {
             revision_state_digest: revision_state.digest(),
             artifact_reused,
         })
-    }
-
-    /// Whether a base blob's bytes hash to `expected`.
-    fn blob_matches(&self, source: &Path, oid: &str, expected: Digest) -> Result<bool, SealError> {
-        let bytes = self
-            .base
-            .blob_bytes(source, oid)
-            .map_err(SealError::Capture)?;
-        Ok(Digest::of(&bytes) == expected)
     }
 
     /// Builds the authoritative before-state for one base object, copying
@@ -946,6 +1021,39 @@ fn authority_tag(authority: &SealAuthority) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Converts one batch of staged payloads into Git object names and records
+/// them per path, draining the batch.
+///
+/// A count mismatch or unusable name from the port fails closed: without a
+/// trustworthy name for a candidate entry there is no proof of either
+/// state, and guessing would risk publishing a wrong changeset.
+fn flush_identity_batch(
+    source: &Path,
+    base: &dyn TrustedBaseReader,
+    batch: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    identities: &mut BTreeMap<Vec<u8>, String>,
+) -> Result<(), ExternalFault> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let contents: Vec<&[u8]> = batch.iter().map(|(_, bytes)| bytes.as_slice()).collect();
+    let names = base.blob_object_names(source, &contents)?;
+    if names.len() != contents.len() {
+        return Err(ExternalFault {
+            code: "workspace.base-unavailable".to_string(),
+            detail: format!(
+                "the base identity derivation returned {} names for {} payloads",
+                names.len(),
+                contents.len()
+            ),
+        });
+    }
+    for ((path, _), name) in batch.drain(..).zip(names) {
+        identities.insert(path, name);
+    }
+    Ok(())
+}
 
 /// Refuses a changed path whose bytes were deliberately not retained
 /// because they sit outside the declared scope: an attempt to produce

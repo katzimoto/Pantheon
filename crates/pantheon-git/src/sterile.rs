@@ -50,6 +50,8 @@ use std::process::{Command, Output, Stdio};
 /// or from anything an Agent can write.
 #[derive(Debug, Clone)]
 pub(crate) struct SterileProfile {
+    /// The controller-owned root everything else lives beneath.
+    base: PathBuf,
     /// An empty directory used as `HOME`.
     home: PathBuf,
     /// An empty directory used as the hooks path and as the `git init`
@@ -80,10 +82,32 @@ impl SterileProfile {
         std::fs::write(&empty_config, b"")?;
 
         Ok(Self {
+            base: base.to_path_buf(),
             home,
             empty,
             empty_config,
         })
+    }
+
+    /// Creates a fresh controller-owned scratch directory beneath the
+    /// sterile root, for transient platform state such as payloads staged
+    /// for an identity computation.
+    ///
+    /// The path is derived from controller state and a process-local
+    /// counter only — never from repository content or anything an Agent
+    /// can write — and each call gets its own directory, so concurrent
+    /// operations cannot collide. Disposal is the caller's job; the
+    /// location is disposable by construction.
+    pub(crate) fn scratch_dir(&self, purpose: &str) -> io::Result<PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = self
+            .base
+            .join("scratch")
+            .join(format!("{purpose}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     /// The empty directory used to seed a new repository, so a template

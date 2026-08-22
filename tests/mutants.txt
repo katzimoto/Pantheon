@@ -609,3 +609,10 @@ find: Self::AgentGuidance => 2,
 replace: Self::AgentGuidance => 0,
 scope: -p pantheon-core --test context
 test: composed_sections_are_ordered_by_class_then_authority_then_kind
+
+name: unchanged-verdict-ignores-the-object-name
+file: crates/pantheon-engine/src/sealing.rs
+find: .is_some_and(|name| name == &before.oid)
+replace: .is_some_and(|_name| true)
+scope: -p pantheon-engine --lib
+test: sealing::tests::a_same_size_collision_is_a_modify_with_its_authoritative_preimage
