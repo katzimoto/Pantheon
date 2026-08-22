@@ -381,10 +381,15 @@ Pantheon makes today. Windows is not supported.
 ./scripts/check-mutants.sh
 ```
 
-Applies each single-line edit in `tests/mutants.txt` to a scratch copy of the
-workspace and requires the named test to fail. A surviving mutant means that
-test does not check the property it claims to — strengthen the test, never the
-mutant.
+Applies each record in `tests/mutants.txt` to a scratch copy of the workspace
+and requires the named test to fail. Every record is validated structurally
+first — shape, target file, anchor resolution at the requested occurrence, and
+that the mutation changes bytes — without compiling anything, so a stale or
+drifted anchor fails in seconds instead of surfacing partway through a full
+run. Anchors match whitespace-normalized source, so a rustfmt reflow cannot
+invalidate a record whose token sequence is unchanged (#82). A surviving
+mutant means that test does not check the property it claims to — strengthen
+the test, never the mutant.
 
 This is the one thing deliberately outside `verify.sh`, and `AGENTS.md` records
 why: it answers whether the tests would notice a regression, not whether the
