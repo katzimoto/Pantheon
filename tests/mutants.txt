@@ -647,8 +647,8 @@ test: execution::tests::attempt_creation_requires_the_attached_context_plan
 
 name: second-live-attempt-accepted
 file: crates/pantheon-store/src/execution.rs
-find: if let Some(live) = live {
-replace: if let Some(_live) = live.filter(|_| false) {
+find: "SELECT attempt_id FROM attempt_status WHERE run_id = ?1 AND terminal = 0",
+replace: "SELECT attempt_id FROM attempt_status WHERE 0 = 1",
 scope: -p pantheon-store --lib
 test: execution::tests::one_nonterminal_attempt_per_run_is_enforced_by_controller_and_database
 
