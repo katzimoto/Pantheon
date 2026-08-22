@@ -12,7 +12,7 @@
 //! a Run freezes at T3. Those types name authority; they perform none.
 
 use crate::config::canonical::Value;
-use crate::config::{ComponentDigests, Digest};
+use crate::config::{ComponentDigests, Digest, parse};
 use crate::execution::LogicalAgentVersion;
 
 /// The operator's durable desired dispatch state.
@@ -230,11 +230,13 @@ impl ExecutionBinding {
 /// construction.
 ///
 /// It names the exact immutable source generations a later Context Builder may
-/// select from for this Run: the Task/Goal/Graph revisions, the Agent version,
-/// the captured ConfigurationRevision with its context-policy component
-/// digest, and the Task-owned Workspace identity with the immutable base it
-/// was verified against. It freezes eligibility, not selection — no retrieval,
-/// rendering or repository reading happens to build or store it.
+/// select from for this Run: the Task/Goal/Graph revisions, the Agent version
+/// together with the content digests of that version's static approved SOUL
+/// and BEHAVIOR guidance, the captured ConfigurationRevision with its
+/// context-policy component digest, and the Task-owned Workspace identity with
+/// the immutable base it was verified against. It freezes eligibility, not
+/// selection — no retrieval, rendering or repository reading happens to build
+/// or store it.
 ///
 /// Sources that do not yet exist in this build (Memory generations, Skill
 /// versions, continuations) have no field here; naming them before they can be
@@ -250,6 +252,13 @@ pub struct ContextSourceSnapshot {
     pub configuration_activation_sequence: i64,
     /// The context-policy component digest of that same revision.
     pub context_policy_digest: Digest,
+    /// The SOUL guidance digest of exactly this Agent version under that
+    /// revision's agents component. Frozen so a later active configuration can
+    /// never substitute different guidance into this Run, and so preparation
+    /// can prove the guidance it loads is the guidance T3 froze.
+    pub agent_soul_digest: Digest,
+    /// The BEHAVIOR guidance digest of exactly this Agent version.
+    pub agent_behavior_digest: Digest,
     pub workspace_id: String,
     /// The immutable base the Workspace's materialization was verified
     /// against — the starting point a later plan may select from.
@@ -281,6 +290,14 @@ impl ContextSourceSnapshot {
                 "contextPolicyDigest",
                 Value::string(self.context_policy_digest.to_string()),
             ),
+            (
+                "agentSoulDigest",
+                Value::string(self.agent_soul_digest.to_string()),
+            ),
+            (
+                "agentBehaviorDigest",
+                Value::string(self.agent_behavior_digest.to_string()),
+            ),
             ("workspaceId", Value::string(&self.workspace_id)),
             (
                 "workspaceResolvedBase",
@@ -288,7 +305,82 @@ impl ContextSourceSnapshot {
             ),
         ])
     }
+
+    /// Reads a frozen source snapshot back from its stored canonical form.
+    ///
+    /// Preparation reconstructs the Run's source universe through this decoder;
+    /// it never accepts a caller-assembled substitute. Callers still re-digest
+    /// the decoded value and compare against the Run's stored snapshot digest —
+    /// decoding proves shape, the digest comparison proves identity.
+    pub fn from_canonical_json(text: &str) -> Result<Self, SnapshotDecodeError> {
+        let error = |detail: String| SnapshotDecodeError(detail);
+        let value = parse::parse(text).map_err(|err| error(err.to_string()))?;
+        let string = |name: &str| -> Result<String, SnapshotDecodeError> {
+            match value.get(name) {
+                Some(Value::String(text)) => Ok(text.clone()),
+                Some(other) => Err(error(format!(
+                    "{name} is not a string (found {})",
+                    other.kind()
+                ))),
+                None => Err(error(format!("missing {name}"))),
+            }
+        };
+        let integer = |name: &str| -> Result<i64, SnapshotDecodeError> {
+            match value.get(name) {
+                Some(Value::Integer(number)) => Ok(*number),
+                Some(other) => Err(error(format!(
+                    "{name} is not an integer (found {})",
+                    other.kind()
+                ))),
+                None => Err(error(format!("missing {name}"))),
+            }
+        };
+        let digest = |name: &str| -> Result<Digest, SnapshotDecodeError> {
+            Digest::from_display(&string(name)?)
+                .ok_or_else(|| error(format!("{name} is not a sha256 digest")))
+        };
+
+        let agent = value
+            .get("agent")
+            .ok_or_else(|| error("missing agent".to_string()))?;
+        let (Some(Value::String(agent_name)), Some(Value::Integer(agent_version))) =
+            (agent.get("name"), agent.get("version"))
+        else {
+            return Err(error("malformed agent identity".to_string()));
+        };
+        let agent_version: u32 = u32::try_from(*agent_version)
+            .map_err(|_| error("agent version does not fit a 32-bit number".to_string()))?;
+        Ok(Self {
+            task_spec_digest: digest("taskSpecDigest")?,
+            goal_id: string("goalId")?,
+            goal_revision: integer("goalRevision")?,
+            graph_revision: integer("graphRevision")?,
+            agent: LogicalAgentVersion::new(agent_name, agent_version),
+            configuration_activation_sequence: integer("configurationActivationSequence")?,
+            context_policy_digest: digest("contextPolicyDigest")?,
+            agent_soul_digest: digest("agentSoulDigest")?,
+            agent_behavior_digest: digest("agentBehaviorDigest")?,
+            workspace_id: string("workspaceId")?,
+            workspace_resolved_base: string("workspaceResolvedBase")?,
+        })
+    }
 }
+
+/// A frozen source snapshot that cannot be read back from durable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDecodeError(pub String);
+
+impl std::fmt::Display for SnapshotDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stored context source snapshot is not readable: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SnapshotDecodeError {}
 
 fn agent_value(agent: &LogicalAgentVersion) -> Value {
     Value::object([

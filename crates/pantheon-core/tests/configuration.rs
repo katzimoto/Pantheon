@@ -221,8 +221,8 @@ fn an_evaluator_referencing_an_undeclared_profile_is_rejected() {
 fn a_mandatory_context_section_cannot_be_dropped() {
     // Rule 6: mandatory context is never silently truncated.
     let err = compile(&variant(
-        r#""optionalDropOrder": ["workspace", "memory"]"#,
-        r#""optionalDropOrder": ["workspace", "task"]"#,
+        r#""optionalDropOrder": ["workspace-orientation"]"#,
+        r#""optionalDropOrder": ["workspace-orientation", "task-contract"]"#,
     ))
     .expect_err("dropping a mandatory section is rejected");
     assert!(
@@ -461,7 +461,7 @@ fn invalid_agent_pin_and_conflicting_current_versions_are_rejected_before_activa
 
     let conflicting = VALID_SOURCE.replacen(
         r#""agents": ["#,
-        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"]},"#,
+        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":true,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"],"soul":"Second version identity.","behavior":"Second version behavior."},"#,
         1,
     );
     let err = compile(&conflicting).expect_err("two current versions are invalid");
@@ -487,6 +487,41 @@ fn compiled_agent_declarations_reject_unknown_or_empty_manifest_fields() {
     let err = compile(&empty).expect_err("an Agent must declare applicability");
     assert!(
         matches!(err, ConfigError::InvalidValue { ref path, .. } if path == "agents[0].accepts"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn agent_guidance_is_required_and_bounded() {
+    // Guidance is mandatory instruction provenance: an Agent version without
+    // it has nothing for a Run to freeze, so it does not compile rather than
+    // surfacing later as a preparation failure. And because preparation
+    // embeds these bodies into mandatory plan sections, an unbounded operator
+    // string would make that embedding unbounded — so the bound is a
+    // compile-time rejection, never a silent truncation.
+    use pantheon_core::config::compile::MAX_GUIDANCE_CHARS;
+
+    let err = compile(&variant(
+        &format!(
+            r#""soul": "{}""#,
+            "A careful coding agent that protects operator trust."
+        ),
+        r#""soul": """#,
+    ))
+    .expect_err("empty SOUL guidance must be rejected");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref path, .. } if path == "agents[0].soul"),
+        "unexpected: {err}"
+    );
+
+    let oversized = "x".repeat(MAX_GUIDANCE_CHARS + 1);
+    let err = compile(&variant(
+        r#""behavior": "Plan before editing. Keep changes minimal and verifiable.""#,
+        &format!(r#""behavior": "{oversized}""#),
+    ))
+    .expect_err("oversized BEHAVIOR guidance must be rejected");
+    assert!(
+        matches!(err, ConfigError::InvalidValue { ref detail, .. } if detail.contains("at most")),
         "unexpected: {err}"
     );
 }

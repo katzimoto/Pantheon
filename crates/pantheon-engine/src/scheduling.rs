@@ -216,6 +216,28 @@ impl<'store, 'authority, S: Borrow<Store>> SchedulingController<'store, 'authori
         let workspace = self.store.workspace_for_task(task_id)?.ok_or_else(|| {
             StoreError::InvariantViolated(format!("selected task {task_id} has no Workspace"))
         })?;
+        // The selected Agent version's static approved guidance, read from
+        // the captured revision's compiled configuration. Its content digests
+        // are frozen into the source snapshot so no later active revision can
+        // substitute different guidance into this Run; T3 revalidates them
+        // against the stored immutable agents component before committing.
+        let published = self.configuration.snapshot()?;
+        let compiled = published.compiled().ok_or_else(|| {
+            StoreError::InvariantViolated(
+                "the active ConfigurationRevision is not usable for scheduling".to_string(),
+            )
+        })?;
+        let selected_agent = compiled
+            .agents()
+            .agents
+            .iter()
+            .find(|agent| agent.identity() == routed.candidate.agent)
+            .ok_or_else(|| {
+                StoreError::InvariantViolated(format!(
+                    "routed agent {}@{} is absent from the captured configuration",
+                    routed.candidate.agent.name, routed.candidate.agent.version
+                ))
+            })?;
 
         let binding_frozen = ExecutionBinding {
             task_id: task_id.to_string(),
@@ -240,6 +262,10 @@ impl<'store, 'authority, S: Borrow<Store>> SchedulingController<'store, 'authori
             agent: routed.candidate.agent.clone(),
             configuration_activation_sequence: binding.activation_sequence,
             context_policy_digest: binding.component_digests.context_policy,
+            agent_soul_digest: pantheon_core::context::guidance_digest(&selected_agent.soul),
+            agent_behavior_digest: pantheon_core::context::guidance_digest(
+                &selected_agent.behavior,
+            ),
             workspace_id: workspace.id.clone(),
             workspace_resolved_base: workspace.resolved_base.as_str().to_string(),
         };

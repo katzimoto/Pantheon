@@ -220,6 +220,8 @@ fn a_source_snapshot_digest_covers_every_named_source_generation() {
         },
         configuration_activation_sequence: 43,
         context_policy_digest: Digest::of(b"context-policy"),
+        agent_soul_digest: Digest::of(b"soul"),
+        agent_behavior_digest: Digest::of(b"behavior"),
         workspace_id: "ws-1".to_string(),
         workspace_resolved_base: "a".repeat(40),
     };
@@ -233,4 +235,15 @@ fn a_source_snapshot_digest_covers_every_named_source_generation() {
     let mut moved_base = snapshot.clone();
     moved_base.workspace_resolved_base = "b".repeat(40);
     assert_ne!(moved_base.digest(), snapshot.digest());
+
+    // The frozen guidance digests are part of snapshot identity: a snapshot
+    // naming different SOUL/BEHAVIOR content names a different source
+    // universe, which is what keeps later guidance changes out of this Run.
+    let mut moved_soul = snapshot.clone();
+    moved_soul.agent_soul_digest = Digest::of(b"different-soul");
+    assert_ne!(moved_soul.digest(), snapshot.digest());
+
+    let mut moved_behavior = snapshot.clone();
+    moved_behavior.agent_behavior_digest = Digest::of(b"different-behavior");
+    assert_ne!(moved_behavior.digest(), snapshot.digest());
 }

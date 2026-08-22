@@ -42,6 +42,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "commands".to_string(),
             "configuration_components".to_string(),
             "configuration_revisions".to_string(),
+            "context_plans".to_string(),
             "context_source_snapshots".to_string(),
             "event_journal".to_string(),
             "execution_bindings".to_string(),
@@ -51,6 +52,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "journal_epochs".to_string(),
             "planning_operations".to_string(),
             "planning_records".to_string(),
+            "run_context_plans".to_string(),
             "run_status".to_string(),
             "runs".to_string(),
             "scheduler_state".to_string(),
@@ -245,7 +247,9 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
     assert_eq!(
         columns(&dir.db_path(), "context_source_snapshots"),
         [
+            "agent_behavior_digest",
             "agent_name",
+            "agent_soul_digest",
             "agent_version",
             "canonical_json",
             "configuration_activation_sequence",
@@ -259,6 +263,32 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "workspace_id",
             "workspace_resolved_base"
         ]
+    );
+
+    // The context-plan families carry exactly the immutable identities the
+    // attachment contract needs: a content-addressed plan bound to one source
+    // snapshot, and a one-time Run attachment. No mutable status, no provider
+    // representation, no authorization material has a column here.
+    assert_eq!(
+        columns(&dir.db_path(), "context_plans"),
+        [
+            "builder_version",
+            "canonical_json",
+            "created_at",
+            "digest",
+            "source_snapshot_digest"
+        ],
+        "a plan is its frozen selected semantics plus the snapshot it came from"
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "run_context_plans"),
+        [
+            "attached_at",
+            "context_plan_digest",
+            "context_source_snapshot_digest",
+            "run_id"
+        ],
+        "the Run attachment is exactly the composite identity T3a proves"
     );
     assert_eq!(
         columns(&dir.db_path(), "runs"),
@@ -390,5 +420,71 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
     assert!(
         slot.contains("UNIQUE") && slot.contains("active_slot IS NOT NULL"),
         "the single global execution slot must stay a partial unique index: {slot}"
+    );
+
+    // The composite parent key the run_context_plans foreign keys require.
+    // SQLite cannot add a UNIQUE constraint to `runs` without rebuilding it,
+    // so the parent key arrives as a unique index over exactly the two
+    // columns the attachment proves against.
+    let runs_parent: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'runs_id_and_source_snapshot'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the runs composite parent-key index exists");
+    assert!(
+        runs_parent.contains("UNIQUE")
+            && runs_parent.contains("id")
+            && runs_parent.contains("context_source_snapshot_digest"),
+        "the Run/snapshot composite parent key must be unique: {runs_parent}"
+    );
+
+    // The two holder-safe foreign keys on the attachment, as the canonical
+    // persistence contract specifies them: together they make attaching a
+    // plan built from any other snapshot a database-level impossibility.
+    let mut stmt = conn
+        .prepare(
+            "SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list('run_context_plans')",
+        )
+        .unwrap();
+    let mut fks: Vec<(String, String, Option<String>)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    fks.sort();
+    assert_eq!(
+        fks,
+        vec![
+            (
+                "context_plan_digest".to_string(),
+                "context_plans".to_string(),
+                Some("digest".to_string())
+            ),
+            (
+                "context_source_snapshot_digest".to_string(),
+                "context_plans".to_string(),
+                Some("source_snapshot_digest".to_string())
+            ),
+            (
+                "context_source_snapshot_digest".to_string(),
+                "runs".to_string(),
+                Some("context_source_snapshot_digest".to_string())
+            ),
+            (
+                "run_id".to_string(),
+                "runs".to_string(),
+                Some("id".to_string())
+            ),
+        ],
+        "run_context_plans must prove Run→frozen snapshot and plan→same snapshot"
     );
 }

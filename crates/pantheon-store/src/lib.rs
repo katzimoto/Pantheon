@@ -43,6 +43,14 @@
 //! allocation committing in that same transaction. See
 //! [`Store::execute_command`].
 //!
+//! On top of that it owns durable context preparation state: the immutable,
+//! content-addressed [`ContextPlan`](pantheon_core::context::ContextPlan)
+//! family, the one-time T3a Run attachment with its composite foreign keys —
+//! which prove relationally that an attached plan was built from exactly the
+//! source snapshot its Run froze — and the reads that let preparation
+//! reconstruct frozen sources by identity. See
+//! [`Store::attach_run_context_plan`].
+//!
 //! The canonical contract also names a small bounded read pool; there are no
 //! concurrent readers to pool yet, so read access is one read-only
 //! connection. The disaster-restore authority fence that rotates the
@@ -53,6 +61,7 @@
 mod artifacts;
 mod command;
 mod configuration;
+mod context;
 mod error;
 mod migrations;
 mod operator;
@@ -73,6 +82,10 @@ mod test_support;
 pub use artifacts::{ArtifactRecord, SealOutcome, SealedChangeset};
 pub use command::{Command, Committed, JournalCursor};
 pub use configuration::{ActiveConfiguration, ConfigurationPointer};
+pub use context::{
+    AttachedContextPlan, ContextPlanAttachment, GoalRevisionContent, RunContextPlanRecord,
+    RunRecord,
+};
 pub use error::StoreError;
 pub use operator::{Cursor, CursorError, EventRecord, GoalDetail, GoalSnapshot};
 pub use planning::{

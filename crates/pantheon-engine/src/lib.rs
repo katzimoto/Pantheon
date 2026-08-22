@@ -15,12 +15,14 @@
 //! and wire formats belong to `pantheon-operator-api`.
 //!
 //! Configuration publication, Goal-to-Ready-Task planning, pre-Run Agent /
-//! Execution Fabric routing and the single-slot scheduling path up to the T3
-//! Run-intent commit are implemented here. Attempt creation, preparation and
-//! concrete backends remain later boundaries. See
+//! Execution Fabric routing, the single-slot scheduling path up to the T3
+//! Run-intent commit, and deterministic Run context preparation from the
+//! frozen source snapshot are implemented here. Attempt creation and concrete
+//! backends remain later boundaries. See
 //! `docs/development/implementation.md`.
 
 pub mod configuration;
+pub mod context;
 pub mod operator;
 pub mod planning;
 pub mod routing;

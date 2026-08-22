@@ -83,6 +83,16 @@ pub const ROUTE_PREFERENCE_KEYS: &[&str] = &["contextCapacity"];
 /// The stable candidate identity keys accepted as route tie-breaks.
 pub const ROUTE_TIE_BREAK_KEYS: &[&str] = &["backendId", "agentId"];
 
+/// The maximum length of one Agent guidance body (SOUL or BEHAVIOR).
+///
+/// Guidance is a *bounded* trusted instruction body, not an arbitrary document:
+/// the Context Builder embeds it in mandatory ContextPlan sections, and an
+/// unbounded operator string would make that embedding unbounded too. 8192
+/// characters is generous for static identity/behavior principles and is a
+/// compile-time rejection, not a silent truncation — mandatory content is
+/// never trimmed.
+pub const MAX_GUIDANCE_CHARS: usize = 8192;
+
 /// Compiles configuration source text.
 ///
 /// # Errors
@@ -134,6 +144,8 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
                 "sandboxProfile",
                 "sandboxRequirements",
                 "actions",
+                "soul",
+                "behavior",
             ],
         )?;
         let name = as_str(field(entry, &prefix, "name")?, &path(&prefix, "name"))?.to_string();
@@ -177,6 +189,9 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
         non_empty_list(&competencies, &path(&prefix, "competencies"))?;
         unique_list(&competencies, "competency")?;
 
+        let soul = guidance(entry, &prefix, "soul")?;
+        let behavior = guidance(entry, &prefix, "behavior")?;
+
         agents.push(Agent {
             name,
             version: u32::try_from(version).map_err(|_| ConfigError::InvalidValue {
@@ -209,9 +224,29 @@ fn agents(value: &Value) -> Result<AgentComponent, ConfigError> {
                 requirements
             },
             actions,
+            soul,
+            behavior,
         });
     }
     Ok(AgentComponent { agents })
+}
+
+/// Reads one bounded static guidance body (SOUL or BEHAVIOR).
+///
+/// Required and non-empty: an Agent version without its approved identity or
+/// behavior guidance has no instruction provenance for a Run to freeze, so it
+/// does not compile rather than surfacing later as a preparation failure.
+fn guidance(entry: &Value, prefix: &str, key: &str) -> Result<String, ConfigError> {
+    let at = path(prefix, key);
+    let text = as_str(field(entry, prefix, key)?, &at)?.to_string();
+    non_empty(&text, &at)?;
+    if text.chars().count() > MAX_GUIDANCE_CHARS {
+        return Err(ConfigError::InvalidValue {
+            path: at,
+            detail: format!("must be at most {MAX_GUIDANCE_CHARS} characters"),
+        });
+    }
+    Ok(text)
 }
 
 fn routing(value: &Value) -> Result<RoutingComponent, ConfigError> {

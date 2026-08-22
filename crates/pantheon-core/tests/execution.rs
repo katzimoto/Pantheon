@@ -192,7 +192,7 @@ fn disabled_and_non_current_versions_are_not_inferred_from_order() {
 
     let old = VALID_SOURCE.replacen(
         r#""agents": ["#,
-        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":false,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"]},"#,
+        r#""agents": [{"name":"builder","version":2,"enabled":true,"current":false,"accepts":["code-change"],"competencies":["rust"],"routePolicy":"default","executionFeatures":["exec.shell"],"minContextTokens":8000,"sandboxProfile":"strict-local-container","sandboxRequirements":["isolation.control-plane"],"actions":["filesystem.read"],"soul":"Older version identity.","behavior":"Older version behavior."},"#,
         1,
     );
     let compiled = compile(&old).expect("version history compiles");

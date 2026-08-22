@@ -344,6 +344,8 @@ preload tier 3  drop first
 
 V1 does not use an LLM to decide what pre-launch requirements or context to remove.
 
+Implementation status (v0.1.0): no backend renderer exists yet, so preparation performs no token measurement and applies no capacity budget — it would otherwise be claiming a token count nothing measured. The drop machinery is deterministic over the frozen policy's priority/drop order and is proven by pure-domain tests with synthetic measurements; capacity evaluation arrives with backend rendering, and until then a Run's plan contains only mandatory content plus bounded references. In the MVP the static approved SOUL/BEHAVIOR guidance of the selected Agent version is carried as bounded text inside the immutable agents configuration component; its digests are frozen into the ContextSourceSnapshot at T3 and validated against that stored component both at commit time and at every later preparation. A plan's section order is a deterministic function of the sections alone — inclusion class, then authority stratum, then a fixed kind ordinal, then key — so walking the list in order never presents lower-authority content above higher-authority content; the frozen policy contributes through mandatory-section satisfiability and the optional drop order, not through ordering.
+
 ## Memory freezing
 
 If the memory retriever selects items A and C, the ContextPlan records their exact digests/versions and the retriever/policy/index provenance that affected selection.

@@ -12,7 +12,14 @@ use crate::config::model::{
 /// It participates in the revision digest, so a future change to how Pantheon
 /// compiles configuration produces a different identity rather than silently
 /// reinterpreting an existing one.
-pub const COMPILER_VERSION: &str = "pantheon-config-v2";
+///
+/// `v3` added the required per-Agent static guidance bodies (`soul`,
+/// `behavior`): a source document that compiled under `v2` no longer compiles,
+/// and the agents component's canonical form carries two new fields. Revisions
+/// recorded under an earlier version remain verifiable against their own
+/// recorded compiler version; they simply never name Agent guidance, so a Run
+/// frozen to one fails preparation closed rather than substituting semantics.
+pub const COMPILER_VERSION: &str = "pantheon-config-v3";
 
 /// The distinct component digests an immutable decision may bind.
 ///

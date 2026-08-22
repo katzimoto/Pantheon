@@ -221,6 +221,33 @@ pub enum StoreError {
     /// writer is poisoned by an earlier panic, or a caller attempted to
     /// re-enter the serialized authoritative writer it already holds.
     ConnectionUnavailable(String),
+    /// A ContextPlan attachment named a Run that does not exist.
+    ///
+    /// Typed so preparation can distinguish "this Run is gone" from "the
+    /// attachment's other claims failed" without parsing text.
+    RunNotFound { run_id: String },
+    /// A ContextPlan attachment claimed a source snapshot other than the one
+    /// its Run froze at T3.
+    ///
+    /// This is exactly the substitution the context contract forbids — a plan
+    /// built against a different semantic source universe reaching for a Run.
+    /// The composite foreign keys refuse it at the database layer too; this
+    /// variant is the typed form of that refusal.
+    ContextSourceMismatch {
+        run_id: String,
+        frozen: String,
+        proposed: String,
+    },
+    /// A different ContextPlan was proposed for a Run that already has one
+    /// attached.
+    ///
+    /// Attachment is one-time and immutable. Same Run + same plan reconciles;
+    /// anything else fails closed rather than replacing the initial plan.
+    RunContextPlanConflict {
+        run_id: String,
+        attached_plan: String,
+        proposed_plan: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -368,6 +395,27 @@ impl fmt::Display for StoreError {
             Self::ConnectionUnavailable(detail) => {
                 write!(f, "store connection unavailable: {detail}")
             }
+            Self::RunNotFound { run_id } => {
+                write!(f, "run {run_id} does not exist")
+            }
+            Self::ContextSourceMismatch {
+                run_id,
+                frozen,
+                proposed,
+            } => write!(
+                f,
+                "run {run_id} froze source snapshot {frozen}; a plan built from \
+                 {proposed} cannot attach to it"
+            ),
+            Self::RunContextPlanConflict {
+                run_id,
+                attached_plan,
+                proposed_plan,
+            } => write!(
+                f,
+                "run {run_id} already has plan {attached_plan} attached; the different \
+                 plan {proposed_plan} cannot replace it"
+            ),
         }
     }
 }
@@ -396,6 +444,9 @@ impl std::error::Error for StoreError {
             | Self::DispatchSlotUnavailable { .. }
             | Self::TaskNotDispatchable { .. }
             | Self::GoalNotDispatchable { .. }
+            | Self::RunNotFound { .. }
+            | Self::ContextSourceMismatch { .. }
+            | Self::RunContextPlanConflict { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }
