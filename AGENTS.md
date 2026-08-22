@@ -25,7 +25,8 @@ complete or handing it off. It works from anywhere in the repository, and CI run
 the same command on Linux.
 
 It runs the GitHub Actions pin check, the documentation checks, the internal
-crate dependency check, the store read-path check, formatting, Clippy with
+crate dependency check, the store read-path check, the untracked-artifact
+immunity regression, formatting, Clippy with
 warnings denied, the tests, and rustdoc with warnings denied — all against the
 committed lockfile. It needs the pinned Rust toolchain and ordinary OS build
 prerequisites, and nothing else.

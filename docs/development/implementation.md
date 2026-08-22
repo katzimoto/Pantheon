@@ -347,7 +347,10 @@ build prerequisites — no task runner, no test runner, no auditing tool, no oth
 language runtime.
 
 It runs the GitHub Actions pin check, the documentation checks, the crate
-dependency check, the store read-path check, `cargo fmt --check`, workspace
+dependency check, the store read-path check, the untracked-artifact immunity
+regression (#94: hostile untracked decoys are planted in a scratch copy of the
+candidate tree, and the documentation and dependency checks must be unaffected),
+`cargo fmt --check`, workspace
 Clippy with warnings denied, workspace tests, and rustdoc with warnings denied,
 all with `--locked`.
 

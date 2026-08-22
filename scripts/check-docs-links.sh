@@ -32,7 +32,7 @@
 #      evidence is written are the part other tools read. This checks the
 #      template only. Nothing inspects the body of an actual pull request.
 #
-# Uses POSIX shell and standard POSIX utilities only (find, grep, sed, sort,
+# Uses POSIX shell and standard POSIX utilities (git, grep, sed, awk, sort,
 # comm, uniq, wc, tr). No interpreter, package manager or external tooling.
 #
 # Usage: scripts/check-docs-links.sh        (run from anywhere in the repository)
@@ -47,27 +47,41 @@ report() {
 	status=1
 }
 
-# Repository documentation only. `target/` is pruned along with `.git` because
-# it is generated: rustdoc emits Markdown into target/doc, and a dependency's
-# vendored Markdown lands there too. Scanning it would make this check report
-# broken references in files nobody wrote, and would make the result depend on
-# whether the tree had been built — `scripts/verify.sh` runs this check and then
-# `cargo doc`, so the next run would be inspecting the previous run's output.
-# A vendored `node_modules` is pruned wherever it sits, hidden or not: it ships
-# Markdown whose relative links point inside its own package, and it is not
-# Pantheon documentation. Other hidden directories are pruned for the same
-# reason: tooling that lives in dot-directories (editor state, local agent
-# installs) is not repository documentation. `.agents` and `.github` are
-# held out of that prune because they ARE tracked repository content — the
-# skills and the PR template are dense with checked references — and the
-# coverage assertion below fails closed if a future edit narrows the scan past
-# any tracked file.
-files=$(find . -path './.git' -prune -o -path './target' -prune \
-	-o -path '*/node_modules' -prune \
-	-o -path './.*' ! -path './.agents' ! -path './.agents/*' \
-	! -path './.github' ! -path './.github/*' -prune \
-	-o -name '*.md' -print |
-	sed 's|^\./||' | sort)
+# Repository documentation only — and only the candidate repository. The scan
+# starts from `git ls-files`, so verification depends on what the reviewed
+# tree can contain and can never trip over ambient untracked files in whatever
+# workspace happens to run it (#94). The prunes below now decide only which
+# *tracked* files are validated, and each exists for a stated reason:
+#
+#   - `target/` is generated: rustdoc emits Markdown into target/doc, and a
+#     dependency's vendored Markdown lands there too. Scanning it would report
+#     broken references in files nobody wrote, and would make the result depend
+#     on whether the tree had been built — `scripts/verify.sh` runs this check
+#     and then `cargo doc`, so the next run would be inspecting the previous
+#     run's output.
+#   - A vendored `node_modules` ships Markdown whose relative links point
+#     inside its own package, wherever it sits, hidden or not.
+#   - Other top-level hidden directories are tooling state (editor droppings,
+#     local agent installs), not repository documentation. `.agents` and
+#     `.github` are held out of that prune because they ARE tracked repository
+#     content — the skills and the PR template are dense with checked
+#     references.
+#
+# The fence below still fails closed if one of these prunes ever drops a
+# tracked file from validation: coverage is compared against git, which is the
+# definition of "tracked", not against this script's own idea of what matters.
+# What changed in #94 is the direction of discovery: untracked candidates are
+# structurally absent instead of excluded by pattern.
+files=$(git ls-files '*.md' | awk '
+	/^target\// { next }
+	/(^|\/)node_modules\// { next }
+	/^\./ {
+		seg = $0
+		sub(/\/.*$/, "", seg)
+		if (seg != ".agents" && seg != ".github") next
+	}
+	{ print }
+')
 
 # The scan must cover every tracked Markdown file exactly. This is the fence
 # that keeps a future pruning change from silently dropping tracked files from
@@ -126,11 +140,17 @@ if [ -f "$map" ]; then
 	sed -n 's#^| `\(docs/architecture/[a-z0-9-]*/[a-z0-9-]*\.md\)` |.*#\1#p' "$map" |
 		sort >/tmp/docs-map-listed.$$
 
-	# Contracts on disk. -mindepth 2 skips overview.md and the architecture map
-	# itself; -name excludes any per-domain README. Those are navigation or
-	# system-model documents, not domain contracts, and are linked in prose.
-	find docs/architecture -mindepth 2 -name '*.md' ! -name 'README.md' |
-		sed 's|^\./||' | sort >/tmp/docs-map-ondisk.$$
+	# Contracts on disk — candidate scope again (#94): the listing comes from
+	# git, so an untracked file dropped into a domain directory can never be
+	# mistaken for an unlisted contract. -mindepth-2 semantics are reproduced
+	# by excluding single-level entries (the overview and the architecture map
+	# itself) and any per-domain README; those are navigation or system-model
+	# documents, not domain contracts, and are linked in prose.
+	git ls-files 'docs/architecture/*.md' | awk '
+		/\/README\.md$/ { next }
+		/^docs\/architecture\/[^\/]+\.md$/ { next }
+		{ print }
+	' | sort >/tmp/docs-map-ondisk.$$
 
 	# Contract paths are lowercase kebab-case (see docs/README.md). Report a
 	# violation as a naming error and hold it out of the inventory comparison
