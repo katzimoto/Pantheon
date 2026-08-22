@@ -640,7 +640,12 @@ impl TrustedBaseReader for GitBaseReader {
         // object format, which is exactly what makes the names comparable
         // with the base tree's. `--no-filters` pins the identity to raw
         // bytes alone: no clean filter, CRLF conversion or attribute rule
-        // may influence what a captured payload's name is.
+        // may influence what a captured payload's name is. The exclusion is
+        // safe because its failure direction is harmless: a filter that
+        // *would* have transformed content can only make an unchanged file
+        // look changed — costing one extra preimage fetch that then
+        // classifies correctly — it can never make a changed file look
+        // unchanged.
         let stage = self.sterile.scratch_dir("base-compare").map_err(|err| {
             fault(
                 code::CAPTURE_IO,

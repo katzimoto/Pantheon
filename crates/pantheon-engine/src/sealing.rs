@@ -190,12 +190,21 @@ pub trait TrustedBaseReader {
     /// canonical kind and size match its base entry is unchanged exactly
     /// when this name equals the base entry's recorded name, so sealing
     /// never needs the bytes of a same-size base blob that did not change.
-    /// The names are compared against base metadata only; they never enter
-    /// Artifact or CAS identity, which stay SHA-256 over exact bytes.
-    /// Implementations must consult only controller-owned state and the
-    /// source repository itself — never worker Workspace Git state — and
-    /// must derive names from payload bytes alone, so the result is
-    /// deterministic and independent of process-local cache warmth.
+    ///
+    /// The verdict's collision resistance is therefore the source
+    /// repository's object format's, deliberately: making a changed file
+    /// pass as unchanged would take a *second preimage* of that
+    /// repository's object hash under a specific recorded name — unbroken
+    /// for SHA-1, whose known weaknesses are chosen-prefix collisions
+    /// requiring control of both sides, and further met by Git's own
+    /// detection of published SHA-1 collision shapes — while a repository
+    /// on the SHA-256 object format carries full modern strength end to
+    /// end. The names never enter Artifact or CAS identity, which stay
+    /// SHA-256 over exact bytes. Implementations must consult only
+    /// controller-owned state and the source repository itself — never
+    /// worker Workspace Git state — and must derive names from payload
+    /// bytes alone, so the result is deterministic and independent of
+    /// process-local cache warmth.
     ///
     /// Returns exactly one name per payload, in input order.
     ///
