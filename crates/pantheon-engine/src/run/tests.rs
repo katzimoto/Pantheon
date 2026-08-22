@@ -1181,7 +1181,7 @@ fn bearer_material_never_reaches_disk_or_debug_output() {
 
 #[test]
 fn policy_readiness_refuses_a_binding_whose_profile_identity_vanished() {
-    let mut world = world_with_run("policy-refusal", |_authority, store| {
+    let world = world_with_run("policy-refusal", |_authority, store| {
         let active = store
             .configuration_pointer()
             .expect("pointer")
