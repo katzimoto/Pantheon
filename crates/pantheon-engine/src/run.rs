@@ -104,10 +104,11 @@ impl RandomBytes for OsRandom {
 
 /// One high-entropy opaque Agent Control bearer.
 ///
-/// 256 bits of entropy rendered as 64 hex characters. [`fmt::Debug`] and
-/// [`fmt::Display`] redact deliberately: a bearer printed through any log or
-/// diagnostic path is a leaked credential. Delivery happens only through
-/// [`Bearer::expose`] into the launch package.
+/// 256 bits of entropy rendered as 64 hex characters. There is no
+/// [`fmt::Display`] impl at all, and the manual [`fmt::Debug`] redacts: a
+/// bearer printed through any log or diagnostic path is a leaked credential,
+/// so the type cannot be accidentally stringified. Delivery happens only
+/// through [`Bearer::expose`] into the launch package.
 pub struct Bearer(String);
 
 impl Bearer {

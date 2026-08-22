@@ -1,2 +1,15 @@
 # Cargo build directory. The only artifact this repository currently produces.
 /target/
+
+# Local agent-tooling output. These paths appear in working trees during
+# development and must never be swept into a commit by a broad `git add`:
+# one scratch cache already reached a mission branch this way.
+/graphify-out/
+/outputs/
+/.cursor/
+/.kiro/
+/.windsurf/
+/.gemini/
+/.codex/
+/.clinerules
+/opencode.json
