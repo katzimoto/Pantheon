@@ -98,7 +98,7 @@ total=$(printf '%s\n' "$records" | awk 'END { print NR }')
 preflight_failed=$scratch/preflight.failed
 : >"$preflight_failed"
 
-printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence; do
+printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence occ_declared; do
 	if [ -z "$name" ] || [ -z "$file" ] || [ -z "$find" ] || [ -z "$scope" ] || [ -z "$test" ]; then
 		printf 'ERROR [%s]: the record is missing a required field; name, file, find, scope and test must all be present.\n' \
 			"${name:-<unnamed>}" >&2
@@ -115,6 +115,7 @@ printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find rep
 	# nothing is written anywhere.
 	if ! MUTANT_MODE=check MUTANT_NAME="$name" MUTANT_FIND="$find" \
 		MUTANT_REPLACE="$replace" MUTANT_WANT="$occurrence" \
+		MUTANT_OCC_DECLARED="$occ_declared" \
 		awk -f "$engine" "$file" >/dev/null; then
 		echo "$name" >>"$preflight_failed"
 	fi
@@ -143,7 +144,7 @@ rsync -a --exclude target --exclude .git ./ "$scratch/tree/"
 survivors=0
 checked=0
 
-printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence; do
+printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r name file find replace scope test runs occurrence occ_declared; do
 	[ -n "$name" ] || continue
 	if [ -n "$selected" ]; then
 		case " $selected " in

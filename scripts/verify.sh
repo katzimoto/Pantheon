@@ -31,6 +31,13 @@ cd "$root"
 ./scripts/check-skill-symlinks.sh
 ./scripts/check-skill-conformance.sh
 ./scripts/check-skill-conformance.sh --self-test
+# The mutation-harness self-test proves the properties #82 established
+# (formatting-stable anchors, fail-closed diagnostics, validation ordering)
+# against synthetic fixtures. It compiles nothing and runs in seconds, and it
+# is the only fence for those properties: the 83-record suite proves the
+# harness kills what it already knows about, not that the matcher semantics
+# still hold.
+./scripts/check-mutants-selftest.sh
 ./scripts/check-hooks.sh
 
 cargo fmt --all -- --check

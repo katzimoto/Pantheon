@@ -9,14 +9,21 @@
 #
 #   parse   Read the manifest named by FILENAME argument; emit one
 #           tab-separated record per mutant:
-#             name file find replace scope test runs occurrence
-#           Defaults runs=3, occurrence=1. Unknown keys and duplicate names
-#           fail closed. Comments (#) and blank paragraphs are skipped.
+#             name file find replace scope test runs occurrence occ-declared
+#           Defaults runs=3, occurrence=1; the ninth field is 1 only when
+#           the record declared `occurrence:` explicitly, so callers can
+#           tell a pinned choice from a default. Unknown keys and duplicate
+#           names fail closed. Comments (#) and blank paragraphs are
+#           skipped.
 #
 #   check   Locate the anchor of one record in its target file and prove the
 #           mutation would change bytes — without writing anything. Exit 0
 #           and print "<count>\t<startline>\t<chosenline>"; exit 1 with a
-#           precise diagnostic naming the file and failure otherwise.
+#           precise diagnostic naming the file and failure otherwise. When
+#           an anchor matches more than once and the occurrence was not
+#           explicitly declared (MUTANT_OCC_DECLARED != 1), emit a warning:
+#           normalization makes silent first-match selection more likely,
+#           and the mutant would then test a line its author did not mean.
 #
 #   apply   Emit the mutated file to stdout using identical resolution;
 #           exit 1 with a diagnostic if the anchor is unresolvable or the
@@ -210,9 +217,10 @@ function flush_record() {
 	if (r_name in rec_seen) fail(manifest_path ": duplicate mutant name " r_name)
 	rec_seen[r_name] = 1
 	if (r_runs == "") r_runs = 3
+	occ_declared = r_occurrence == "" ? 0 : 1
 	if (r_occurrence == "") r_occurrence = 1
-	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
-		r_name, r_file, r_find, r_replace, r_scope, r_test, r_runs, r_occurrence
+	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", \
+		r_name, r_file, r_find, r_replace, r_scope, r_test, r_runs, r_occurrence, occ_declared
 	r_name = ""; r_file = ""; r_find = ""; r_replace = ""
 	r_scope = ""; r_test = ""; r_runs = ""; r_occurrence = ""
 }
@@ -245,6 +253,14 @@ BEGIN {
 			fail(sprintf("%s: %s: the anchor no longer matches; the source moved or was reformatted past recognition", target, label))
 		fail(sprintf("%s: %s: %d match(es), fewer than the requested occurrence %d", target, label, m_count, want))
 	}
+
+	# Normalization can make an anchor that was unique verbatim ambiguous:
+	# whitespace no longer distinguishes two sites. A record that then takes
+	# its default first match still applies and still gets killed — quietly
+	# testing a line its author did not mean. Surface it every validation
+	# run; pinning `occurrence:` turns the warning off.
+	if (mode == "check" && m_count > 1 && ENVIRON["MUTANT_OCC_DECLARED"] != "1")
+		printf "warning [%s]: %s matches %d places and occurrence is not pinned; taking the first. Declare occurrence: to keep the target fixed.\n", label, target, m_count > "/dev/stderr"
 
 	mutated = render(replace)
 	if (mutated == original_text())

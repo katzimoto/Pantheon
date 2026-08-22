@@ -79,12 +79,20 @@ find: x + 1
 replace: x + 2
 scope: -p fixture --lib
 test: fixture::tests::second
+
+name: pinned-occurrence
+file: src/code.rs
+find: x + 1
+replace: x + 2
+scope: -p fixture --lib
+test: fixture::tests::pinned
+occurrence: 2
 EOF
 printf 'fn f() { if a  == "b\\tc" { } }\nfn g() { x + 1 }\n' >"$root/src/code.rs"
 
 parsed=$(MUTANT_MODE=parse awk -f "$engine" "$root/mutants.txt")
-[ "$(printf '%s\n' "$parsed" | wc -l | tr -d ' ')" = "2" ] ||
-	fail "parse did not emit two records"
+[ "$(printf '%s\n' "$parsed" | wc -l | tr -d ' ')" = "3" ] ||
+	fail "parse did not emit three records"
 field_of() {
 	# field_of <record-number> <field-number>
 	printf '%s\n' "$parsed" | sed -n "$1p" | awk -F'\t' -v f="$2" 'NR == 1 { print $f }'
@@ -94,12 +102,12 @@ field_of() {
 	fail "find value did not round-trip verbatim: $(field_of 1 3)"
 [ "$(field_of 1 4)" = 'if true { /* "quoted" \n stays literal */ }' ] ||
 	fail "replace value did not round-trip verbatim: $(field_of 1 4)"
-[ "$(field_of 1 7)" = "3" ] && [ "$(field_of 1 8)" = "1" ] ||
-	fail "defaults runs=3 occurrence=1 not applied"
-[ "$(field_of 2 1)" = "second-record" ] &&
-	[ "$(field_of 2 6)" = "fixture::tests::second" ] ||
-	fail "second record mis-parsed"
-ok "manifest values round-trip (spaces, backslashes, quotes, hashes); defaults applied"
+[ "$(field_of 1 7)" = "3" ] && [ "$(field_of 1 8)" = "1" ] &&
+	[ "$(field_of 1 9)" = "0" ] ||
+	fail "defaults runs=3 occurrence=1 undeclared not applied"
+[ "$(field_of 3 8)" = "2" ] && [ "$(field_of 3 9)" = "1" ] ||
+	fail "explicit occurrence not flagged as declared"
+ok "manifest values round-trip; defaults applied; occurrence declaration tracked"
 
 # ---- formatting resilience --------------------------------------------------
 
@@ -330,23 +338,67 @@ fn f(x: i64) -> i64 {
 }
 EOF
 counted=$(MUTANT_MODE=check MUTANT_NAME=ambig MUTANT_FIND='if x > 0 && x < 100 {' \
-	MUTANT_REPLACE='if false {' MUTANT_WANT=1 awk -f "$engine" "$root/src/lib.rs") ||
+	MUTANT_REPLACE='if false {' MUTANT_WANT=1 MUTANT_OCC_DECLARED=1 \
+	awk -f "$engine" "$root/src/lib.rs") ||
 	fail "comment+code ambiguity rejected instead of counted"
 [ "$(printf '%s' "$counted" | cut -f1)" = "2" ] ||
 	fail "comment line not counted: $counted"
 [ "$(printf '%s' "$counted" | cut -f2)" = "1" ] ||
 	fail "occurrence 1 does not resolve to the comment line: $counted"
 chosen=$(MUTANT_MODE=check MUTANT_NAME=ambig MUTANT_FIND='if x > 0 && x < 100 {' \
-	MUTANT_REPLACE='if false {' MUTANT_WANT=2 awk -f "$engine" "$root/src/lib.rs")
+	MUTANT_REPLACE='if false {' MUTANT_WANT=2 MUTANT_OCC_DECLARED=1 \
+	awk -f "$engine" "$root/src/lib.rs")
 [ "$(printf '%s' "$chosen" | cut -f2)" = "3" ] ||
 	fail "occurrence 2 does not resolve to the code line: $chosen"
 applied=$(MUTANT_MODE=apply MUTANT_NAME=ambig MUTANT_FIND='if x > 0 && x < 100 {' \
-	MUTANT_REPLACE='if false {' MUTANT_WANT=2 awk -f "$engine" "$root/src/lib.rs")
+	MUTANT_REPLACE='if false {' MUTANT_WANT=2 MUTANT_OCC_DECLARED=1 \
+	awk -f "$engine" "$root/src/lib.rs")
 printf '%s' "$applied" | sed -n '1p' | grep -qF '// if x > 0' ||
 	fail "occurrence 2 disturbed the comment line"
 printf '%s' "$applied" | sed -n '3p' | grep -qF 'if false {' ||
 	fail "occurrence 2 missed the code line"
 ok "comments count like code, visibly, and occurrence disambiguates"
+
+# Normalization can make an anchor that was unique verbatim ambiguous. An
+# unpinned record would silently test the first match; the checker must make
+# that visible on every validation run, and stop once occurrence is pinned.
+make_root ambiguity
+cat >"$root/src/lib.rs" <<'EOF'
+// if x > 0 && x < 100 {
+fn f(x: i64) -> i64 {
+    if x > 0 && x < 100 {
+        x * 2
+    } else {
+        0
+    }
+}
+EOF
+cat >"$root/mutants.txt" <<'EOF'
+name: unpinned-ambiguous
+file: src/lib.rs
+find: if x > 0 && x < 100 {
+replace: if false && x < 100 {
+scope: -p fixture --lib
+test: fixture::tests::gate
+EOF
+warned=$(MUTANTS_ROOT="$root" MUTANTS_MANIFEST="mutants.txt" \
+	"$root/scripts/check-mutants.sh" --check 2>&1 >/dev/null) || fail "ambiguous anchor should validate, not fail"
+printf '%s' "$warned" | grep -qF 'warning [unpinned-ambiguous]: src/lib.rs matches 2 places and occurrence is not pinned' ||
+	fail "ambiguity warning missing for unpinned record: $warned"
+cat >"$root/mutants.txt" <<'EOF'
+name: pinned-ambiguous
+file: src/lib.rs
+find: if x > 0 && x < 100 {
+replace: if false && x < 100 {
+scope: -p fixture --lib
+test: fixture::tests::gate
+occurrence: 2
+EOF
+quiet=$(MUTANTS_ROOT="$root" MUTANTS_MANIFEST="mutants.txt" \
+	"$root/scripts/check-mutants.sh" --check 2>&1 >/dev/null) || fail "pinned ambiguous record failed validation"
+printf '%s' "$quiet" | grep -qF 'occurrence is not pinned' &&
+	fail "warning fired although occurrence was explicitly declared: $quiet"
+ok "unpinned ambiguity warns by name; pinning occurrence silences it"
 
 # ---- compatibility: the repository's own records ---------------------------
 
