@@ -718,6 +718,36 @@ fn an_exact_replay_reconciles_the_same_candidate() {
 }
 
 #[test]
+fn the_same_request_identity_with_different_semantics_fails_closed_in_t6() {
+    let world = world("t6-hash-conflict", 1);
+    let artifact = seal_for_submission(&world, SLOT, 1);
+    submit(
+        &world,
+        &bearer_verifier(1),
+        "req-submit",
+        [3u8; 32],
+        &[(SLOT.to_string(), artifact)],
+    )
+    .expect("first submission commits");
+
+    // Same (attempt, request) identity, different canonical request hash —
+    // caller misuse, never a retry. The stored outcome is untouched.
+    let error = submit(
+        &world,
+        &bearer_verifier(1),
+        "req-submit",
+        [4u8; 32],
+        &[(SLOT.to_string(), artifact)],
+    )
+    .expect_err("identity reuse with different semantics fails closed");
+    assert!(
+        matches!(error, StoreError::AgentRequestConflict { .. }),
+        "{error:?}"
+    );
+    assert_eq!(count(&world, "SELECT COUNT(*) FROM candidates"), 1);
+}
+
+#[test]
 fn a_new_request_id_after_a_committed_submission_cannot_mint_authority() {
     let world = world("t6-new-request-after-success", 1);
     let artifact = seal_for_submission(&world, SLOT, 1);
@@ -896,6 +926,35 @@ fn a_stale_task_revision_conflicts_without_partial_writes() {
         .expect("run row");
     assert_eq!(phase, "Active");
     assert_eq!(target, None);
+}
+
+#[test]
+fn a_stale_revision_conflicts_before_content_is_examined() {
+    let world = world("t6-stale-before-content", 1);
+    // A doubly-invalid submission: the Task revision expectation is stale
+    // AND the referenced Artifact does not exist. The canonical ordering is
+    // that the revision gate decides first — a caller with a stale view is
+    // told to re-read, not handed a verdict about content it cannot know.
+    let conn = Connection::open(&world.db_path).expect("raw conn");
+    let revision = task_revision(&conn);
+    drop(conn);
+    let candidate = CandidateResult::new(TASK, RUN, [(SLOT.to_string(), Digest::of(b"ghost"))])
+        .expect("valid mapping");
+    let error = world
+        .store()
+        .submit_candidate(&submission(
+            &bearer_verifier(1),
+            "req-stale-order",
+            &[6u8; 32],
+            &candidate,
+            Revision::new(revision + 7),
+        ))
+        .expect_err("the stale view loses first");
+    assert!(
+        matches!(error, StoreError::RevisionConflict { .. }),
+        "expected the revision gate to decide first, got {error:?}"
+    );
+    assert_eq!(count(&world, "SELECT COUNT(*) FROM candidates"), 0);
 }
 
 #[test]
@@ -1199,6 +1258,96 @@ fn incomplete_artifact_refuses() {
         "{error:?}"
     );
     assert_eq!(count(&world, "SELECT COUNT(*) FROM candidates"), 0);
+}
+
+#[test]
+fn a_retrying_seal_never_overwrites_recorded_provenance() {
+    let world = world("provenance-drift", 4);
+    let artifact = seal_for_submission(&world, SLOT, 1);
+
+    // Corrupt the recorded provenance to name foreign content.
+    let foreign = Digest::of(b"content-some-other-lineage-produced");
+    let conn = Connection::open(&world.db_path).expect("raw conn");
+    conn.execute(
+        "INSERT INTO artifacts (digest, artifact_kind, canonical_json, created_at)
+         VALUES (?1, 'code.changeset', '{}', unixepoch())",
+        rusqlite::params![foreign.as_bytes()],
+    )
+    .expect("foreign content row");
+    conn.execute(
+        "UPDATE production_records SET artifact_digest = ?1
+         WHERE run_id = ?2 AND output_slot = ?3",
+        rusqlite::params![foreign.as_bytes(), RUN, SLOT],
+    )
+    .expect("drift injected");
+    drop(conn);
+
+    // A retry of the seal (new command identity over the same frozen state)
+    // recomputes the same content claim — and must refuse rather than
+    // overwrite the recorded provenance.
+    let error = seal_for_submission_err(&world, SLOT);
+    assert!(
+        matches!(error, StoreError::ContentIdentityConflict { .. }),
+        "{error:?}"
+    );
+}
+
+/// Re-drives publication for an already-frozen Workspace and returns the
+/// typed refusal instead of panicking.
+fn seal_for_submission_err(world: &World, slot: &str) -> StoreError {
+    let store = world.store();
+    let epoch = store.restore_generation().expect("generation");
+    let ws = store
+        .workspace_record(WORKSPACE)
+        .expect("workspace readable")
+        .expect("workspace exists");
+    let authority = SealAuthority {
+        run_id: RUN.to_string(),
+        expected_run_revision: run_status_revision(store),
+    };
+    // The Workspace is already Frozen; the revalidation command re-proves
+    // authority without a second freeze.
+    store
+        .validate_seal_authority_command(
+            &command(epoch.as_str(), "cmd-revalidate", &[43u8; 32], "x"),
+            &authority,
+            TASK,
+            slot,
+            WORKSPACE,
+            ws.revision,
+        )
+        .expect("revalidation holds");
+
+    let manifest = "{\"entries\":[],\"schemaVersion\":1,\"variant\":\"1\"}";
+    let artifact_digest = Digest::of(manifest.as_bytes());
+    match store.commit_changeset_seal(
+        &command(
+            epoch.as_str(),
+            "cmd-reseal",
+            &[45u8; 32],
+            "workspace.sealed",
+        ),
+        &SealedChangeset {
+            workspace_id: WORKSPACE,
+            task_id: TASK,
+            fence_revision: Revision::new(ws.revision.get()),
+            authority: &authority,
+            output_slot: slot,
+            repository: "repo://project",
+            resolved_base: ws.resolved_base.as_str(),
+            revision_state_digest: Digest::of(b"state"),
+            revision_state_json: manifest,
+            artifact_digest,
+            artifact_json: manifest,
+            members: Vec::new(),
+            producer: Some(ProducerProvenance {
+                attempt_id: ATTEMPT,
+            }),
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("drifted provenance must be refused"),
+    }
 }
 
 #[test]

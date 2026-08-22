@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 use pantheon_cas::LocalFsCas;
-use pantheon_core::config::canonical::Value;
 use pantheon_core::config::Digest;
+use pantheon_core::config::canonical::Value;
 use pantheon_core::context::{CONTEXT_BUILDER_VERSION, guidance_digest};
 use pantheon_core::execution::LogicalAgentVersion;
 use pantheon_core::planning::direct::{self, PlanningInput, Trigger};
@@ -148,15 +148,16 @@ fn goal_spec(resources: &[&str]) -> GoalSpec {
 /// then T3a/T4 so an authenticated Attempt exists — returning everything the
 /// gateway and the worker need.
 #[allow(clippy::too_many_lines)]
-fn ready_lineage(
-    store: &Store,
-    dir: &TempDir,
-    seed: u8,
-) -> (String /* attempt id */, Bearer) {
+fn ready_lineage(store: &Store, dir: &TempDir, seed: u8) -> (String /* attempt id */, Bearer) {
     let epoch = store.restore_generation().expect("generation");
     ConfigurationAuthority::new(store)
         .activate(
-            &command(epoch.as_str(), "cfg-1", &[1u8; 32], "configuration.activated"),
+            &command(
+                epoch.as_str(),
+                "cfg-1",
+                &[1u8; 32],
+                "configuration.activated",
+            ),
             &SourceSet::single("pantheon.json", configuration_source()),
         )
         .expect("configuration activates");
@@ -172,7 +173,12 @@ fn ready_lineage(
         .expect("create Goal");
     planning
         .plan(
-            &command(epoch.as_str(), "planning-1", &[3u8; 32], "planning.recorded"),
+            &command(
+                epoch.as_str(),
+                "planning-1",
+                &[3u8; 32],
+                "planning.recorded",
+            ),
             "planning-1",
             "goal-1",
         )
@@ -205,21 +211,25 @@ fn ready_lineage(
     let control = dir.path().join("control");
     let workspace_root = dir.path().join("workspaces");
     let requested = pantheon_core::workspace::RequestedBase::parse("refs/heads/main").expect("ref");
-    WorkspaceController::new(store, &GitMaterializer::new(&control).expect("materializer"), &workspace_root)
-        .ensure(
-            &WorkspaceCommand {
-                epoch: epoch.as_str(),
-                id: "ws-1",
-                request_hash: &[5u8; 32],
-            },
-            "workspace-1",
-            "task-1",
-            &WorkspaceRequest {
-                source: &dir.path().join("source"),
-                requested_base: &requested,
-            },
-        )
-        .expect("the workspace becomes Ready");
+    WorkspaceController::new(
+        store,
+        &GitMaterializer::new(&control).expect("materializer"),
+        &workspace_root,
+    )
+    .ensure(
+        &WorkspaceCommand {
+            epoch: epoch.as_str(),
+            id: "ws-1",
+            request_hash: &[5u8; 32],
+        },
+        "workspace-1",
+        "task-1",
+        &WorkspaceRequest {
+            source: &dir.path().join("source"),
+            requested_base: &requested,
+        },
+    )
+    .expect("the workspace becomes Ready");
 
     // T3 with the frozen facts the scheduler would commit.
     let active = store
@@ -353,7 +363,11 @@ fn a_worker_drives_seal_and_submission_through_agent_control_alone() {
     let (attempt_id, bearer) = ready_lineage(&store, &dir, 7);
 
     // The worker edits its Workspace: modify one tracked file, add another.
-    let repo = dir.path().join("workspaces").join("workspace-1").join("repo");
+    let repo = dir
+        .path()
+        .join("workspaces")
+        .join("workspace-1")
+        .join("repo");
     std::fs::write(repo.join("app.txt"), b"fixed\n").expect("modify");
     std::fs::create_dir_all(repo.join("src")).expect("src");
     std::fs::write(repo.join("src/new.rs"), b"brand new\n").expect("add");
@@ -421,10 +435,12 @@ fn a_worker_drives_seal_and_submission_through_agent_control_alone() {
         },
     );
     assert!(
-        matches!(&second,
+        matches!(
+            &second,
             Err(pantheon_engine::agent_control::AgentControlError::Store(
                 pantheon_store::StoreError::SubmissionStaleAuthority { .. }
-            ))),
+            ))
+        ),
         "{second:?}"
     );
 
