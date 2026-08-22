@@ -1263,7 +1263,7 @@ fn incomplete_artifact_refuses() {
 #[test]
 fn a_retrying_seal_never_overwrites_recorded_provenance() {
     let world = world("provenance-drift", 4);
-    let artifact = seal_for_submission(&world, SLOT, 1);
+    let _artifact = seal_for_submission(&world, SLOT, 1);
 
     // Corrupt the recorded provenance to name foreign content.
     let foreign = Digest::of(b"content-some-other-lineage-produced");

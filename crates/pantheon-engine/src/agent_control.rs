@@ -168,7 +168,9 @@ pub struct SubmitResultRequest<'a> {
     /// The Attempt-scoped idempotency identity of this request.
     pub request_id: &'a str,
     /// The Task status revision the caller observed through
-    /// [`describe`](Self::describe); CAS-checked authoritatively inside T6.
+    /// the Task status revision observed through
+    /// [`AgentControlGateway::describe`](AgentControlGateway::describe);
+    /// CAS-checked authoritatively inside T6.
     pub expected_task_revision: pantheon_store::Revision,
     /// The normalized output mapping: declared slot name → sealed Artifact
     /// digest. Slot names are references to the Task's own contract, not

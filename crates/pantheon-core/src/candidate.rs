@@ -1,4 +1,4 @@
-//! The immutable [`CandidateResult`](self::CandidateResult): a Run's proposed
+//! The immutable [`CandidateResult`]: a Run's proposed
 //! answer to its Task, content-addressed over canonical semantic content.
 //!
 //! `docs/architecture/artifacts-and-workspaces/artifact-model.md`
@@ -235,8 +235,8 @@ impl CandidateResult {
     ///
     /// Kind agreement needs the referenced Artifacts' stored kinds, which a
     /// submission does not carry; that check runs where both the specification
-    /// and the Artifact rows are readable ([`kind_permitted`](kind_permitted),
-    /// called by the authoritative submission transaction).
+    /// and the Artifact rows are readable (see `kind_permitted`, called by
+    /// the authoritative submission transaction).
     ///
     /// # Errors
     ///

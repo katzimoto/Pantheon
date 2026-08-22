@@ -40,7 +40,7 @@ use pantheon_engine::planning::PlanningController;
 use pantheon_engine::run::{Bearer, OsRandom};
 use pantheon_engine::workspace::{WorkspaceCommand, WorkspaceController, WorkspaceRequest};
 use pantheon_git::{ConfinedCapture, GitBaseReader, GitMaterializer};
-use pantheon_store::{AttemptCreation, Command, Revision, RunIntent, Store};
+use pantheon_store::{AttemptCreation, Command, RunIntent, Store};
 
 struct TempDir(PathBuf);
 
@@ -376,7 +376,7 @@ fn a_worker_drives_seal_and_submission_through_agent_control_alone() {
     // wires. No operator surface is reachable from here by construction.
     let capture = ConfinedCapture::new();
     let base_reader =
-        GitBaseReader::new(&dir.path().join("workspaces/workspace-1/repo")).expect("base reader");
+        GitBaseReader::new(dir.path().join("workspaces/workspace-1/repo")).expect("base reader");
     let cas = LocalFsCas::open(&cas_root).expect("cas");
     let gateway = AgentControlGateway::new(
         &store,
