@@ -74,7 +74,34 @@ for pure exploration/question-answering that will not produce a change.
    scope. Do not refactor, rename, or "improve" anything the mission did
    not ask for.
 
-7. **If two canonical documents conflict, or implementation conflicts with
+7. **Open the mission's Draft pull request before the first tracked edit.**
+   Once the plan is stable, create the mission branch and establish the
+   durable collaboration surface before touching any tracked source or
+   documentation file, in this order:
+
+   - Push a compareable remote checkpoint: a commit whose tree changes no
+     tracked repository file. An empty Git commit satisfies this wherever
+     GitHub needs a commit to compare against.
+   - Build the initial pull-request body from the repository's pull-request
+     template, and map every acceptance criterion from step 1 to its planned
+     work or intended proof under the template's stable headings.
+   - Open a GitHub-native pull request in **Draft** state carrying that body,
+     then confirm it exists, targets the main branch, and closes or links the
+     mission Issue — all before the first tracked edit.
+
+   If authenticated access is unavailable, Draft creation fails, or another
+   change already owns the mission, stop and report the blocker instead of
+   continuing invisibly: implementing first and opening the pull request
+   afterwards defeats the checkpoint. As implementation and evidence develop,
+   refine that same pull request — it is the mission's one durable record,
+   never a retrospective replacement. The semantics are vendor-neutral and
+   work identically through any agent surface or the GitHub UI and API;
+   specific commands are examples, never the contract. Pull-request authority,
+   readiness, review and merge rules live in `docs/development/change-lifecycle.md` —
+   point at them rather than restating them, and add no status label, local
+   metadata protocol, hook or duplicate mission record on top of GitHub's own.
+
+8. **If two canonical documents conflict, or implementation conflicts with
    canonical architecture and the mission does not authorize changing
    either, stop and report the discrepancy** rather than picking a side or
    quietly implementing around it.

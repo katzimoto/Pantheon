@@ -4,13 +4,15 @@
     {
       "id": "start-mission-48",
       "trigger": "positive",
-      "prompt": "Start working on issue #48 — establish a skill conformance and evaluation harness. What do I read and decide before editing anything?",
-      "expected_output": "Activates mission-planning: treats the Issue's outcome and acceptance criteria as the requested outcome, reads the named architecture entry points before editing, and decides the smallest correct change rather than broadening the mission.",
+      "prompt": "Start working on issue #48 \u2014 establish a skill conformance and evaluation harness. What do I read and decide before editing anything?",
+      "expected_output": "Activates mission-planning: treats the Issue's outcome and acceptance criteria as the requested outcome, reads the named architecture entry points before editing, decides the smallest correct change rather than broadening the mission, and establishes the durable collaboration checkpoint before any tracked edit: mission branch, a compareable remote checkpoint that changes no tracked file, then a Draft pull request built from the repository template whose body maps every acceptance criterion to planned work or proof.",
       "files": [],
       "assertions": [
         "The response treats the Issue's outcome and acceptance criteria as the requested outcome",
         "The response reads the named entry points before editing",
-        "The response does not broaden the mission scope"
+        "The response does not broaden the mission scope",
+        "The response opens the Draft pull request, carrying the acceptance-criterion-to-plan mapping, before making any tracked repository edit",
+        "The response does not defer pull-request creation until after implementation"
       ]
     },
     {
