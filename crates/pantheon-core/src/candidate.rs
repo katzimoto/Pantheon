@@ -114,9 +114,11 @@ impl fmt::Display for CandidateError {
 ///
 /// Identity is the SHA-256 of [`to_canonical_json`](Self::to_canonical_json):
 /// the exact Task id, the exact Run id, and the normalized output mapping —
-/// nothing else. Two Candidates with equal content are the same Candidate
-/// regardless of the order a caller listed the outputs in; changing any bound
-/// member changes the identity.
+/// nothing else. Equal content means an identical canonical *document*,
+/// including both ids: two Runs submitting byte-identical mappings produce
+/// two distinct Candidates, one per Run. Which lineage produced a referenced
+/// Artifact is provenance outside identity entirely. Output ordering never
+/// affects the digest; changing any bound member changes it.
 pub struct CandidateResult {
     task_id: String,
     run_id: String,
