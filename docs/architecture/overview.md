@@ -95,6 +95,25 @@ UNKNOWN execution never authorizes duplicate replacement work.
 
 V1 runtime Task spawn is blocking-only. Blocking spawn yields/terminalizes the current Run, releases Run-scoped capacity, leaves the parent Task Waiting with zero live Runs, and resumes later through a **new Run** after accepted child Artifact bindings satisfy the Join.
 
+## Cross-agent coordination boundary
+
+When more than one Task or Run contributes to an outcome, Pantheon-owned graph,
+control and Artifact records remain the coordination authority. A worker may
+request a bounded outcome, but it does not acquire an ambient peer channel or
+shared mutable coordination state.
+
+Cross-agent exchange is controller-brokered, typed, immutable,
+provenance-bound and explicit about scope/audience. Accepted Artifact bindings,
+not peer transcripts, provider sessions or shared workspaces, enter another
+Run's semantic inputs. Agent-authored content remains data under its recorded
+trust/provenance; receiving it does not grant graph, completion, permission or
+execution authority.
+
+This invariant adds no v1 operation beyond the bounded blocking-spawn and
+Artifact-binding contracts. Future coordination modes remain deferred until a
+later canonical change defines their lifecycle, evaluation and recovery
+semantics.
+
 ## Security boundary
 
 Authorization and Sandbox containment are separate.
