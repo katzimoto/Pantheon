@@ -105,36 +105,44 @@ missions.
 
 ### Retain as dependency-ordered post-MVP movements
 
-1. **Measure orchestration before optimizing it.** Add immutable scenario
+1. **Measure orchestration before optimizing it
+   ([Issue #102](https://github.com/katzimoto/Pantheon/issues/102)).** Add immutable scenario
    snapshots, strategy variants, repeated isolated trials and comparable
    outcomes. This is distinct from accepting one Task Candidate.
-2. **Seed capability and regression suites from real failures.** Capture
+2. **Seed capability and regression suites from real failures
+   ([Issue #103](https://github.com/katzimoto/Pantheon/issues/103)).** Capture
    representative recovery, budget, sandbox, evaluation and coordination
    failures so an orchestration change cannot improve a headline case while
    silently losing a load-bearing behavior.
-3. **Select coordination from task structure.** A controller-owned assessment
+3. **Select coordination from task structure
+   ([Issue #104](https://github.com/katzimoto/Pantheon/issues/104)).** A controller-owned assessment
    records decomposability, sequential depth, tool density, shared-state
    contention, evidence independence, verification locality and risk. Single
    Agent remains the default; bounded parallel or centralized-worker modes
    require measured justification.
-4. **Represent inquiry separately from work.** TaskGraph says what work exists;
+4. **Represent inquiry separately from work
+   ([Issue #105](https://github.com/katzimoto/Pantheon/issues/105)).** TaskGraph says what work exists;
    an optional Inquiry Graph says what is known and why. Candidate nodes include
    Question/Gap, Invariant, Hypothesis, Experiment/ProofAttempt,
    Observation/Finding, Claim, Contradiction and Verdict. Negative results and
    supersession remain durable.
-5. **Make coverage and stopping controller-owned.** A Goal-bound coverage
+5. **Make coverage and stopping controller-owned
+   ([Issue #106](https://github.com/katzimoto/Pantheon/issues/106)).** A Goal-bound coverage
    contract identifies mandatory requirements and acceptable evidence.
    Terminal reasons distinguish satisfied, budget-exhausted,
    no-verified-progress, unresolved-critical, blocked, human-stop and
    risk-limit outcomes. Useful-but-incomplete is not success.
-6. **Make operator steering durable and plan-level.** Focus revisions, branch
+6. **Make operator steering durable and plan-level
+   ([Issue #107](https://github.com/katzimoto/Pantheon/issues/107)).** Focus revisions, branch
    dispositions, evidence challenges and checkpoints create inspectable
    revision/replan events rather than mutating a running model's hidden context.
-7. **Turn ContextPlan into an effectiveness and provenance loop.** Record why a
+7. **Turn ContextPlan into an effectiveness and provenance loop
+   ([Issue #108](https://github.com/katzimoto/Pantheon/issues/108)).** Record why a
    source was selected, its trust/ancestry, intended support and downstream use;
    compare context policies across repeated trials; quarantine or expire
    unvalidated agent output instead of automatically re-ingesting it.
-8. **Learn orchestration policy only under governance.** Begin with transparent
+8. **Learn orchestration policy only under governance
+   ([Issue #109](https://github.com/katzimoto/Pantheon/issues/109)).** Begin with transparent
    versioned heuristics. Later policies or Genome candidates run in shadow or
    replay and pass capability, regression, cost and safety gates plus explicit
    promotion authority. A generator never changes its own evaluator or
@@ -191,5 +199,5 @@ orchestration:
 > from replayable evidence.**
 
 The accepted invariant is now canonical. The remaining movements are preserved
-here and decomposed as post-MVP Engineering Missions; this review itself grants
-none of their runtime authority.
+here and decomposed as post-MVP Engineering Missions #102–#109; this review
+itself grants none of their runtime authority.
