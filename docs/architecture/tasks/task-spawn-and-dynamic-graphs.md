@@ -191,6 +191,21 @@ Child receives explicit input refs/Artifacts plus its own ContextPlan. Parent pr
 
 Parent continuation later receives accepted child Artifact bindings through `ContinuationContext`, not by resuming the old provider session.
 
+## Cross-agent exchange
+
+The parent/child boundary is also the general constraint on future
+cross-agent coordination. Pantheon brokers exchange as typed, immutable,
+provenance-bound Artifacts or controller records with explicit scope/audience.
+Another Run consumes only the accepted binding selected into its own frozen
+inputs; it does not inherit a peer transcript, provider session, workspace or
+mutable memory surface.
+
+Pantheon exposes no ambient worker-to-worker chat or shared mutable memory as
+coordination authority. Agent-authored content cannot itself mutate TaskGraph,
+Join, completion, permission or execution state. Future joined/detached or
+coordinator modes must preserve this boundary and define their lifecycle,
+evaluation and recovery semantics before gaining worker authority.
+
 ## Spawn reasons
 
 Initial structured provenance reasons may include:
@@ -255,3 +270,4 @@ Provenance does not imply that every parent-child relation is a success dependen
 9. Join satisfaction returns Task Ready; only Scheduler creates the new Run.
 10. Descendants inherit ceilings, never privileges or raw credentials.
 11. Joined/detached/semantic dedup/quorum joins are post-v1.
+12. Cross-agent exchange is controller-brokered, typed, immutable, provenance-bound and explicit about scope/audience; ambient peer chat and shared mutable memory are never coordination authority.
