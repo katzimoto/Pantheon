@@ -40,7 +40,7 @@ use pantheon_core::config::canonical::Value;
 use pantheon_core::config::model::{IsolationClass, NetworkMode, SandboxProfile};
 use pantheon_core::config::{Digest, parse};
 use pantheon_core::execution::LaunchSemantics;
-use pantheon_core::sandbox::{SandboxNetworkMode, SandboxPlan};
+use pantheon_core::sandbox::{SandboxMount, SandboxNetworkMode, SandboxPlan};
 use pantheon_store::{Command, Committed, ObservationUpdate, Revision, Store, StoreError};
 
 /// How much of a digest an identifier carries.
@@ -435,11 +435,31 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
         // concludes the Run with zero Attempts; it is never retried into
         // existence.
         let binding = self.binding_profile_identity(view)?;
+        let profile = self.verify_policy_ready(run_id, &binding)?;
+
+        let workspace = self
+            .store
+            .workspace_for_task(&view.task_id)
+            .map_err(RunControllerError::Store)?
+            .ok_or_else(|| {
+                RunControllerError::Store(StoreError::InvariantViolated(format!(
+                    "run {run_id}: task {} has no current workspace",
+                    view.task_id
+                )))
+            })?;
+
         let plan = SandboxPlan {
             sandbox_profile_digest: binding.sandbox_profile_digest,
-            environment_identity: run_id.to_string(),
-            mounts: Vec::new(),
-            network_mode: SandboxNetworkMode::None,
+            environment_identity: profile.environment_identity.clone(),
+            mounts: vec![SandboxMount {
+                source: workspace.source_path,
+                destination: "/workspace".to_string(),
+                read_only: false,
+            }],
+            network_mode: match profile.network_mode {
+                NetworkMode::None => SandboxNetworkMode::None,
+                NetworkMode::Brokered => SandboxNetworkMode::Brokered,
+            },
             cpu_limit_millicores: None,
             memory_limit_mb: None,
         };
@@ -601,7 +621,7 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
         &self,
         run_id: &str,
         identity: &FrozenBindingIdentity,
-    ) -> Result<(), RunControllerError> {
+    ) -> Result<SandboxProfile, RunControllerError> {
         let Some((domain, json)) = self
             .store
             .configuration_component_json(identity.execution_profiles_component)?
@@ -627,17 +647,14 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
             .filter_map(|entry| decode_sandbox_profile(entry).ok())
             .find(|profile| profile.digest() == identity.sandbox_profile_digest);
         match frozen {
-            Some(_) => {}
-            None => {
-                return Err(RunControllerError::Store(StoreError::InvariantViolated(
-                    format!(
-                        "run {run_id}: frozen profiles do not contain the Binding's \
+            Some(profile) => Ok(profile),
+            None => Err(RunControllerError::Store(StoreError::InvariantViolated(
+                format!(
+                    "run {run_id}: frozen profiles do not contain the Binding's \
                          sandbox identity"
-                    ),
-                )));
-            }
+                ),
+            ))),
         }
-        Ok(())
     }
 
     // -- bearer / T4a --------------------------------------------------------

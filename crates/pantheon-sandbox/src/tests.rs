@@ -9,7 +9,32 @@ fn detect_returns_some_on_typical_system() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod integration {
-    use super::*;
+    use super::LocalContainerBackend;
+    use pantheon_core::sandbox::{
+        SandboxKey, SandboxMount, SandboxNetworkMode, SandboxPlan, SandboxPresence,
+        SandboxVerification,
+    };
+
+    fn test_plan() -> SandboxPlan {
+        SandboxPlan {
+            environment_identity: "alpine:latest".to_string(),
+            mounts: vec![
+                SandboxMount {
+                    source: "/tmp/pantheon-test-ws".to_string(),
+                    destination: "/workspace".to_string(),
+                    read_only: false,
+                },
+                SandboxMount {
+                    source: "/tmp/pantheon-test-scratch".to_string(),
+                    destination: "/scratch".to_string(),
+                    read_only: false,
+                },
+            ],
+            network_mode: SandboxNetworkMode::None,
+            cpu_limit_millicores: Some(500),
+            memory_limit_mb: Some(256),
+        }
+    }
 
     #[test]
     fn ensure_and_release_roundtrip() {
@@ -21,7 +46,7 @@ mod integration {
         let _ = backend.release_sandbox(&key);
 
         let presence = backend.ensure_sandbox(&key, &plan).unwrap();
-        assert_eq!(presence, pantheon_core::sandbox::SandboxPresence::Present);
+        assert_eq!(presence, SandboxPresence::Present);
 
         let verified = backend.verify_sandbox(&key, &plan).unwrap();
         assert!(verified.all_passed());
@@ -29,6 +54,6 @@ mod integration {
         backend.release_sandbox(&key).unwrap();
 
         let after = backend.inspect_sandbox(&key).unwrap();
-        assert_eq!(after, pantheon_core::sandbox::SandboxPresence::Absent);
+        assert_eq!(after, SandboxPresence::Absent);
     }
 }

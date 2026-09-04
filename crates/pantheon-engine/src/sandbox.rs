@@ -91,27 +91,9 @@ impl<'store> SandboxController<'store> {
             environment_identity: &plan.environment_identity,
         };
 
-        let created = match self.store.create_sandbox(command, &key, &binding) {
-            Ok(committed) => committed,
-            Err(StoreError::SandboxAlreadyCurrent { .. }) => {
-                // A current sandbox already exists for this Run; reconcile it.
-                return self
-                    .store
-                    .sandbox_for_run(run_id)
-                    .map_err(SandboxControllerError::Store)?
-                    .ok_or_else(|| {
-                        SandboxControllerError::Invariant(format!(
-                            "sandbox for run {run_id} is current but not found"
-                        ))
-                    });
-            }
-            Err(other) => return Err(SandboxControllerError::Store(other)),
-        };
-
-        // Extract or recover the record value.
-        let record = match created {
-            Committed::Executed { value, .. } => value,
-            Committed::Replayed { .. } => self
+        let record = match self.store.create_sandbox(command, &key, &binding) {
+            Ok(Committed::Executed { value, .. }) => value,
+            Ok(Committed::Replayed { .. }) => self
                 .store
                 .sandbox_for_run(run_id)
                 .map_err(SandboxControllerError::Store)?
@@ -120,125 +102,162 @@ impl<'store> SandboxController<'store> {
                         "sandbox for run {run_id} reported replayed but not found"
                     ))
                 })?,
+            Err(StoreError::SandboxAlreadyCurrent { .. }) => self
+                .store
+                .sandbox_for_run(run_id)
+                .map_err(SandboxControllerError::Store)?
+                .ok_or_else(|| {
+                    SandboxControllerError::Invariant(format!(
+                        "sandbox for run {run_id} is current but not found"
+                    ))
+                })?,
+            Err(other) => return Err(SandboxControllerError::Store(other)),
         };
 
-        // If the Sandbox was already created durably, we may be recovering.
-        // Reconcile instead of failing.
-        if record.phase == pantheon_core::sandbox::SandboxPhase::Requested {
-            let epoch = self
-                .store
-                .restore_generation()
-                .map_err(SandboxControllerError::Store)?;
-            let cmd_begin = Command {
-                epoch: epoch.as_str(),
-                id: &format!("{}-begin-preparation", command.id),
-                request_hash: command.request_hash,
-                event_type: "sandbox.preparation.begun",
-            };
-            let begun = self
-                .store
-                .begin_sandbox_preparation(&cmd_begin, &key, record.revision)
-                .map_err(SandboxControllerError::Store)?;
-            let record = match begun {
-                Committed::Executed { value, .. } => value,
-                Committed::Replayed { .. } => self
-                    .store
-                    .sandbox_for_run(run_id)
-                    .map_err(SandboxControllerError::Store)?
-                    .ok_or_else(|| {
-                        SandboxControllerError::Invariant(format!(
-                            "sandbox for run {run_id} reported replayed but not found"
-                        ))
-                    })?,
-            };
-
-            let presence = match backend.ensure_sandbox(&key, plan) {
-                Ok(p) => p,
-                Err(err) => {
-                    let cmd_fail = Command {
-                        epoch: epoch.as_str(),
-                        id: &format!("{}-fail", command.id),
-                        request_hash: command.request_hash,
-                        event_type: "sandbox.failed",
-                    };
-                    let _ = self.store.fail_sandbox(
-                        &cmd_fail,
-                        &key,
-                        record.revision,
-                        SandboxPresence::Unknown,
-                    );
-                    return Err(SandboxControllerError::ProvisioningFailed {
-                        sandbox_id: key.as_str().to_string(),
-                        detail: err.detail,
-                    });
-                }
-            };
-
-            if presence == SandboxPresence::Present {
-                let verified = backend.verify_sandbox(&key, plan).map_err(|err| {
-                    SandboxControllerError::ProvisioningFailed {
-                        sandbox_id: key.as_str().to_string(),
-                        detail: err.detail,
-                    }
-                })?;
-
-                if !verified.all_passed() {
-                    let cmd_fail = Command {
-                        epoch: epoch.as_str(),
-                        id: &format!("{}-fail", command.id),
-                        request_hash: command.request_hash,
-                        event_type: "sandbox.failed",
-                    };
-                    let _ = self.store.fail_sandbox(
-                        &cmd_fail,
-                        &key,
-                        record.revision,
-                        SandboxPresence::Unknown,
-                    );
-                    return Err(SandboxControllerError::VerificationFailed {
-                        sandbox_id: key.as_str().to_string(),
-                    });
-                }
-
-                let cmd_complete = Command {
-                    epoch: epoch.as_str(),
-                    id: &format!("{}-complete-preparation", command.id),
-                    request_hash: command.request_hash,
-                    event_type: "sandbox.preparation.completed",
-                };
-                let completed = self
-                    .store
-                    .complete_sandbox_preparation(&cmd_complete, &key, record.revision)
-                    .map_err(SandboxControllerError::Store)?;
-                Ok(match completed {
-                    Committed::Executed { value, .. } => value,
-                    Committed::Replayed { .. } => self
-                        .store
-                        .sandbox_for_run(run_id)
-                        .map_err(SandboxControllerError::Store)?
-                        .ok_or_else(|| {
-                            SandboxControllerError::Invariant(format!(
-                                "sandbox for run {run_id} reported replayed but not found"
-                            ))
-                        })?,
-                })
-            } else {
-                let cmd_fail = Command {
-                    epoch: epoch.as_str(),
-                    id: &format!("{}-fail", command.id),
-                    request_hash: command.request_hash,
-                    event_type: "sandbox.failed",
-                };
-                let _ = self
-                    .store
-                    .fail_sandbox(&cmd_fail, &key, record.revision, presence);
+        match record.phase {
+            pantheon_core::sandbox::SandboxPhase::Ready => Ok(record),
+            pantheon_core::sandbox::SandboxPhase::Error => {
                 Err(SandboxControllerError::ProvisioningFailed {
                     sandbox_id: key.as_str().to_string(),
-                    detail: format!("sandbox did not reach Present: {presence}",),
+                    detail: "sandbox is in Error phase from a previous provisioning attempt"
+                        .to_string(),
                 })
             }
-        } else {
-            Ok(record)
+            pantheon_core::sandbox::SandboxPhase::Releasing => {
+                Err(SandboxControllerError::ProvisioningFailed {
+                    sandbox_id: key.as_str().to_string(),
+                    detail: "sandbox is in Releasing phase".to_string(),
+                })
+            }
+            pantheon_core::sandbox::SandboxPhase::Requested
+            | pantheon_core::sandbox::SandboxPhase::Preparing => {
+                let record = if record.phase == pantheon_core::sandbox::SandboxPhase::Requested {
+                    let epoch = self
+                        .store
+                        .restore_generation()
+                        .map_err(SandboxControllerError::Store)?;
+                    let cmd_begin = Command {
+                        epoch: epoch.as_str(),
+                        id: &format!("{}-begin-preparation", command.id),
+                        request_hash: command.request_hash,
+                        event_type: "sandbox.preparation.begun",
+                    };
+                    let begun = self
+                        .store
+                        .begin_sandbox_preparation(&cmd_begin, &key, record.revision)
+                        .map_err(SandboxControllerError::Store)?;
+                    match begun {
+                        Committed::Executed { value, .. } => value,
+                        Committed::Replayed { .. } => self
+                            .store
+                            .sandbox_for_run(run_id)
+                            .map_err(SandboxControllerError::Store)?
+                            .ok_or_else(|| {
+                                SandboxControllerError::Invariant(format!(
+                                    "sandbox for run {run_id} reported replayed but not found"
+                                ))
+                            })?,
+                    }
+                } else {
+                    record
+                };
+
+                let epoch = self
+                    .store
+                    .restore_generation()
+                    .map_err(SandboxControllerError::Store)?;
+
+                let presence = match backend.ensure_sandbox(&key, plan) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        let cmd_fail = Command {
+                            epoch: epoch.as_str(),
+                            id: &format!("{}-fail", command.id),
+                            request_hash: command.request_hash,
+                            event_type: "sandbox.failed",
+                        };
+                        let _ = self.store.fail_sandbox(
+                            &cmd_fail,
+                            &key,
+                            record.revision,
+                            SandboxPresence::Unknown,
+                        );
+                        return Err(SandboxControllerError::ProvisioningFailed {
+                            sandbox_id: key.as_str().to_string(),
+                            detail: err.detail,
+                        });
+                    }
+                };
+
+                if presence == SandboxPresence::Present {
+                    let verified = backend.verify_sandbox(&key, plan).map_err(|err| {
+                        SandboxControllerError::ProvisioningFailed {
+                            sandbox_id: key.as_str().to_string(),
+                            detail: err.detail,
+                        }
+                    })?;
+
+                    if !verified.all_passed() {
+                        let cmd_fail = Command {
+                            epoch: epoch.as_str(),
+                            id: &format!("{}-fail", command.id),
+                            request_hash: command.request_hash,
+                            event_type: "sandbox.failed",
+                        };
+                        let _ = self.store.fail_sandbox(
+                            &cmd_fail,
+                            &key,
+                            record.revision,
+                            SandboxPresence::Unknown,
+                        );
+                        return Err(SandboxControllerError::VerificationFailed {
+                            sandbox_id: key.as_str().to_string(),
+                        });
+                    }
+
+                    let cmd_complete = Command {
+                        epoch: epoch.as_str(),
+                        id: &format!("{}-complete-preparation", command.id),
+                        request_hash: command.request_hash,
+                        event_type: "sandbox.preparation.completed",
+                    };
+                    let completed = self
+                        .store
+                        .complete_sandbox_preparation(&cmd_complete, &key, record.revision)
+                        .map_err(SandboxControllerError::Store)?;
+                    Ok(match completed {
+                        Committed::Executed { value, .. } => value,
+                        Committed::Replayed { .. } => self
+                            .store
+                            .sandbox_for_run(run_id)
+                            .map_err(SandboxControllerError::Store)?
+                            .ok_or_else(|| {
+                                SandboxControllerError::Invariant(format!(
+                                    "sandbox for run {run_id} reported replayed but not found"
+                                ))
+                            })?,
+                    })
+                } else {
+                    let cmd_fail = Command {
+                        epoch: epoch.as_str(),
+                        id: &format!("{}-fail", command.id),
+                        request_hash: command.request_hash,
+                        event_type: "sandbox.failed",
+                    };
+                    let _ = self
+                        .store
+                        .fail_sandbox(&cmd_fail, &key, record.revision, presence);
+                    Err(SandboxControllerError::ProvisioningFailed {
+                        sandbox_id: key.as_str().to_string(),
+                        detail: format!("sandbox did not reach Present: {presence}"),
+                    })
+                }
+            }
+            pantheon_core::sandbox::SandboxPhase::Released => {
+                Err(SandboxControllerError::Invariant(format!(
+                    "sandbox for run {run_id} is current but Released"
+                )))
+            }
         }
     }
 

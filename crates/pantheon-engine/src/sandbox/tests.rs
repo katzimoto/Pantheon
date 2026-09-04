@@ -5,7 +5,7 @@ use pantheon_core::sandbox::{
     SandboxKey, SandboxMount, SandboxNetworkMode, SandboxPhase, SandboxPlan, SandboxPresence,
     SandboxVerification,
 };
-use pantheon_store::{Command, Store};
+use pantheon_store::{Command, Committed, Store};
 
 use crate::sandbox::{SandboxBackend, SandboxController, SandboxError};
 
@@ -245,4 +245,84 @@ fn release_lifecycle_completes() {
         .complete_release(&cmd3, &key, releasing.revision, SandboxPresence::Absent)
         .unwrap();
     assert_eq!(released.phase, SandboxPhase::Released);
+}
+
+#[test]
+fn provision_recovers_preparing_to_ready() {
+    let (store, _dir) = temp_store();
+    let controller = SandboxController::new(&store);
+    let plan = test_plan();
+    let backend = FakeBackend {
+        refuses_ensure: false,
+        refuses_verify: false,
+    };
+    let epoch = store.restore_generation().expect("generation");
+
+    // Manually create a sandbox in Preparing phase to simulate a crash.
+    let key = SandboxKey::new("sandbox-run-prep").unwrap();
+    let digest = plan.digest();
+    let binding = pantheon_store::SandboxBinding {
+        run_id: "run-prep",
+        sandbox_plan_digest: digest.as_bytes(),
+        environment_identity: &plan.environment_identity,
+    };
+    let cmd_create = command(epoch.as_str(), "create-prep");
+    let created = store.create_sandbox(&cmd_create, &key, &binding).unwrap();
+    let record = match created {
+        Committed::Executed { value, .. } => value,
+        _ => panic!("expected Executed"),
+    };
+
+    let cmd_begin = command(epoch.as_str(), "begin-prep");
+    store
+        .begin_sandbox_preparation(&cmd_begin, &key, record.revision)
+        .unwrap();
+
+    // Provision must recover from Preparing to Ready without overlapping.
+    let cmd_provision = command(epoch.as_str(), "provision-prep");
+    let record = controller
+        .provision(&cmd_provision, "run-prep", &plan, &backend)
+        .unwrap();
+    assert_eq!(record.phase, SandboxPhase::Ready);
+}
+
+#[test]
+fn provision_refuses_error_phase() {
+    let (store, _dir) = temp_store();
+    let controller = SandboxController::new(&store);
+    let plan = test_plan();
+    let backend = FakeBackend {
+        refuses_ensure: false,
+        refuses_verify: false,
+    };
+    let epoch = store.restore_generation().expect("generation");
+
+    // Manually create a sandbox and fail it.
+    let key = SandboxKey::new("sandbox-run-err").unwrap();
+    let digest = plan.digest();
+    let binding = pantheon_store::SandboxBinding {
+        run_id: "run-err",
+        sandbox_plan_digest: digest.as_bytes(),
+        environment_identity: &plan.environment_identity,
+    };
+    let cmd_create = command(epoch.as_str(), "create-err");
+    let created = store.create_sandbox(&cmd_create, &key, &binding).unwrap();
+    let record = match created {
+        Committed::Executed { value, .. } => value,
+        _ => panic!("expected Executed"),
+    };
+
+    let cmd_fail = command(epoch.as_str(), "fail-err");
+    store
+        .fail_sandbox(&cmd_fail, &key, record.revision, SandboxPresence::Unknown)
+        .unwrap();
+
+    let cmd_provision = command(epoch.as_str(), "provision-err");
+    let err = controller
+        .provision(&cmd_provision, "run-err", &plan, &backend)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::sandbox::SandboxControllerError::ProvisioningFailed { .. }
+    ));
 }
