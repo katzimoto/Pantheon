@@ -424,12 +424,18 @@ fn verify_container_json(
     let privilege_verified = !privileged;
 
     // Capabilities check.
+    let cap_add = host_config
+        .get("CapAdd")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
     let cap_drop = host_config
         .get("CapDrop")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let capability_verified = cap_drop.contains(&"ALL") || cap_drop.contains(&"all");
+    // Docker reports ["ALL"]; Podman rootless reports individual caps.
+    let capability_verified = !cap_drop.is_empty() && cap_add.is_empty();
 
     // Network mode check.
     let network_mode_json = host_config
@@ -465,11 +471,15 @@ fn verify_container_json(
     let expected_name = format!("pantheon-sandbox-{}", key.as_str());
     let identity_verified = name_json == expected_name;
 
-    // Environment identity: we check the image name/digest. For the MVP we
-    // verify the Config.Image field contains the plan's environment_identity.
+    // Environment identity: we check the image reference.
+    // Docker stores the original reference in Config.Image.
+    // Podman stores the resolved reference in Config.Image and ImageName.
     let config = obj.get("Config").ok_or("inspect output missing Config")?;
     let image = config.get("Image").and_then(|v| v.as_str()).unwrap_or("");
-    let environment_identity_verified = image == plan.environment_identity;
+    let image_name = obj.get("ImageName").and_then(|v| v.as_str()).unwrap_or("");
+    let environment_identity_verified = image == plan.environment_identity
+        || image_name == plan.environment_identity
+        || image.ends_with(&format!("/{}", plan.environment_identity));
 
     // Agent control route and workspace binding are verified through the
     // mount set check above.

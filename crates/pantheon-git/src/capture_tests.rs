@@ -338,8 +338,9 @@ fn swaps_during_capture_never_leak_external_bytes_and_always_fail_closed() {
     let mut runs = 0;
     let mut succeeded = 0;
     let mut failed_closed = 0;
-    while runs < 60 {
+    while runs < 200 {
         runs += 1;
+        std::thread::yield_now();
         let (entries, fault) = capture(&root);
         match fault {
             None => {
