@@ -10,13 +10,15 @@ fn detect_returns_some_on_typical_system() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod integration {
     use super::LocalContainerBackend;
+    use pantheon_core::config::Digest;
     use pantheon_core::sandbox::{
         SandboxKey, SandboxMount, SandboxNetworkMode, SandboxPlan, SandboxPresence,
-        SandboxVerification,
     };
+    use pantheon_engine::sandbox::SandboxBackend;
 
     fn test_plan() -> SandboxPlan {
         SandboxPlan {
+            sandbox_profile_digest: Digest::of(b"profile"),
             environment_identity: "alpine:latest".to_string(),
             mounts: vec![
                 SandboxMount {
