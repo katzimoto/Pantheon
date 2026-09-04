@@ -686,3 +686,73 @@ find: .is_some_and(|name| name == &before.oid)
 replace: .is_some_and(|_name| true)
 scope: -p pantheon-engine --lib
 test: sealing::tests::a_same_size_collision_is_a_modify_with_its_authoritative_preimage
+
+name: agent-generation-fence-removed
+file: crates/pantheon-store/src/agent_control.rs
+find: if generation_current == 0 { return Ok(SessionFacts::GenerationFenced);
+replace: if false { return Ok(SessionFacts::GenerationFenced);
+scope: -p pantheon-store --lib
+test: agent_control::tests::an_old_generation_session_is_fenced_even_with_its_own_bearer
+
+name: agent-verifier-mismatch-authenticates
+file: crates/pantheon-store/src/agent_control.rs
+find: Some(_) => Ok(SessionFacts::VerifierMismatch),
+replace: Some(_) => Ok(SessionFacts::Authorized),
+scope: -p pantheon-store --lib
+test: agent_control::tests::a_wrong_bearer_is_refused_and_creates_no_request_row
+
+name: t6-request-hash-conflict-removed
+file: crates/pantheon-store/src/agent_control.rs
+find: if hash.as_slice() != submission.request_hash.as_slice() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: agent_control::tests::the_same_request_identity_with_different_semantics_fails_closed_in_t6
+
+name: t6-task-active-gate-disabled
+file: crates/pantheon-store/src/agent_control.rs
+find: if task_phase != "Active" {
+replace: if false {
+scope: -p pantheon-store --lib
+test: agent_control::tests::cancellation_committed_first_defeats_submission
+
+name: t6-expected-task-revision-cas-removed
+file: crates/pantheon-store/src/agent_control.rs
+find: if task_revision != submission.expected_task_revision.get() {
+replace: if false {
+scope: -p pantheon-store --lib
+test: agent_control::tests::a_stale_revision_conflicts_before_content_is_examined
+
+name: run-candidate-digest-dropped
+file: crates/pantheon-store/src/agent_control.rs
+find: ("candidate_digest", Value::Blob(digest_bytes)),
+replace: ("candidate_digest", Value::Null),
+scope: -p pantheon-store --lib
+test: agent_control::tests::t6_commits_candidate_outputs_lifecycle_request_and_event_atomically
+
+name: provenance-match-arm-bypassed
+file: crates/pantheon-store/src/agent_control.rs
+find: Some(digest) if digest == output.artifact.as_bytes().to_vec() => {}
+replace: Some(_) => {}
+scope: -p pantheon-store --lib
+test: agent_control::tests::foreign_production_cannot_be_submitted_even_though_the_content_exists
+
+name: provenance-drift-check-disabled
+file: crates/pantheon-store/src/artifacts.rs
+find: if recorded != claimed {
+replace: if false {
+scope: -p pantheon-store --lib
+test: agent_control::tests::a_retrying_seal_never_overwrites_recorded_provenance
+
+name: complete-request-fence-removed
+file: crates/pantheon-store/src/agent_control.rs
+find: authenticate_agent_session(writer, &credential)?; let updated = writer.execute(
+replace: let updated = writer.execute(
+scope: -p pantheon-store --lib
+test: agent_control::tests::complete_refuses_after_midflight_revocation_and_leaves_the_row_inert
+
+name: candidate-duplicate-slot-check-disabled
+file: crates/pantheon-core/src/candidate.rs
+find: if pair[0].slot == pair[1].slot {
+replace: if false {
+scope: -p pantheon-core --lib
+test: candidate::tests::duplicate_output_slots_are_refused_before_identity_exists

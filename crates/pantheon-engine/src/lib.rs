@@ -21,6 +21,7 @@
 //! backends remain later boundaries. See
 //! `docs/development/implementation.md`.
 
+pub mod agent_control;
 pub mod configuration;
 pub mod context;
 pub mod operator;

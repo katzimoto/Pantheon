@@ -142,6 +142,34 @@ surface, no ControlLease rotation, and no startup recovery barrier (#38):
 conclusion records a durable terminal target directly, and restart
 reconciliation is the ordinary controller path over durable inventory.
 
+On top of that the same crates carry Attempt-bound Agent Control and
+CandidateResult submission (#33). `pantheon-core` holds the immutable
+`CandidateResult` vocabulary — Task id, Run id, normalized slot-to-Artifact
+mapping — canonically encoded and digest-addressed over exactly those three
+members. `pantheon-store` owns migration 14: the `agent_requests` ledger keyed
+by `(attempt_id, request_id)` with canonical request hashes and typed
+STARTED/SUCCEEDED/FAILED outcomes; the `production_records` family binding an
+Artifact to its producing Run/output-slot/Attempt/WorkspaceRevision with
+holder-safe composite foreign keys; the `candidates`/`candidate_outputs`
+families with at-most-one-per-Run as a real unique constraint and outputs
+reaching Artifacts only through that provenance; and the rebuilt `run_status`
+carrying `candidate_digest` under the `Completed ⇒ candidate_digest not null`
+CHECK. Its T6 transaction re-reads session authentication,
+RestoreGeneration currency, Attempt/Run/Task/Goal authority and per-output
+validity inside one `BEGIN IMMEDIATE`, then commits Candidate, lifecycle
+(`Run Active -> Finalizing` target Completed, `Task Active -> Evaluating`),
+request outcome and Event together or not at all. `pantheon-engine` owns the
+`AgentControlGateway`: a restricted worker-facing controller dispatching only
+`session.describe`, `artifact.seal` (delegating to the existing Run-authorized
+sealing path, binding producer provenance at publication) and
+`task.submit_result` — a separate principal and dispatch from Operator
+Control. The concrete worker transport stays deliberately unimplemented: the
+channel contract is transport-neutral, and exposing it is compatible future
+work for the strict container Sandbox (#34). There is still no evaluation or
+acceptance machinery, no cancellation surface, no ControlLease rotation and no
+startup recovery barrier: T6 leaves the Run nonterminal in Finalizing with its
+execution slot retained, and nothing marks a Task successful.
+
 There is still no endpoint surface beyond Goals/dispatch/events, no
 SandboxInstance table family and no concrete production execution backend:
 T3 creates durable responsibility, and #31's fake backend exercises lineage
@@ -153,8 +181,10 @@ and Task families, the `workspaces` family, the scheduler/Run-intent families
 that path requires, the `blobs`/`artifacts`/`artifact_members`/
 `workspace_revisions` families sealing publishes into, the
 `context_plans`/`run_context_plans` families context preparation publishes
-into, and the `attempts`/`attempt_status`/`agent_control_sessions` families
-the Attempt lineage publishes into; the future conceptual production schema is
+into, the `attempts`/`attempt_status`/`agent_control_sessions` families
+the Attempt lineage publishes into, and the `agent_requests`/
+`production_records`/`candidates`/`candidate_outputs` families Candidate
+submission (#33) publishes into; the future conceptual production schema is
 not implemented ahead of the behaviour that needs it.
 
 `pantheon-store` depends on `rusqlite` (bundled SQLite), `pantheon-core`

@@ -140,6 +140,30 @@ candidate://sha256/<canonical-candidate-digest>
 
 V1 permits at most one Candidate per Run. Candidate identity never changes during Acceptance.
 
+### Canonical identity (settled by #33)
+
+The digest is taken over one canonical JSON document with exactly three keys:
+`task` and `run` (the immutable ids) and `outputs`, an array of
+`{"artifact": "sha256:<hex>", "slot": <name>}` entries sorted by raw slot-name
+bytes. Nothing else participates. Two Run-related distinctions must not be
+blurred:
+
+- The **Run the Candidate belongs to** (`run`) is part of identity. Two Runs
+  submitting byte-identical output mappings for the same Task produce two
+  distinct Candidates — one per Run, as `at most one Candidate per Run`
+  requires.
+- The **Run that produced a referenced Artifact** is production provenance and
+  sits entirely outside identity. Artifacts are content-addressed and shared;
+  which lineage sealed one is carried relationally by its ProductionRecords —
+  content reuse is not ownership, and it never folds into the digest.
+
+Worker claims (prose, verdicts, self-assessments, evidence) are likewise
+outside identity: changing them cannot change a Candidate's digest.
+Duplicate output slots are refused before a Candidate can exist; slot names
+are bounded at 128 bytes. A v1 Candidate carries no `summary` field — the
+contract requires only the Task, Run and normalized mapping, so none exists to
+bound or canonicalize.
+
 ## Evidence is separate
 
 Evidence binds a Candidate/Artifact/GoalCompletionCandidate to a criterion + exact EvaluatorVersion + verdict/provenance. Evidence is not embedded into Artifact identity, and evaluating the same Artifact differently does not produce a different Artifact.

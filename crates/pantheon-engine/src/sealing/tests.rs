@@ -573,6 +573,7 @@ fn run_authority(expected_run_revision: i64) -> SealAuthority {
 
 fn seal_request() -> SealRequest<'static> {
     SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "changeset",
         authority: run_authority(1),
@@ -771,6 +772,7 @@ fn the_output_slot_must_exist_and_permit_code_changeset() {
     let sealer = sealer(&store, &capture, &cas, &workspace_root);
 
     let unknown = SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "no-such-slot",
         authority: run_authority(1),
@@ -781,6 +783,7 @@ fn the_output_slot_must_exist_and_permit_code_changeset() {
     assert!(matches!(err, SealError::OutputSlotInvalid { .. }), "{err}");
 
     let wrong_kind = SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "diagnosis",
         authority: run_authority(1),
@@ -1250,6 +1253,7 @@ fn a_stale_authority_claim_is_refused_before_any_capture() {
     let epoch = store.restore_generation().expect("generation");
 
     let stale = SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "changeset",
         authority: run_authority(99),
@@ -1306,6 +1310,7 @@ fn an_already_frozen_workspace_revalidates_current_run_authority_before_capture(
     );
     let retry_cas = MemoryCas::new();
     let stale_retry = SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "changeset",
         authority: run_authority(99),
@@ -1359,6 +1364,7 @@ fn a_conflicting_retry_cannot_reuse_a_command_identity_to_bypass_authority() {
 
     // Same outer command identity and hash; different claimed authority.
     let conflicting = SealRequest {
+        producer_attempt_id: None,
         task_id: "task-1",
         output_slot: "changeset",
         authority: run_authority(99),

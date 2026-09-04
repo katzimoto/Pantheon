@@ -40,6 +40,22 @@ use crate::seal::{SealAuthority, validate_seal_authority};
 use crate::store::Store;
 use crate::transaction::{Revision, Value, Writer};
 
+/// The authenticated producer context an Agent Control seal carries into
+/// publication.
+///
+/// Content identity stays separate from production provenance: the Artifact
+/// row records *what* exists, this records *which execution lineage produced
+/// it, where*. The same Artifact digest may legitimately carry many
+/// ProductionRecords from different Runs; one Run produces at most one per
+/// output slot, which is what Candidate submission later resolves ownership
+/// through.
+#[derive(Debug)]
+pub struct ProducerProvenance<'a> {
+    /// The Attempt whose AgentControlSession requested the seal. Constrained
+    /// holder-safely to belong to the sealing Run.
+    pub attempt_id: &'a str,
+}
+
 /// Everything the final publication transaction needs to know.
 ///
 /// Every field was computed *outside* any transaction — capture digests,
@@ -75,6 +91,10 @@ pub struct SealedChangeset<'a> {
     /// Every payload-bearing member: `(digest, size)` pairs already made
     /// durable in CAS before this transaction was attempted.
     pub members: Vec<(Digest, u64)>,
+    /// The producer provenance to bind when the seal was requested through
+    /// Agent Control. `None` keeps the pre-#33 controller-side behavior of
+    /// publishing content without a ProductionRecord.
+    pub producer: Option<ProducerProvenance<'a>>,
 }
 
 /// What the publication committed.
@@ -262,6 +282,60 @@ impl Store {
                         Value::Blob(digest.as_bytes().to_vec()),
                     ],
                 )?;
+            }
+
+            // Production provenance binds the content to the execution
+            // lineage that produced it — inside this same transaction, so a
+            // published Artifact never exists without its record and a retry
+            // converges instead of minting conflicting provenance.
+            if let Some(producer) = &seal.producer {
+                let existing: Option<(String, String, String, Vec<u8>)> = writer.query_optional(
+                    "SELECT task_id, attempt_id, workspace_revision_id, artifact_digest
+                     FROM production_records WHERE run_id = ?1 AND output_slot = ?2",
+                    &[
+                        Value::from(seal.authority.run_id.as_str()),
+                        Value::from(seal.output_slot),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let claimed = (
+                    seal.task_id.to_string(),
+                    producer.attempt_id.to_string(),
+                    workspace_revision_id.clone(),
+                    seal.artifact_digest.as_bytes().to_vec(),
+                );
+                match existing {
+                    Some(recorded) => {
+                        if recorded != claimed {
+                            return writer.fail(StoreError::ContentIdentityConflict {
+                                table: "production_records",
+                                id: format!(
+                                    "{}/{}/{}",
+                                    seal.authority.run_id, seal.output_slot, seal.artifact_digest
+                                ),
+                                detail: "the run already produced different content \
+                                         for this output slot"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                    None => {
+                        writer.execute(
+                            "INSERT INTO production_records
+                                 (run_id, output_slot, task_id, attempt_id,
+                                  workspace_revision_id, artifact_digest, created_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())",
+                            &[
+                                Value::from(seal.authority.run_id.as_str()),
+                                Value::from(seal.output_slot),
+                                Value::from(seal.task_id),
+                                Value::from(producer.attempt_id),
+                                Value::from(workspace_revision_id.as_str()),
+                                Value::Blob(seal.artifact_digest.as_bytes().to_vec()),
+                            ],
+                        )?;
+                    }
+                }
             }
 
             Ok(SealOutcome {
