@@ -58,8 +58,9 @@ mod integration {
         if !verified.all_passed() {
             // Diagnostic: print the container inspect JSON so CI logs reveal
             // exactly what the runtime reports for mounts, capabilities, etc.
+            let name = backend.container_name(&key);
             let inspect = backend
-                .inspect_container_json(&key)
+                .inspect_container(&name)
                 .unwrap_or_else(|_| "<inspect failed>".to_string());
             eprintln!("=== container inspect ===\n{inspect}\n=========================");
         }
