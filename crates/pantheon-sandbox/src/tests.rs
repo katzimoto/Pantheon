@@ -44,6 +44,10 @@ mod integration {
         let key = SandboxKey::new("pantheon-test-roundtrip").unwrap();
         let plan = test_plan();
 
+        // Bind-mount sources must exist before container creation.
+        std::fs::create_dir_all("/tmp/pantheon-test-ws").unwrap();
+        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
+
         // Clean up any leftover from a previous aborted run
         let _ = backend.release_sandbox(&key);
 
