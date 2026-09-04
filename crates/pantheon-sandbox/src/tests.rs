@@ -59,7 +59,10 @@ mod integration {
         assert!(verified.capability_verified, "capability_verified");
         assert!(verified.network_mode_verified, "network_mode_verified");
         assert!(verified.mounts_verified, "mounts_verified");
-        assert!(verified.resource_limits_verified, "resource_limits_verified");
+        assert!(
+            verified.resource_limits_verified,
+            "resource_limits_verified"
+        );
         assert!(verified.identity_verified, "identity_verified");
         assert!(
             verified.environment_identity_verified,
