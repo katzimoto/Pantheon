@@ -55,26 +55,16 @@ mod integration {
         assert_eq!(presence, SandboxPresence::Present);
 
         let verified = backend.verify_sandbox(&key, &plan).unwrap();
-        assert!(verified.privilege_verified, "privilege_verified");
-        assert!(verified.capability_verified, "capability_verified");
-        assert!(verified.network_mode_verified, "network_mode_verified");
-        assert!(verified.mounts_verified, "mounts_verified");
         assert!(
-            verified.resource_limits_verified,
-            "resource_limits_verified"
-        );
-        assert!(verified.identity_verified, "identity_verified");
-        assert!(
-            verified.environment_identity_verified,
-            "environment_identity_verified"
-        );
-        assert!(
+            verified.all_passed(),
+            "verification failed: mounts={} network={} privilege={} capability={} agent_route={} workspace={} resources={}",
+            verified.mounts_verified,
+            verified.network_mode_verified,
+            verified.privilege_verified,
+            verified.capability_verified,
             verified.agent_control_route_verified,
-            "agent_control_route_verified"
-        );
-        assert!(
             verified.workspace_binding_verified,
-            "workspace_binding_verified"
+            verified.resource_limits_verified,
         );
 
         backend.release_sandbox(&key).unwrap();
