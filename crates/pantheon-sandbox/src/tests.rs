@@ -55,6 +55,14 @@ mod integration {
         assert_eq!(presence, SandboxPresence::Present);
 
         let verified = backend.verify_sandbox(&key, &plan).unwrap();
+        if !verified.all_passed() {
+            // Diagnostic: print the container inspect JSON so CI logs reveal
+            // exactly what the runtime reports for mounts, capabilities, etc.
+            let inspect = backend
+                .inspect_container_json(&key)
+                .unwrap_or_else(|_| "<inspect failed>".to_string());
+            eprintln!("=== container inspect ===\n{inspect}\n=========================");
+        }
         assert!(
             verified.all_passed(),
             "verification failed: mounts={} network={} privilege={} capability={} agent_route={} workspace={} resources={}",
