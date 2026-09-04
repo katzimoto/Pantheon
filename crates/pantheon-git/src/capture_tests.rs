@@ -331,7 +331,7 @@ fn swaps_during_capture_never_leak_external_bytes_and_always_fail_closed() {
             } else {
                 let _ = std::fs::write(&churn, b"churn-v2");
             }
-            std::hint::spin_loop();
+            std::thread::yield_now();
         }
     });
 

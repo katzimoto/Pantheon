@@ -429,7 +429,7 @@ fn verify_container_json(
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let capability_verified = cap_drop.contains(&"ALL");
+    let capability_verified = cap_drop.contains(&"ALL") || cap_drop.contains(&"all");
 
     // Network mode check.
     let network_mode_json = host_config
@@ -498,7 +498,11 @@ fn verify_mounts(actual: &[serde_json::Value], expected: &[SandboxMount]) -> Res
             let source = m.get("Source").and_then(|v| v.as_str()).unwrap_or("");
             let dest = m.get("Destination").and_then(|v| v.as_str()).unwrap_or("");
             let mode = m.get("Mode").and_then(|v| v.as_str()).unwrap_or("");
-            let rw = m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true);
+            let rw = m
+                .get("RW")
+                .and_then(|v| v.as_bool())
+                .or_else(|| m.get("ReadOnly").and_then(|v| v.as_bool()).map(|ro| !ro))
+                .unwrap_or(true);
             source == expected_mount.source
                 && dest == expected_mount.destination
                 && rw != expected_mount.read_only
