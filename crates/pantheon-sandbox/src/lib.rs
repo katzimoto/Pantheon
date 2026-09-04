@@ -450,9 +450,10 @@ fn verify_container_json(
     let mounts_verified = verify_mounts(&mounts_json, &plan.mounts)?;
 
     // Resource limits check.
-    let cpu_quota = host_config.get("CpuQuota").and_then(|v| v.as_i64());
+    // --cpus maps to NanoCpus (not CpuQuota) in both Docker and Podman.
+    let nano_cpus = host_config.get("NanoCpus").and_then(|v| v.as_i64());
     let memory = host_config.get("Memory").and_then(|v| v.as_i64());
-    let resource_limits_verified = plan.cpu_limit_millicores.is_some() == cpu_quota.is_some()
+    let resource_limits_verified = plan.cpu_limit_millicores.is_some() == nano_cpus.is_some()
         && plan.memory_limit_mb.is_some() == memory.is_some();
 
     // Identity check: the container name must match our key.
@@ -490,9 +491,8 @@ fn verify_container_json(
 }
 
 fn verify_mounts(actual: &[serde_json::Value], expected: &[SandboxMount]) -> Result<bool, String> {
-    if actual.len() != expected.len() {
-        return Ok(false);
-    }
+    // Container runtimes may add implicit mounts (resolv.conf, hosts, etc.);
+    // we only verify that every explicitly requested mount is present.
     for expected_mount in expected {
         let found = actual.iter().any(|m| {
             let source = m.get("Source").and_then(|v| v.as_str()).unwrap_or("");
