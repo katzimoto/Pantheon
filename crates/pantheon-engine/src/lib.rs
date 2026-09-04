@@ -28,6 +28,7 @@ pub mod operator;
 pub mod planning;
 pub mod routing;
 pub mod run;
+pub mod sandbox;
 pub mod scheduling;
 pub mod sealing;
 pub mod workspace;

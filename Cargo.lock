@@ -419,6 +419,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pantheon-sandbox"
+version = "0.1.0"
+dependencies = [
+ "pantheon-core",
+ "pantheon-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "pantheon-store"
 version = "0.1.0"
 dependencies = [

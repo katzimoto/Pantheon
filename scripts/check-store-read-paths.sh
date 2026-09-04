@@ -80,6 +80,8 @@ allowlist() {
 planning_operation
 planning_record_proposal
 revision_of
+ensure_test_run
+nonreleased_sandbox_inventory
 EOF
 }
 

@@ -37,5 +37,6 @@ pub mod config;
 pub mod context;
 pub mod execution;
 pub mod planning;
+pub mod sandbox;
 pub mod scheduling;
 pub mod workspace;

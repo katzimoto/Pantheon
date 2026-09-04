@@ -206,6 +206,7 @@ crates/
 ├── pantheon-engine/              effectful control-plane orchestration
 ├── pantheon-git/                 isolated Git Workspace materialization and capture
 ├── pantheon-cas/                 local content-addressed object store
+├── pantheon-sandbox/             concrete local container SandboxBackend
 ├── pantheon-operator-protocol/   Operator Control wire contract
 ├── pantheon-operator-api/        Operator Control transport adapter
 ├── pantheond/                    daemon, and the composition root
@@ -231,11 +232,12 @@ pantheon-store                -> pantheon-core
 pantheon-engine               -> pantheon-core, pantheon-store
 pantheon-git                  -> pantheon-core, pantheon-engine
 pantheon-cas                  -> pantheon-core, pantheon-engine
+pantheon-sandbox              -> pantheon-core, pantheon-engine
 pantheon-operator-protocol    -> (none)
 pantheon-operator-api         -> pantheon-core, pantheon-engine,
                                  pantheon-operator-protocol
 pantheond                     -> pantheon-core, pantheon-store,
-                                 pantheon-engine, pantheon-git,
+                                 pantheon-engine, pantheon-git, pantheon-sandbox,
                                  pantheon-operator-api,
                                  pantheon-operator-protocol
 pantheon-cli                  -> pantheon-operator-protocol
@@ -270,6 +272,11 @@ Four edges carry most of the architectural weight:
   port it implements is declared, and it deliberately cannot reach
   `pantheon-store`: a materializer that could open the database would be a
   second path into authoritative state.
+- **`pantheon-sandbox` is a crate for the same reasons `pantheon-git` is.**
+  It is a concrete platform implementation behind the engine's abstract
+  `SandboxBackend` port, and it is a trust boundary: it spawns privileged
+  container-runtime processes and constructs container configurations that
+  determine ambient authority. It must not reach `pantheon-store`.
 - **`pantheon-operator-protocol` depends on nothing.** It is a compatibility
   membrane. If public types were aliases of core domain types or persistence
   rows, every internal refactor would become a public breaking change.
@@ -287,6 +294,7 @@ the implementation.
 | `pantheon-engine` | Scheduling, run/attempt control, recovery, authorization, evaluation, configuration, artifact and integration workflows; the abstract ports to outside systems | Concrete implementations behind its own ports; HTTP routing and wire formats |
 | `pantheon-git` | Concrete Git materialization of a Task Workspace: repository creation, observation, discard, and the sterile non-interactive execution profile every Git process runs under; root-confined no-follow capture of a settled Workspace's logical tree; sterile reads of the trusted immutable base, and the sterile identity computations over captured bytes those reads compare against | Durable authority; orchestration; deciding what happens after a failure; Sandbox behaviour |
 | `pantheon-cas` | The concrete local content-addressed store behind the engine's CAS port: hash, stage durably, publish atomically into the digest namespace, verify what lands | Durable authority; ordering between CAS durability and DB commits; any orchestration |
+| `pantheon-sandbox` | Concrete local container SandboxBackend: provision, inspect, verify and release Linux containers through a runtime CLI; enforce factual isolation guarantees | Durable authority; orchestration; deciding when to provision or release; HTTP routing |
 | `pantheon-operator-protocol` | Request/response bodies, public resource representations, error envelopes, query and pagination types | Any internal dependency; transport; persistence shapes |
 | `pantheon-operator-api` | Routes, Unix-socket HTTP, middleware, wire/domain conversion, sensitive request handling, API description assembly | Business decisions; direct persistence access |
 | `pantheond` | Bootstrap, observability init, constructing store and engine, choosing concrete backends, server startup, controller supervision, shutdown | Domain rules, persistence details, orchestration logic, request handling |

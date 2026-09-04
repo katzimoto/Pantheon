@@ -40,6 +40,7 @@ use pantheon_core::config::canonical::Value;
 use pantheon_core::config::model::{IsolationClass, NetworkMode, SandboxProfile};
 use pantheon_core::config::{Digest, parse};
 use pantheon_core::execution::LaunchSemantics;
+use pantheon_core::sandbox::{SandboxNetworkMode, SandboxPlan};
 use pantheon_store::{Command, Committed, ObservationUpdate, Revision, Store, StoreError};
 
 /// How much of a digest an identifier carries.
@@ -201,29 +202,6 @@ pub trait ExecutionLauncher: fmt::Debug {
     fn inspect_execution(&self, launch_key: &str) -> Result<Observation, LauncherFailure>;
 }
 
-/// One Sandbox readiness check for a Run under its frozen strategy.
-#[derive(Debug, Clone, Copy)]
-pub struct SandboxCheck<'a> {
-    pub run_id: &'a str,
-    pub sandbox_profile_digest: &'a Digest,
-}
-
-/// The MVP Sandbox gate.
-///
-/// **Test/fake infrastructure only.** The strict production container
-/// SandboxBackend (#34) owns real isolation claims; nothing here may be
-/// represented as production isolation or execution readiness. The port
-/// exists so lifecycle semantics are exercisable before that mission lands.
-pub trait SandboxReadiness: fmt::Debug {
-    /// Verifies factual readiness for one Run under its frozen profile.
-    ///
-    /// # Errors
-    ///
-    /// A descriptive failure means the gate stays shut; the Run never
-    /// reaches LaunchReady through a half-open Sandbox.
-    fn verify_ready(&self, check: SandboxCheck<'_>) -> Result<(), String>;
-}
-
 // ---------------------------------------------------------------------------
 // Deterministic minimum recovery policy
 // ---------------------------------------------------------------------------
@@ -324,7 +302,7 @@ impl From<RandomFailure> for RunControllerError {
 #[derive(Debug)]
 pub struct ReconciliationDeps<'a> {
     pub launcher: &'a dyn ExecutionLauncher,
-    pub sandbox: &'a dyn SandboxReadiness,
+    pub sandbox: &'a dyn crate::sandbox::SandboxBackend,
     pub policy: &'a MinRecoveryPolicy,
 }
 
@@ -452,19 +430,34 @@ impl<'store, R: RandomBytes> RunController<'store, R> {
             }
         }
 
-        // SandboxReady — fake/test infrastructure until #34. A refusal keeps
-        // the gate shut and concludes the Run with zero Attempts; it is never
-        // retried into existence.
+        // SandboxReady: provision a durable Sandbox and ensure the external
+        // runtime matches the frozen plan. A refusal keeps the gate shut and
+        // concludes the Run with zero Attempts; it is never retried into
+        // existence.
         let binding = self.binding_profile_identity(view)?;
-        if let Err(detail) = deps.sandbox.verify_ready(SandboxCheck {
+        let plan = SandboxPlan {
+            sandbox_profile_digest: binding.sandbox_profile_digest,
+            environment_identity: run_id.to_string(),
+            mounts: Vec::new(),
+            network_mode: SandboxNetworkMode::None,
+            cpu_limit_millicores: None,
+            memory_limit_mb: None,
+        };
+        let plan_digest = plan.digest();
+        let epoch = self.store.restore_generation()?;
+        let command = Command {
+            epoch: epoch.as_str(),
+            id: &format!("sandbox-provision-{run_id}"),
+            request_hash: plan_digest.as_bytes(),
+            event_type: "sandbox.provisioned",
+        };
+        if let Err(err) = crate::sandbox::SandboxController::new(self.store).provision(
+            &command,
             run_id,
-            sandbox_profile_digest: &binding.sandbox_profile_digest,
-        }) {
-            return self.conclude_in_preparation(
-                run_id,
-                view.revision,
-                format!("sandbox:{detail}"),
-            );
+            &plan,
+            deps.sandbox,
+        ) {
+            return self.conclude_in_preparation(run_id, view.revision, format!("sandbox:{err}"));
         }
 
         // ContextReady: deterministic preparation against the exact frozen

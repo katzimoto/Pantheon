@@ -62,6 +62,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "run_context_plans".to_string(),
             "run_status".to_string(),
             "runs".to_string(),
+            "sandbox_instances".to_string(),
             "scheduler_state".to_string(),
             "schema_migrations".to_string(),
             "system_state".to_string(),

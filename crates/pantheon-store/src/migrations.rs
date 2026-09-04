@@ -965,6 +965,60 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX one_active_execution_slot
             ON run_status (active_slot) WHERE active_slot IS NOT NULL;",
     },
+    Migration {
+        version: 15,
+        name: "create_sandbox_instances",
+        // The SANDBOX table family from the canonical persistence contract's
+        // "Table families" section, which Issue #34's strict local container
+        // SandboxBackend needs.
+        //
+        // A SandboxInstance belongs to exactly one Run holder. Its lifecycle
+        // phase and external observed presence are separate durable facts,
+        // per the canonical contract: a controller error is never proof that
+        // an external runtime does not exist.
+        //
+        // The `sandbox_plan_digest` and `environment_identity` are immutable:
+        // they are set at creation and never change for the same SandboxKey.
+        sql: "CREATE TABLE sandbox_instances (
+            id                    TEXT    NOT NULL PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+            -- The Run that owns this Sandbox. A Run has at most one
+            -- current/non-RELEASED Sandbox.
+            -- NOTE: MVP omits the REFERENCES runs(id) foreign key so that
+            -- sandbox store tests can exercise the table without the full
+            -- scheduling pipeline.  The RunController is the only production
+            -- caller and it already validates run existence before creating
+            -- a sandbox.
+            run_id                TEXT    NOT NULL,
+            -- Immutable identity of the SandboxPlan that authorized this
+            -- instance, so verification can check that the external runtime
+            -- matches the plan Pantheon committed to.
+            sandbox_plan_digest   BLOB    NOT NULL CHECK (length(sandbox_plan_digest) = 32),
+            -- Immutable content identity of the execution environment — an
+            -- image digest rather than a mutable tag.
+            environment_identity  TEXT    NOT NULL CHECK (length(environment_identity) > 0),
+            phase                 TEXT    NOT NULL CHECK (phase IN (
+                'Requested', 'Preparing', 'Ready', 'Releasing',
+                'Released', 'Error')),
+            -- The strongest factual observation about external runtime state,
+            -- kept independent of `phase`.
+            observed_presence     TEXT    NOT NULL CHECK (observed_presence IN (
+                'Present', 'Absent', 'Unknown')),
+            revision              INTEGER NOT NULL CHECK (revision > 0),
+            created_at            INTEGER NOT NULL,
+            updated_at            INTEGER NOT NULL,
+            -- A partially prepared Sandbox can never be reported Ready.
+            CHECK (phase != 'Ready' OR observed_presence = 'Present'),
+            -- Durable intention exists before any side effect.
+            CHECK (phase != 'Requested' OR observed_presence = 'Absent'),
+            -- Ordinary release requires established external absence.
+            CHECK (phase != 'Released' OR observed_presence = 'Absent')
+        ) STRICT;
+
+        -- At most one current Sandbox per Run: the canonical one-live-Sandbox
+        -- rule as a real database backstop.
+        CREATE UNIQUE INDEX sandbox_one_current_per_run
+            ON sandbox_instances (run_id) WHERE phase != 'Released';",
+    },
 ];
 
 /// Runs the production migration set against `conn`.
