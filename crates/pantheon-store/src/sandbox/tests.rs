@@ -321,3 +321,43 @@ fn record_probe_evidence_persists() {
     assert_eq!(results[0].platform, "linux");
     assert_eq!(results[0].architecture, "x86_64");
 }
+
+#[test]
+fn probe_evidence_survives_store_reopen() {
+    let (store, dir) = temp_store();
+    let epoch = store.restore_generation().expect("generation");
+    let cmd = command(epoch.as_str(), "cmd-1");
+    let key = SandboxKey::new("sandbox-reopen").unwrap();
+    let plan = test_plan();
+    let digest = plan.digest();
+    let binding = SandboxBinding {
+        run_id: "run-1",
+        sandbox_plan_digest: digest.as_bytes(),
+        environment_identity: &plan.environment_identity,
+    };
+    store.create_sandbox(&cmd, &key, &binding).unwrap();
+
+    let evidence = SandboxProbeEvidence {
+        sandbox_id: key.as_str(),
+        probe_name: "survival_test",
+        expected: "true",
+        observed: "true",
+        passed: true,
+        backend_descriptor: "podman",
+        backend_version: "4.0.0",
+        platform: "linux",
+        architecture: "x86_64",
+        probe_implementation_version: "1",
+    };
+    let cmd2 = command(epoch.as_str(), "cmd-2");
+    store
+        .record_sandbox_probe_evidence(&cmd2, &evidence)
+        .unwrap();
+
+    drop(store);
+    let db_path = dir.join("store.db");
+    let reopened = Store::open(&db_path).unwrap();
+    let results = reopened.sandbox_probe_results(key.as_str()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].probe_name, "survival_test");
+}
