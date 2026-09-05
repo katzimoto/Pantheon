@@ -66,4 +66,4 @@ Later edits, reverts, or force-pushes cannot erase this record because the check
 
 $marker"
 
-          printf '%s' "$body" | jq -Rrs '{event: "REQUEST_CHANGES", body: .}' | gh api --input - "repos/$REPO/pulls/$PR_NUMBER/reviews"
+          printf '%s' "$body" | python3 -c 'import json, sys; print(json.dumps({"event": "REQUEST_CHANGES", "body": sys.stdin.read()}))' | gh api --input - "repos/$REPO/pulls/$PR_NUMBER/reviews"
