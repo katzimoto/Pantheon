@@ -344,6 +344,10 @@ impl LocalContainerBackend {
 
         // Image.
         args.push(plan.environment_identity.clone());
+        // Keep the container alive so verification probes can exec into it.
+        // The actual workload command is supplied later by the executor.
+        args.push("sleep".to_string());
+        args.push("3600".to_string());
 
         let output = Command::new(&self.runtime)
             .args(&args)
