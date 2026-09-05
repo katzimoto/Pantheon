@@ -1,0 +1,23 @@
+{
+  "_expected": "pass",
+  "_description": "valid supporting relationship",
+  "action": "opened",
+  "number": 9,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nPart of #119\n\n## Change\n\nSome preparatory refactoring.\n\n## Evidence\n\nTests pass.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

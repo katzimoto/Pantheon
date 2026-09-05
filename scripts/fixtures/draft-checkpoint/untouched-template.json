@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "untouched template body",
+  "action": "opened",
+  "number": 8,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "<!--\nPantheon pull request. `docs/development/change-lifecycle.md` is the contract;\nthis file is the default way to author one, not the contract itself.\n-->\n\n## Mission\n\n<!--\nUse `Closes #123` only when merging this pull request completes that mission.\n-->\n\n## Change\n\n<!--\nWhat this change does, and why it is this shape rather than a smaller or larger\none.\n-->\n\n## Evidence\n\n<!--\nAccount for every acceptance criterion without copying it.\n-->\n\n## Impact and risk\n\n<!--\nOptional. Meaningful architecture/schema/API/security/compatibility impact,\nrisks, incomplete areas, and work discovered but deliberately left out of scope.\n\nDelete this heading when there is nothing meaningful to say. Do not write\n\"None\".\n-->",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

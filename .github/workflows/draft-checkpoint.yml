@@ -1,0 +1,82 @@
+name: Draft Checkpoint
+
+# Evaluate the immutable opening facts of a mission pull request.
+# This workflow triggers only once per PR, on open, and never re-runs on
+# synchronize or edited events. A failed opening therefore leaves a durable
+# record that later body repairs, reverts, or force-pushes cannot erase.
+#
+# Security: pull_request_target runs in the base repository context with a
+# write-capable token. We never check out or execute code from the untrusted
+# PR head. The checkout action defaults to the base branch; no step overrides
+# this. The validator script is taken from the base branch and processes only
+# the JSON event payload.
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # pull_request_target defaults to the base branch. Do NOT override
+          # with the PR head ref, as that would execute untrusted code with
+          # a write-capable token.
+          persist-credentials: false
+
+      - name: Validate opening checkpoint
+        id: validate
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 scripts/validate-draft-checkpoint.py
+
+      - name: Post durable review on failure
+        if: always() && steps.validate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 -c '
+          import json, os, subprocess, sys
+
+          marker = "<!-- pantheon-draft-checkpoint -->"
+          repo = os.environ["REPO"]
+          pr = os.environ["PR_NUMBER"]
+
+          # Idempotency: skip if a checkpoint review already exists.
+          reviews = subprocess.run(
+              ["gh", "api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"],
+              capture_output=True, text=True
+          )
+          if marker in reviews.stdout:
+              print("Checkpoint review already exists; skipping.")
+              sys.exit(0)
+
+          body = (
+              "This pull request failed the Pantheon Draft opening checkpoint.\n\n"
+              "The opening event showed one or more of the following:\n"
+              "- not opened as Draft\n"
+              "- does not target the default branch\n"
+              "- has tracked changes at opening (non-empty tree diff)\n"
+              "- missing or empty required body sections (Mission, Change, Evidence)\n"
+              "- Mission section does not identify a mission relationship\n\n"
+              "Later edits, reverts, or force-pushes cannot erase this record "
+              "because the check evaluates only the immutable opening-event facts. "
+              "To establish a compliant history, open a new Draft pull request "
+              "from a tree-equivalent checkpoint.\n\n"
+              f"{marker}"
+          )
+
+          payload = json.dumps({"event": "REQUEST_CHANGES", "body": body})
+          subprocess.run(
+              ["gh", "api", "--input", "-", f"repos/{repo}/pulls/{pr}/reviews"],
+              input=payload, text=True, check=True
+          )
+          '

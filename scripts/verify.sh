@@ -44,6 +44,7 @@ cd "$root"
 # from the copy (#94). Seconds; no build beyond cargo's own graph read.
 ./scripts/check-untracked-immunity.sh
 ./scripts/check-hooks.sh
+./scripts/validate-draft-checkpoint.py --self-test
 
 cargo fmt --all -- --check
 
