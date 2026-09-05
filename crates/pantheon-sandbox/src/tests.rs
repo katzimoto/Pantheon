@@ -203,7 +203,8 @@ mod integration {
                 "cat /scratch/canary 2>/dev/null || echo NOT_FOUND",
             ],
         );
-        let stdout = String::from_utf8_lossy(&leak.unwrap().stdout);
+        let output = leak.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.trim() == "NOT_FOUND" || !stdout.contains("secret-a"),
             "sandbox B must not read sandbox A's scratch: got {stdout}"
