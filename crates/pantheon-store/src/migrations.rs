@@ -1030,6 +1030,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: "CREATE TABLE sandbox_probe_results (
             id                        INTEGER PRIMARY KEY,
             sandbox_id                TEXT    NOT NULL,
+            run_id                    TEXT    NOT NULL,
             probe_name                TEXT    NOT NULL,
             expected                  TEXT    NOT NULL,
             observed                  TEXT    NOT NULL,
@@ -1039,11 +1040,17 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
             platform                  TEXT    NOT NULL,
             architecture              TEXT    NOT NULL,
             probe_implementation_version TEXT NOT NULL,
+            environment_identity      TEXT    NOT NULL,
+            sandbox_plan_digest       BLOB    NOT NULL CHECK (length(sandbox_plan_digest) = 32),
+            launch_decision           TEXT    NOT NULL CHECK (launch_decision IN ('blocked', 'allowed')),
             recorded_at               INTEGER NOT NULL
         ) STRICT;
 
         CREATE INDEX idx_sandbox_probe_results_sandbox_id
-            ON sandbox_probe_results (sandbox_id);",
+            ON sandbox_probe_results (sandbox_id);
+
+        CREATE INDEX idx_sandbox_probe_results_run_id
+            ON sandbox_probe_results (run_id);",
     },
 ];
 

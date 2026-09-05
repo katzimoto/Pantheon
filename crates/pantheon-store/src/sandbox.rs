@@ -50,6 +50,7 @@ pub struct SandboxBinding<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct SandboxProbeEvidence<'a> {
     pub sandbox_id: &'a str,
+    pub run_id: &'a str,
     pub probe_name: &'a str,
     pub expected: &'a str,
     pub observed: &'a str,
@@ -59,6 +60,9 @@ pub struct SandboxProbeEvidence<'a> {
     pub platform: &'a str,
     pub architecture: &'a str,
     pub probe_implementation_version: &'a str,
+    pub environment_identity: &'a str,
+    pub sandbox_plan_digest: &'a [u8; 32],
+    pub launch_decision: &'a str,
 }
 
 /// One durable row from `sandbox_probe_results`.
@@ -66,6 +70,7 @@ pub struct SandboxProbeEvidence<'a> {
 pub struct SandboxProbeRecord {
     pub id: i64,
     pub sandbox_id: String,
+    pub run_id: String,
     pub probe_name: String,
     pub expected: String,
     pub observed: String,
@@ -75,6 +80,9 @@ pub struct SandboxProbeRecord {
     pub platform: String,
     pub architecture: String,
     pub probe_implementation_version: String,
+    pub environment_identity: String,
+    pub sandbox_plan_digest: [u8; 32],
+    pub launch_decision: String,
     pub recorded_at: i64,
 }
 
@@ -495,12 +503,14 @@ impl Store {
                 })?;
             writer.execute(
                 "INSERT INTO sandbox_probe_results (
-                     sandbox_id, probe_name, expected, observed, passed,
+                     sandbox_id, run_id, probe_name, expected, observed, passed,
                      backend_descriptor, backend_version, platform, architecture,
-                     probe_implementation_version, recorded_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     probe_implementation_version, environment_identity,
+                     sandbox_plan_digest, launch_decision, recorded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 &[
                     Value::from(evidence.sandbox_id),
+                    Value::from(evidence.run_id),
                     Value::from(evidence.probe_name),
                     Value::from(evidence.expected),
                     Value::from(evidence.observed),
@@ -510,6 +520,9 @@ impl Store {
                     Value::from(evidence.platform),
                     Value::from(evidence.architecture),
                     Value::from(evidence.probe_implementation_version),
+                    Value::from(evidence.environment_identity),
+                    Value::Blob(evidence.sandbox_plan_digest.to_vec()),
+                    Value::from(evidence.launch_decision),
                     Value::Integer(recorded_at),
                 ],
             )?;
@@ -524,27 +537,40 @@ impl Store {
     ) -> Result<Vec<SandboxProbeRecord>, StoreError> {
         self.read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, sandbox_id, probe_name, expected, observed, passed,
+                "SELECT id, sandbox_id, run_id, probe_name, expected, observed, passed,
                         backend_descriptor, backend_version, platform, architecture,
-                        probe_implementation_version, recorded_at
+                        probe_implementation_version, environment_identity,
+                        sandbox_plan_digest, launch_decision, recorded_at
                  FROM sandbox_probe_results
                  WHERE sandbox_id = ?1
                  ORDER BY recorded_at ASC",
             )?;
             let rows = stmt.query_map(rusqlite::params![sandbox_id], |row| {
+                let digest: Vec<u8> = row.get(13)?;
+                let digest: [u8; 32] = digest.try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        13,
+                        "sandbox_plan_digest".to_string(),
+                        rusqlite::types::Type::Blob,
+                    )
+                })?;
                 Ok(SandboxProbeRecord {
                     id: row.get(0)?,
                     sandbox_id: row.get(1)?,
-                    probe_name: row.get(2)?,
-                    expected: row.get(3)?,
-                    observed: row.get(4)?,
-                    passed: row.get::<_, i64>(5)? != 0,
-                    backend_descriptor: row.get(6)?,
-                    backend_version: row.get(7)?,
-                    platform: row.get(8)?,
-                    architecture: row.get(9)?,
-                    probe_implementation_version: row.get(10)?,
-                    recorded_at: row.get(11)?,
+                    run_id: row.get(2)?,
+                    probe_name: row.get(3)?,
+                    expected: row.get(4)?,
+                    observed: row.get(5)?,
+                    passed: row.get::<_, i64>(6)? != 0,
+                    backend_descriptor: row.get(7)?,
+                    backend_version: row.get(8)?,
+                    platform: row.get(9)?,
+                    architecture: row.get(10)?,
+                    probe_implementation_version: row.get(11)?,
+                    environment_identity: row.get(12)?,
+                    sandbox_plan_digest: digest,
+                    launch_decision: row.get(14)?,
+                    recorded_at: row.get(15)?,
                 })
             })?;
             let mut out = Vec::new();

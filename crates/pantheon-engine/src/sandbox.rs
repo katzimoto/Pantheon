@@ -179,7 +179,7 @@ impl<'store> SandboxController<'store> {
                             request_hash: command.request_hash,
                             event_type: "sandbox.failed",
                         };
-                        let _ = self.store.fail_sandbox(
+                        let _fail_result = self.store.fail_sandbox(
                             &cmd_fail,
                             &key,
                             record.revision,
@@ -201,19 +201,28 @@ impl<'store> SandboxController<'store> {
                     })?;
 
                     if !verified.all_passed() {
-                        let _ = self.record_probe_evidence(command, &key, &verified);
+                        self.record_probe_evidence(command, run_id, &key, plan, &verified)
+                            .map_err(|e| SandboxControllerError::ProvisioningFailed {
+                                sandbox_id: key.as_str().to_string(),
+                                detail: format!("probe evidence recording failed: {e}"),
+                            })?;
                         let cmd_fail = Command {
                             epoch: epoch.as_str(),
                             id: &format!("{}-fail", command.id),
                             request_hash: command.request_hash,
                             event_type: "sandbox.failed",
                         };
-                        let _ = self.store.fail_sandbox(
-                            &cmd_fail,
-                            &key,
-                            record.revision,
-                            SandboxPresence::Unknown,
-                        );
+                        self.store
+                            .fail_sandbox(
+                                &cmd_fail,
+                                &key,
+                                record.revision,
+                                SandboxPresence::Unknown,
+                            )
+                            .map_err(|e| SandboxControllerError::ProvisioningFailed {
+                                sandbox_id: key.as_str().to_string(),
+                                detail: format!("fail_sandbox failed: {e}"),
+                            })?;
                         return Err(SandboxControllerError::VerificationFailed {
                             sandbox_id: key.as_str().to_string(),
                         });
@@ -248,9 +257,9 @@ impl<'store> SandboxController<'store> {
                         request_hash: command.request_hash,
                         event_type: "sandbox.failed",
                     };
-                    let _ = self
-                        .store
-                        .fail_sandbox(&cmd_fail, &key, record.revision, presence);
+                    let _fail_result =
+                        self.store
+                            .fail_sandbox(&cmd_fail, &key, record.revision, presence);
                     Err(SandboxControllerError::ProvisioningFailed {
                         sandbox_id: key.as_str().to_string(),
                         detail: format!("sandbox did not reach Present: {presence}"),
@@ -384,12 +393,16 @@ impl<'store> SandboxController<'store> {
     fn record_probe_evidence(
         &self,
         command: &Command<'_>,
+        run_id: &str,
         sandbox_key: &SandboxKey,
+        plan: &SandboxPlan,
         verification: &SandboxVerification,
     ) -> Result<(), SandboxControllerError> {
+        let plan_digest = plan.digest();
         for result in &verification.probe_results {
             let evidence = SandboxProbeEvidence {
                 sandbox_id: sandbox_key.as_str(),
+                run_id,
                 probe_name: &result.name,
                 expected: &result.expected,
                 observed: &result.observed,
@@ -399,6 +412,9 @@ impl<'store> SandboxController<'store> {
                 platform: &verification.platform,
                 architecture: &verification.architecture,
                 probe_implementation_version: &verification.probe_implementation_version,
+                environment_identity: &plan.environment_identity,
+                sandbox_plan_digest: plan_digest.as_bytes(),
+                launch_decision: "blocked",
             };
             let cmd = Command {
                 epoch: command.epoch,
@@ -406,7 +422,9 @@ impl<'store> SandboxController<'store> {
                 request_hash: command.request_hash,
                 event_type: "sandbox.probe.recorded",
             };
-            let _ = self.store.record_sandbox_probe_evidence(&cmd, &evidence);
+            self.store
+                .record_sandbox_probe_evidence(&cmd, &evidence)
+                .map_err(SandboxControllerError::Store)?;
         }
         Ok(())
     }

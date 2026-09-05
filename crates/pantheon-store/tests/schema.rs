@@ -398,15 +398,19 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "architecture",
             "backend_descriptor",
             "backend_version",
+            "environment_identity",
             "expected",
             "id",
+            "launch_decision",
             "observed",
             "passed",
             "platform",
             "probe_implementation_version",
             "probe_name",
             "recorded_at",
-            "sandbox_id"
+            "run_id",
+            "sandbox_id",
+            "sandbox_plan_digest"
         ]
     );
 

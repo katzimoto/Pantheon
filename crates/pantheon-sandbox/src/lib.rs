@@ -128,7 +128,7 @@ impl LocalContainerBackend {
             .is_ok_and(|s| s.success())
     }
 
-    fn container_name(&self, key: &SandboxKey) -> String {
+    pub(crate) fn container_name(&self, key: &SandboxKey) -> String {
         format!("{}{}", self.name_prefix, key.as_str())
     }
 
@@ -137,13 +137,22 @@ impl LocalContainerBackend {
         vec![self.runtime.clone()]
     }
 
-    fn backend_version(&self) -> String {
+    fn backend_version(&self) -> Result<String, SandboxError> {
         let output = Command::new(&self.runtime).args(["--version"]).output();
         match output {
             Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
-            _ => "unknown".to_string(),
+            Ok(out) => Err(SandboxError {
+                detail: format!(
+                    "{} --version failed: {}",
+                    self.runtime,
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            }),
+            Err(err) => Err(SandboxError {
+                detail: format!("could not run {} --version: {err}", self.runtime),
+            }),
         }
     }
 }
@@ -206,11 +215,13 @@ impl SandboxBackend for LocalContainerBackend {
     ) -> Result<SandboxVerification, SandboxError> {
         let name = self.container_name(key);
         let inspect_json = self.inspect_container(&name)?;
+        let pid =
+            container_pid_from_inspect(&inspect_json).map_err(|detail| SandboxError { detail })?;
 
-        let mut verification = verify_container_json(&inspect_json, key, plan)
+        let mut verification = verify_container_json(&inspect_json, key, plan, pid)
             .map_err(|detail| SandboxError { detail })?;
 
-        let (probe_results, probes) = self.run_probes(&name)?;
+        let (probe_results, probes) = self.run_probes(pid)?;
         verification.seccomp_active_verified = probes.seccomp_active;
         verification.host_pid_hidden_verified = probes.host_pid_hidden;
         verification.host_user_namespace_verified = probes.host_user_namespace;
@@ -218,17 +229,17 @@ impl SandboxBackend for LocalContainerBackend {
         verification.cloud_metadata_unreachable_verified = probes.cloud_metadata_unreachable;
         verification.dns_resolution_denied_verified = probes.dns_denied;
         verification.forbidden_mounts_absent_verified = probes.forbidden_mounts_absent;
-        verification.runtime_socket_absent_verified = probes.forbidden_mounts_absent;
+        verification.runtime_socket_absent_verified = probes.runtime_socket_absent;
         verification.control_plane_unreachable_verified = probes.control_plane_unreachable;
-        // Cross-Attempt isolation is tested externally; config isolation is
-        // verified above, so mark it true here (integration tests prove it).
-        verification.cross_attempt_isolation_verified = true;
+        // Cross-Attempt isolation requires a distinct mount namespace;
+        // the integration test proves the full property empirically.
+        verification.cross_attempt_isolation_verified = probes.host_mount_namespace;
         verification.probe_results = probe_results;
         verification.backend_descriptor = self.runtime.clone();
-        verification.backend_version = self.backend_version();
-        verification.platform = "linux".to_string();
-        verification.architecture = "x86_64".to_string();
-        verification.probe_implementation_version = "1".to_string();
+        verification.backend_version = self.backend_version()?;
+        verification.platform = std::env::consts::OS.to_string();
+        verification.architecture = std::env::consts::ARCH.to_string();
+        verification.probe_implementation_version = "2".to_string();
 
         Ok(verification)
     }
@@ -409,7 +420,7 @@ impl LocalContainerBackend {
         Ok(())
     }
 
-    fn inspect_container(&self, name: &str) -> Result<String, SandboxError> {
+    pub(crate) fn inspect_container(&self, name: &str) -> Result<String, SandboxError> {
         let output = Command::new(&self.runtime)
             .args(["inspect", name])
             .output()
@@ -430,7 +441,7 @@ impl LocalContainerBackend {
 
     /// Execute a command inside a running container, returning raw output
     /// including non-zero exits so probes can observe denial.
-    fn exec_in_container_raw(
+    pub fn exec_in_container_raw(
         &self,
         name: &str,
         cmd: &[&str],
@@ -444,23 +455,101 @@ impl LocalContainerBackend {
                 detail: format!("could not exec in container: {err}"),
             })
     }
+}
 
-    /// Execute a command inside a running container, returning stdout on success.
-    #[allow(dead_code)]
-    fn exec_in_container(&self, name: &str, cmd: &[&str]) -> Result<String, SandboxError> {
-        let output = self.exec_in_container_raw(name, cmd)?;
-        if !output.status.success() {
-            return Err(SandboxError {
-                detail: format!(
-                    "{} exec failed ({}): {}",
-                    self.runtime,
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+// ---------------------------------------------------------------------------
+// Host-side trustworthy inspection helpers
+// ---------------------------------------------------------------------------
+
+fn container_pid_from_inspect(json: &str) -> Result<u32, String> {
+    let array: serde_json::Value = serde_json::from_str(json)
+        .map_err(|err| format!("inspect output is not valid JSON: {err}"))?;
+    let obj = array
+        .as_array()
+        .and_then(|arr| arr.first())
+        .ok_or("inspect output is empty")?;
+    let state = obj.get("State").ok_or("inspect output missing State")?;
+    let pid = state
+        .get("Pid")
+        .and_then(|v| v.as_u64())
+        .ok_or("inspect output missing State.Pid")?;
+    if pid == 0 {
+        return Err("container is not running".to_string());
     }
+    Ok(pid as u32)
+}
+
+fn read_ns_inode(pid: u32, ns_type: &str) -> Result<u64, std::io::Error> {
+    let path = format!("/proc/{pid}/ns/{ns_type}");
+    let link = std::fs::read_link(&path)?;
+    let s = link.to_string_lossy();
+    // Format: "pid:[4026531836]"
+    let start = s.find('[').ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "no [ in ns symlink")
+    })?;
+    let end = s.find(']').ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "no ] in ns symlink")
+    })?;
+    s[start + 1..end]
+        .parse::<u64>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn read_proc_file(pid: u32, filename: &str) -> Result<String, std::io::Error> {
+    let path = format!("/proc/{pid}/{filename}");
+    std::fs::read_to_string(&path)
+}
+
+fn nsenter_net(pid: u32, cmd: &[&str]) -> Result<std::process::Output, std::io::Error> {
+    let mut command = Command::new("nsenter");
+    command.arg("-t").arg(pid.to_string()).arg("-n");
+    for arg in cmd {
+        command.arg(arg);
+    }
+    command.output()
+}
+
+/// When container inspect does not expose Architecture/Os, verify the
+/// container's init binary architecture from host `/proc/<pid>/exe`.
+fn verify_container_arch_from_host(
+    pid: u32,
+    host_arch: &str,
+    host_platform: &str,
+) -> Result<bool, String> {
+    let exe_path = format!("/proc/{pid}/exe");
+    let output = Command::new("file")
+        .arg("-L")
+        .arg(&exe_path)
+        .output()
+        .map_err(|e| format!("cannot run file on {exe_path}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "file command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // file output looks like:
+    // /proc/12345/exe: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), ...
+    let arch_ok = if host_platform == "linux" {
+        match host_arch {
+            "x86_64" => stdout.contains("x86-64") || stdout.contains("x86_64"),
+            "aarch64" => stdout.contains("aarch64") || stdout.contains("ARM aarch64"),
+            "i686" => stdout.contains("Intel 80386") || stdout.contains("i386"),
+            "arm" => stdout.contains("ARM"),
+            "riscv64" => stdout.contains("RISC-V"),
+            _ => {
+                // Unknown host architecture: we cannot verify, so fail closed.
+                return Err(format!(
+                    "unsupported host architecture for host-side verification: {host_arch}"
+                ));
+            }
+        }
+    } else {
+        // Non-Linux platforms not supported for container execution.
+        false
+    };
+    Ok(arch_ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -468,87 +557,72 @@ impl LocalContainerBackend {
 // ---------------------------------------------------------------------------
 
 impl LocalContainerBackend {
-    /// Run all controller-owned behavioral probes inside the container.
+    /// Run all controller-owned behavioral probes.
     ///
-    /// Each probe returns a [`SandboxProbeResult`] with expected-vs-observed
-    /// facts. The controller interprets these; worker narration is never
-    /// trusted as evidence.
+    /// Namespace, mount, seccomp, and socket checks use host-side
+    /// `/proc/<pid>/...` inspection so worker image binaries cannot
+    /// fabricate evidence. Network behavioral checks use host `nsenter`
+    /// with host-owned binaries in the container's network namespace.
     fn run_probes(
         &self,
-        name: &str,
+        pid: u32,
     ) -> Result<(Vec<SandboxProbeResult>, BehavioralProbes), SandboxError> {
         let mut results = Vec::new();
         let mut probes = BehavioralProbes::default();
 
-        // Seccomp: /proc/self/status must show Seccomp: 2
-        let seccomp = self.probe_seccomp(name)?;
+        let seccomp = self.probe_seccomp(pid)?;
         probes.seccomp_active = seccomp.passed;
         results.push(seccomp);
 
-        // PID namespace: /proc/1/cgroup should contain container evidence.
-        let pid_ns = self.probe_pid_namespace(name)?;
+        let pid_ns = self.probe_pid_namespace(pid)?;
         probes.host_pid_hidden = pid_ns.passed;
         results.push(pid_ns);
 
-        // User namespace: /proc/self/uid_map should show a non-trivial mapping.
-        let user_ns = self.probe_user_namespace(name)?;
+        let user_ns = self.probe_user_namespace(pid)?;
         probes.host_user_namespace = user_ns.passed;
         results.push(user_ns);
 
-        // Mount namespace: /proc/self/mountinfo should not contain host paths.
-        let mount_ns = self.probe_mount_namespace(name)?;
+        let mount_ns = self.probe_mount_namespace(pid)?;
         probes.host_mount_namespace = mount_ns.passed;
         results.push(mount_ns);
 
-        // Network namespace: only loopback should exist.
-        let net_ns = self.probe_network_namespace(name)?;
+        let net_ns = self.probe_network_namespace(pid)?;
         probes.network_isolated = net_ns.passed;
         results.push(net_ns);
 
-        // Cloud metadata: no default route means metadata is unreachable.
-        let cloud = self.probe_cloud_metadata(name)?;
+        let cloud = self.probe_cloud_metadata(pid)?;
         probes.cloud_metadata_unreachable = cloud.passed;
         results.push(cloud);
 
-        // DNS: no nameservers configured.
-        let dns = self.probe_dns_denied(name)?;
+        let dns = self.probe_dns_denied(pid)?;
         probes.dns_denied = dns.passed;
         results.push(dns);
 
-        // Forbidden mounts: runtime sockets must not be present.
-        let forbidden = self.probe_forbidden_mounts(name)?;
+        let forbidden = self.probe_forbidden_mounts(pid)?;
         probes.forbidden_mounts_absent = forbidden.passed;
         results.push(forbidden);
 
-        // Control plane surfaces must not be reachable.
-        let ctrl = self.probe_control_plane(name)?;
+        let sockets = self.probe_runtime_sockets(pid)?;
+        probes.runtime_socket_absent = sockets.passed;
+        results.push(sockets);
+
+        let ctrl = self.probe_control_plane(pid)?;
         probes.control_plane_unreachable = ctrl.passed;
         results.push(ctrl);
 
         Ok((results, probes))
     }
 
-    fn probe_seccomp(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        // Docker and Podman both apply the default libseccomp profile, which
-        // enumerates permitted architectures before syscall-number rules.
-        // An unsupported or mismatched architecture therefore fails closed
-        // with SCMP_ACT_ERRNO rather than being evaluated against a wrong
-        // syscall table. We verify the profile is loaded by checking
-        // /proc/self/status.
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/self/status"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let observed = if stdout.contains("Seccomp:\t2") {
-            "Seccomp: 2".to_string()
-        } else if stdout.contains("Seccomp:") {
-            stdout
-                .lines()
-                .find(|l| l.starts_with("Seccomp:"))
-                .unwrap_or("Seccomp: missing")
-                .to_string()
+    fn probe_seccomp(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let status = read_proc_file(pid, "status").map_err(|e| SandboxError {
+            detail: format!("cannot read /proc/{pid}/status: {e}"),
+        })?;
+        let observed = if let Some(line) = status.lines().find(|l| l.starts_with("Seccomp:")) {
+            line.trim().to_string()
         } else {
             "Seccomp line missing".to_string()
         };
-        let passed = observed == "Seccomp: 2";
+        let passed = observed == "Seccomp:\t2";
         Ok(SandboxProbeResult {
             name: "seccomp_active".to_string(),
             expected: "Seccomp: 2".to_string(),
@@ -557,71 +631,73 @@ impl LocalContainerBackend {
         })
     }
 
-    fn probe_pid_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        // In a separate PID namespace, PID 1 is the container's init process.
-        // We run sleep 3600 as the container command, so PID 1 should be sleep.
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/1/cmdline"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let observed = stdout.trim().replace('\0', " ");
-        let passed = observed.contains("sleep");
+    fn probe_pid_namespace(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let host_pid =
+            read_ns_inode(std::process::id() as u32, "pid").map_err(|e| SandboxError {
+                detail: format!("cannot read host PID namespace: {e}"),
+            })?;
+        let container_pid = read_ns_inode(pid, "pid").map_err(|e| SandboxError {
+            detail: format!("cannot read container PID namespace: {e}"),
+        })?;
+        let passed = host_pid != container_pid;
+        let observed = format!("host pid:[{host_pid}] container pid:[{container_pid}]");
         Ok(SandboxProbeResult {
             name: "pid_namespace".to_string(),
-            expected: "PID 1 is container init (sleep)".to_string(),
+            expected: "distinct from host PID namespace".to_string(),
             observed,
             passed,
         })
     }
 
-    fn probe_user_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        // User namespace may be explicit (Podman rootless) or implicit
-        // (Docker with --user).  We accept either as long as the process
-        // is not running as unrestricted host root.
-        let uid_map = self.exec_in_container_raw(name, &["cat", "/proc/self/uid_map"]);
-        let has_user_ns = match &uid_map {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let txt = stdout.trim();
-                !txt.is_empty() && !txt.starts_with("0 0 4294967295")
-            }
-            Err(_) => false,
-        };
-        let id_u = self.exec_in_container_raw(name, &["id", "-u"]);
-        let uid = match &id_u {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            Err(_) => String::new(),
-        };
-        let passed = has_user_ns || uid == "1000" || uid.parse::<u32>().unwrap_or(0) > 0;
-        let observed = if has_user_ns {
-            format!("uid_map present, id={uid}")
-        } else {
-            format!("no uid_map, id={uid}")
-        };
+    fn probe_user_namespace(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let host_user =
+            read_ns_inode(std::process::id() as u32, "user").map_err(|e| SandboxError {
+                detail: format!("cannot read host user namespace: {e}"),
+            })?;
+        let container_user = read_ns_inode(pid, "user").map_err(|e| SandboxError {
+            detail: format!("cannot read container user namespace: {e}"),
+        })?;
+        let passed = host_user != container_user;
+        let observed = format!("host user:[{host_user}] container user:[{container_user}]");
         Ok(SandboxProbeResult {
             name: "user_namespace".to_string(),
-            expected: "user namespace or non-root uid".to_string(),
+            expected: "distinct from host user namespace".to_string(),
             observed,
             passed,
         })
     }
 
-    fn probe_mount_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/self/mountinfo"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let count = stdout.lines().count();
-        let observed = format!("{count} mount entries");
-        // A container with rootfs, /proc, /dev, and explicit bind mounts
-        // always has more than three entries.
-        let passed = count > 3;
+    fn probe_mount_namespace(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let host_mnt =
+            read_ns_inode(std::process::id() as u32, "mnt").map_err(|e| SandboxError {
+                detail: format!("cannot read host mount namespace: {e}"),
+            })?;
+        let container_mnt = read_ns_inode(pid, "mnt").map_err(|e| SandboxError {
+            detail: format!("cannot read container mount namespace: {e}"),
+        })?;
+        let passed = host_mnt != container_mnt;
+        let observed = format!("host mnt:[{host_mnt}] container mnt:[{container_mnt}]");
         Ok(SandboxProbeResult {
             name: "mount_namespace".to_string(),
-            expected: "> 3 mount entries".to_string(),
+            expected: "distinct from host mount namespace".to_string(),
             observed,
             passed,
         })
     }
 
-    fn probe_network_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/net/dev"])?;
+    fn probe_network_namespace(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let host_net =
+            read_ns_inode(std::process::id() as u32, "net").map_err(|e| SandboxError {
+                detail: format!("cannot read host net namespace: {e}"),
+            })?;
+        let container_net = read_ns_inode(pid, "net").map_err(|e| SandboxError {
+            detail: format!("cannot read container net namespace: {e}"),
+        })?;
+        let ns_distinct = host_net != container_net;
+
+        let output = nsenter_net(pid, &["cat", "/proc/net/dev"]).map_err(|e| SandboxError {
+            detail: format!("nsenter net check failed: {e}"),
+        })?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let non_lo = stdout
             .lines()
@@ -633,70 +709,127 @@ impl LocalContainerBackend {
                     && !trimmed.starts_with("lo:")
             })
             .count();
-        let observed = format!("{non_lo} non-loopback interfaces");
-        let passed = non_lo == 0;
+
+        let passed = ns_distinct && non_lo == 0;
+        let observed = format!("net ns distinct={ns_distinct} non-loopback interfaces={non_lo}");
         Ok(SandboxProbeResult {
             name: "network_namespace".to_string(),
-            expected: "0 non-loopback interfaces".to_string(),
+            expected: "distinct from host net namespace, 0 non-loopback interfaces".to_string(),
             observed,
             passed,
         })
     }
 
-    fn probe_cloud_metadata(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        // With --network=none there is no default route.
-        // Check /proc/net/route for any non-loopback route.
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/net/route"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let has_route = stdout
-            .lines()
-            .skip(1)
-            .any(|l| !l.trim().is_empty() && !l.starts_with("lo\t"));
-        let observed = if has_route {
-            "non-loopback route present".to_string()
-        } else {
-            "no non-loopback routes".to_string()
+    fn probe_cloud_metadata(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        // Prefer `nc` if available; fall back to bash /dev/tcp.
+        let (stdout, stderr, _status) = match self.try_connect_nsenter(pid, "169.254.169.254", "80")
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(SandboxProbeResult {
+                    name: "cloud_metadata_reachability".to_string(),
+                    expected: "BLOCKED".to_string(),
+                    observed: format!("probe execution error: {err}"),
+                    passed: false,
+                });
+            }
         };
+        let observed = if stdout.is_empty() && !stderr.is_empty() {
+            format!("stderr={stderr}")
+        } else {
+            stdout.clone()
+        };
+        let passed = stdout == "BLOCKED";
         Ok(SandboxProbeResult {
             name: "cloud_metadata_reachability".to_string(),
-            expected: "no non-loopback routes".to_string(),
+            expected: "BLOCKED".to_string(),
             observed,
-            passed: !has_route,
+            passed,
         })
     }
 
-    fn probe_dns_denied(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        let output = self.exec_in_container_raw(name, &["cat", "/etc/resolv.conf"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let has_ns = stdout.lines().any(|l| l.trim().starts_with("nameserver"));
-        let observed = if has_ns {
-            "nameserver configured".to_string()
-        } else {
-            "no nameserver".to_string()
+    fn probe_dns_denied(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let (stdout, stderr, _status) = match self.try_connect_nsenter(pid, "8.8.8.8", "53") {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(SandboxProbeResult {
+                    name: "dns_resolution".to_string(),
+                    expected: "BLOCKED".to_string(),
+                    observed: format!("probe execution error: {err}"),
+                    passed: false,
+                });
+            }
         };
+        let observed = if stdout.is_empty() && !stderr.is_empty() {
+            format!("stderr={stderr}")
+        } else {
+            stdout.clone()
+        };
+        let passed = stdout == "BLOCKED";
         Ok(SandboxProbeResult {
             name: "dns_resolution".to_string(),
-            expected: "no nameserver configured".to_string(),
+            expected: "BLOCKED".to_string(),
             observed,
-            passed: !has_ns,
+            passed,
         })
     }
 
-    fn probe_forbidden_mounts(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
+    fn try_connect_nsenter(
+        &self,
+        pid: u32,
+        host: &str,
+        port: &str,
+    ) -> Result<(String, String, std::process::ExitStatus), SandboxError> {
+        // Try netcat first.
+        let nc = nsenter_net(pid, &["nc", "-z", "-w", "2", host, port]);
+        if let Ok(out) = nc {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if out.status.success() {
+                // nc -z returns 0 when the port is open.
+                return Ok(("REACHABLE".to_string(), stderr, out.status));
+            }
+            if out.status.code() == Some(1) {
+                // nc -z returns 1 when the port is closed/unreachable.
+                return Ok(("BLOCKED".to_string(), stderr, out.status));
+            }
+        }
+
+        // Fall back to bash /dev/tcp.
+        let bash = nsenter_net(
+            pid,
+            &[
+                "/bin/bash",
+                "-c",
+                &format!(
+                    "echo > /dev/tcp/{host}/{port} 2>/dev/null && echo REACHABLE || echo BLOCKED"
+                ),
+            ],
+        )
+        .map_err(|e| SandboxError {
+            detail: format!("nsenter failed: {e}"),
+        })?;
+        let stdout = String::from_utf8_lossy(&bash.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&bash.stderr).trim().to_string();
+        Ok((stdout, stderr, bash.status))
+    }
+
+    fn probe_forbidden_mounts(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let mountinfo = read_proc_file(pid, "mountinfo").map_err(|e| SandboxError {
+            detail: format!("cannot read container mountinfo: {e}"),
+        })?;
         let forbidden = [
+            "/.ssh",
+            "/.gnupg",
+            "/root/.ssh",
+            "/root/.gnupg",
+            "/root/.aws",
+            "/root/.config/gcloud",
             "/var/run/docker.sock",
             "/run/docker.sock",
-            "/var/run/containerd.sock",
-            "/run/containerd.sock",
-            "/var/run/crio.sock",
-            "/run/crio.sock",
         ];
         let mut found = Vec::new();
         for path in &forbidden {
-            let output = self.exec_in_container_raw(name, &["test", "-e", path]);
-            if let Ok(out) = output
-                && out.status.success()
-            {
+            if mountinfo.contains(path) {
                 found.push(*path);
             }
         }
@@ -708,13 +841,50 @@ impl LocalContainerBackend {
         };
         Ok(SandboxProbeResult {
             name: "forbidden_mounts".to_string(),
-            expected: "no runtime sockets mounted".to_string(),
+            expected: "no host credential mounts".to_string(),
             observed,
             passed,
         })
     }
 
-    fn probe_control_plane(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
+    fn probe_runtime_sockets(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let mountinfo = read_proc_file(pid, "mountinfo").map_err(|e| SandboxError {
+            detail: format!("cannot read container mountinfo: {e}"),
+        })?;
+        let sockets = [
+            "/run/docker.sock",
+            "/run/containerd.sock",
+            "/run/crio.sock",
+            "/run/podman/podman.sock",
+            "/var/run/docker.sock",
+            "/var/run/containerd.sock",
+            "/var/run/crio.sock",
+            "/var/run/podman/podman.sock",
+        ];
+        let mut found = Vec::new();
+        for path in &sockets {
+            if mountinfo.contains(path) {
+                found.push(*path);
+            }
+        }
+        let passed = found.is_empty();
+        let observed = if found.is_empty() {
+            "none found".to_string()
+        } else {
+            found.join(", ")
+        };
+        Ok(SandboxProbeResult {
+            name: "runtime_socket_absent".to_string(),
+            expected: "no container runtime sockets mounted".to_string(),
+            observed,
+            passed,
+        })
+    }
+
+    fn probe_control_plane(&self, pid: u32) -> Result<SandboxProbeResult, SandboxError> {
+        let mountinfo = read_proc_file(pid, "mountinfo").map_err(|e| SandboxError {
+            detail: format!("cannot read container mountinfo: {e}"),
+        })?;
         let paths = [
             "/pantheon.db",
             "/workspace/pantheon.db",
@@ -722,12 +892,16 @@ impl LocalContainerBackend {
         ];
         let mut found = Vec::new();
         for path in &paths {
-            let output = self.exec_in_container_raw(name, &["test", "-e", path]);
-            if let Ok(out) = output
-                && out.status.success()
-            {
+            if mountinfo.contains(path) {
                 found.push(*path);
             }
+        }
+        let has_pantheon_mount = mountinfo.lines().any(|line| {
+            line.split_whitespace()
+                .any(|field| field.contains("pantheon.db"))
+        });
+        if has_pantheon_mount {
+            found.push("pantheon.db mounted");
         }
         let passed = found.is_empty();
         let observed = if found.is_empty() {
@@ -754,6 +928,7 @@ struct BehavioralProbes {
     cloud_metadata_unreachable: bool,
     dns_denied: bool,
     forbidden_mounts_absent: bool,
+    runtime_socket_absent: bool,
     control_plane_unreachable: bool,
 }
 
@@ -765,6 +940,7 @@ fn verify_container_json(
     json: &str,
     key: &SandboxKey,
     plan: &SandboxPlan,
+    pid: u32,
 ) -> Result<SandboxVerification, String> {
     // Parse the minimal fields we need from `docker/podman inspect` output.
     // Both tools emit a JSON array with one object per container.
@@ -843,6 +1019,51 @@ fn verify_container_json(
     let environment_identity_verified = image == plan.environment_identity
         || image_name == plan.environment_identity
         || image.ends_with(&format!("/{}", plan.environment_identity));
+
+    // Architecture and platform verification for seccomp safety.
+    // Docker/Podman container inspect may expose Platform ("linux/amd64")
+    // or separate Os/Architecture fields.  We accept either, and fall back
+    // to host-side /proc/<pid>/exe inspection when inspect is silent.
+    let host_arch = std::env::consts::ARCH;
+    let host_platform = std::env::consts::OS;
+
+    let (container_platform, container_arch) =
+        if let Some(platform) = obj.get("Platform").and_then(|v| v.as_str()) {
+            let mut parts = platform.split('/');
+            (parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+        } else {
+            (
+                obj.get("Os").and_then(|v| v.as_str()).unwrap_or(""),
+                obj.get("Architecture")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )
+        };
+
+    let arch_ok = if container_arch.is_empty() && container_platform.is_empty() {
+        // Inspect provided no architecture facts; verify from host /proc.
+        verify_container_arch_from_host(pid, host_arch, host_platform)?
+    } else {
+        let mapped_arch = match container_arch {
+            "amd64" => "x86_64",
+            "arm64" => "aarch64",
+            "386" => "i686",
+            _ => container_arch,
+        };
+        mapped_arch == host_arch && container_platform == host_platform
+    };
+
+    if !arch_ok {
+        return Err(format!(
+            "container architecture/platform mismatch or unverifiable: container={container_platform}/{container_arch}, host={host_platform}/{host_arch}"
+        ));
+    }
+
+    // Verify the container PID exists on the host (binds verification to
+    // the actual running process).
+    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        return Err(format!("container PID {pid} does not exist in host /proc"));
+    }
 
     // Agent control route and workspace binding are verified through the
     // mount set check above.

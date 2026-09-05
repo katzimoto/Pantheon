@@ -38,6 +38,16 @@ mod integration {
         }
     }
 
+    fn ensure_scratch_writable() {
+        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o777);
+            std::fs::set_permissions("/tmp/pantheon-test-scratch", perms).unwrap();
+        }
+    }
+
     fn cleanup_key(backend: &LocalContainerBackend, key: &SandboxKey) {
         let _ = backend.release_sandbox(key);
     }
@@ -49,7 +59,7 @@ mod integration {
         let plan = test_plan();
 
         std::fs::create_dir_all("/tmp/pantheon-test-ws").unwrap();
-        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
+        ensure_scratch_writable();
         cleanup_key(&backend, &key);
 
         let presence = backend.ensure_sandbox(&key, &plan).unwrap();
@@ -105,7 +115,7 @@ mod integration {
         let plan = test_plan();
 
         std::fs::create_dir_all("/tmp/pantheon-test-ws").unwrap();
-        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
+        ensure_scratch_writable();
         cleanup_key(&backend, &key);
 
         backend.ensure_sandbox(&key, &plan).unwrap();
@@ -167,7 +177,7 @@ mod integration {
         assert!(!verified.backend_version.is_empty());
         assert_eq!(verified.platform, "linux");
         assert_eq!(verified.architecture, "x86_64");
-        assert_eq!(verified.probe_implementation_version, "1");
+        assert_eq!(verified.probe_implementation_version, "2");
 
         backend.release_sandbox(&key).unwrap();
     }
@@ -177,21 +187,69 @@ mod integration {
         let backend = LocalContainerBackend::detect().expect("no container runtime found");
         let key_a = SandboxKey::new("pantheon-test-xa-a").unwrap();
         let key_b = SandboxKey::new("pantheon-test-xa-b").unwrap();
-        let plan = test_plan();
 
         std::fs::create_dir_all("/tmp/pantheon-test-ws").unwrap();
-        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
         cleanup_key(&backend, &key_a);
         cleanup_key(&backend, &key_b);
 
-        backend.ensure_sandbox(&key_a, &plan).unwrap();
-        backend.ensure_sandbox(&key_b, &plan).unwrap();
+        // Each sandbox must use a unique scratch directory; bind-mounts share
+        // the host path exactly, so identical sources would mean shared state.
+        let scratch_a = "/tmp/pantheon-test-scratch-a";
+        let scratch_b = "/tmp/pantheon-test-scratch-b";
+        std::fs::create_dir_all(scratch_a).unwrap();
+        std::fs::create_dir_all(scratch_b).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(scratch_a, std::fs::Permissions::from_mode(0o777)).unwrap();
+            std::fs::set_permissions(scratch_b, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+
+        let mut plan_a = test_plan();
+        plan_a.mounts = vec![
+            SandboxMount {
+                source: "/tmp/pantheon-test-ws".to_string(),
+                destination: "/workspace".to_string(),
+                read_only: false,
+            },
+            SandboxMount {
+                source: scratch_a.to_string(),
+                destination: "/scratch".to_string(),
+                read_only: false,
+            },
+        ];
+        let mut plan_b = test_plan();
+        plan_b.mounts = vec![
+            SandboxMount {
+                source: "/tmp/pantheon-test-ws".to_string(),
+                destination: "/workspace".to_string(),
+                read_only: false,
+            },
+            SandboxMount {
+                source: scratch_b.to_string(),
+                destination: "/scratch".to_string(),
+                read_only: false,
+            },
+        ];
+
+        backend.ensure_sandbox(&key_a, &plan_a).unwrap();
+        backend.ensure_sandbox(&key_b, &plan_b).unwrap();
 
         // Write a canary file inside sandbox A's scratch mount.
         let name_a = backend.container_name(&key_a);
-        backend
+        let write_out = backend
             .exec_in_container_raw(&name_a, &["sh", "-c", "echo secret-a > /scratch/canary"])
             .unwrap();
+        assert!(write_out.status.success(), "canary write must succeed");
+
+        // Verify the canary exists in A before testing B.
+        let check_a = backend
+            .exec_in_container_raw(&name_a, &["cat", "/scratch/canary"])
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&check_a.stdout).trim() == "secret-a",
+            "canary must exist in sandbox A"
+        );
 
         // Try to read it from sandbox B.
         let name_b = backend.container_name(&key_b);
@@ -220,7 +278,7 @@ mod integration {
         let key = SandboxKey::new("pantheon-test-weak").unwrap();
 
         std::fs::create_dir_all("/tmp/pantheon-test-ws").unwrap();
-        std::fs::create_dir_all("/tmp/pantheon-test-scratch").unwrap();
+        ensure_scratch_writable();
         cleanup_key(&backend, &key);
 
         // Create the container with the plan's expected config.

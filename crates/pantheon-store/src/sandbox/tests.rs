@@ -296,6 +296,7 @@ fn record_probe_evidence_persists() {
 
     let evidence = SandboxProbeEvidence {
         sandbox_id: key.as_str(),
+        run_id: "run-1",
         probe_name: "test_probe",
         expected: "true",
         observed: "false",
@@ -305,6 +306,9 @@ fn record_probe_evidence_persists() {
         platform: "linux",
         architecture: "x86_64",
         probe_implementation_version: "1",
+        environment_identity: "env-1",
+        sandbox_plan_digest: digest.as_bytes(),
+        launch_decision: "blocked",
     };
     let cmd2 = command(epoch.as_str(), "cmd-2");
     store
@@ -339,6 +343,7 @@ fn probe_evidence_survives_store_reopen() {
 
     let evidence = SandboxProbeEvidence {
         sandbox_id: key.as_str(),
+        run_id: "run-1",
         probe_name: "survival_test",
         expected: "true",
         observed: "true",
@@ -348,6 +353,9 @@ fn probe_evidence_survives_store_reopen() {
         platform: "linux",
         architecture: "x86_64",
         probe_implementation_version: "1",
+        environment_identity: "env-1",
+        sandbox_plan_digest: digest.as_bytes(),
+        launch_decision: "blocked",
     };
     let cmd2 = command(epoch.as_str(), "cmd-2");
     store
