@@ -416,6 +416,48 @@ CI adds one job beyond this: `cargo test --workspace --locked` on macOS, which
 is a different OS and a different architecture. That is the portability claim
 Pantheon makes today. Windows is not supported.
 
+### Fast inner-loop check
+
+```sh
+scripts/dev-check.sh <crate> [test-filter]
+```
+
+A narrow command for iterating on one workspace crate. It resolves the
+repository root from its own location, so it works from anywhere inside or
+outside the repository. It validates the crate name against actual workspace
+members, rejects option-like or malformed input, and passes the optional test
+filter as data rather than shell syntax.
+
+What it performs:
+
+- **Formatting verification** — `cargo fmt -p <crate> -- --check`
+- **Compilation** — `cargo check -p <crate> --locked`
+- **Tests** — `cargo test -p <crate> --locked`, optionally filtered
+
+A filter that matches no tests produces a non-zero exit with an actionable
+diagnostic, so a misspelled filter cannot be mistaken for successful targeted
+testing.
+
+What it proves:
+
+- The crate compiles under the pinned toolchain with the committed lockfile.
+- The crate's tests pass.
+- The crate's code is formatted.
+
+What it deliberately omits:
+
+- Full workspace dependency-graph validation.
+- Documentation link and structural checks.
+- Clippy linting.
+- Architecture-contract checks.
+- Mutant testing.
+- Other crates' compilation and tests.
+- Cross-platform verification.
+
+It is early feedback only. `./scripts/verify.sh` remains the only canonical
+completion gate, and the script prints an explicit reminder on every successful
+run.
+
 ### Proving the tests are load-bearing
 
 ```sh
