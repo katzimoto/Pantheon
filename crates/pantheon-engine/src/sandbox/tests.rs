@@ -94,6 +94,22 @@ impl SandboxBackend for FakeBackend {
                 agent_control_route_verified: true,
                 workspace_binding_verified: true,
                 resource_limits_verified: true,
+                seccomp_active_verified: true,
+                host_pid_hidden_verified: true,
+                host_user_namespace_verified: true,
+                host_mount_namespace_verified: true,
+                cloud_metadata_unreachable_verified: true,
+                dns_resolution_denied_verified: true,
+                forbidden_mounts_absent_verified: true,
+                runtime_socket_absent_verified: true,
+                cross_attempt_isolation_verified: true,
+                control_plane_unreachable_verified: true,
+                probe_results: Vec::new(),
+                backend_descriptor: "fake".to_string(),
+                backend_version: "0.0.0".to_string(),
+                platform: std::env::consts::OS.to_string(),
+                architecture: std::env::consts::ARCH.to_string(),
+                probe_implementation_version: "1".to_string(),
             })
         }
     }
@@ -325,4 +341,137 @@ fn provision_refuses_error_phase() {
         err,
         crate::sandbox::SandboxControllerError::ProvisioningFailed { .. }
     ));
+}
+
+#[test]
+fn reconcile_preserves_error_sandbox() {
+    let (store, _dir) = temp_store();
+    let controller = SandboxController::new(&store);
+    let plan = test_plan();
+    let backend = FakeBackend {
+        refuses_ensure: false,
+        refuses_verify: false,
+    };
+    let epoch = store.restore_generation().expect("generation");
+
+    // Create and fail a sandbox.
+    let key = SandboxKey::new("sandbox-run-rec").unwrap();
+    let digest = plan.digest();
+    let binding = pantheon_store::SandboxBinding {
+        run_id: "run-rec",
+        sandbox_plan_digest: digest.as_bytes(),
+        environment_identity: &plan.environment_identity,
+    };
+    let cmd_create = command(epoch.as_str(), "create-rec");
+    let created = store.create_sandbox(&cmd_create, &key, &binding).unwrap();
+    let record = match created {
+        Committed::Executed { value, .. } => value,
+        _ => panic!("expected Executed"),
+    };
+    let cmd_fail = command(epoch.as_str(), "fail-rec");
+    store
+        .fail_sandbox(&cmd_fail, &key, record.revision, SandboxPresence::Unknown)
+        .unwrap();
+
+    // Reconcile must not overwrite Error or provision a replacement.
+    let failed = store.sandbox_for_run("run-rec").unwrap().unwrap();
+    assert_eq!(failed.phase, SandboxPhase::Error);
+
+    let cmd_reconcile = command(epoch.as_str(), "reconcile-rec");
+    let reconciled = controller
+        .reconcile(&cmd_reconcile, &failed, &backend)
+        .unwrap();
+    assert_eq!(reconciled.record.phase, SandboxPhase::Error);
+    assert_eq!(reconciled.presence, SandboxPresence::Present);
+}
+
+#[derive(Debug)]
+struct FailingProbeBackend;
+
+impl SandboxBackend for FailingProbeBackend {
+    fn ensure_sandbox(
+        &self,
+        _key: &SandboxKey,
+        _plan: &SandboxPlan,
+    ) -> Result<SandboxPresence, SandboxError> {
+        Ok(SandboxPresence::Present)
+    }
+
+    fn inspect_sandbox(&self, _key: &SandboxKey) -> Result<SandboxPresence, SandboxError> {
+        Ok(SandboxPresence::Present)
+    }
+
+    fn verify_sandbox(
+        &self,
+        key: &SandboxKey,
+        plan: &SandboxPlan,
+    ) -> Result<SandboxVerification, SandboxError> {
+        Ok(SandboxVerification {
+            sandbox_key: key.clone(),
+            holder_id: "fake".to_string(),
+            environment_identity: plan.environment_identity.clone(),
+            mounts_verified: true,
+            network_mode_verified: true,
+            privilege_verified: true,
+            capability_verified: true,
+            agent_control_route_verified: true,
+            workspace_binding_verified: true,
+            resource_limits_verified: true,
+            seccomp_active_verified: false,
+            host_pid_hidden_verified: true,
+            host_user_namespace_verified: true,
+            host_mount_namespace_verified: true,
+            cloud_metadata_unreachable_verified: true,
+            dns_resolution_denied_verified: true,
+            forbidden_mounts_absent_verified: true,
+            runtime_socket_absent_verified: true,
+            cross_attempt_isolation_verified: true,
+            control_plane_unreachable_verified: true,
+            probe_results: vec![pantheon_core::sandbox::SandboxProbeResult {
+                name: "seccomp_active".to_string(),
+                expected: "Seccomp: 2".to_string(),
+                observed: "Seccomp: 0".to_string(),
+                passed: false,
+            }],
+            backend_descriptor: "fake".to_string(),
+            backend_version: "0.0.0".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            probe_implementation_version: "1".to_string(),
+        })
+    }
+
+    fn release_sandbox(&self, _key: &SandboxKey) -> Result<(), SandboxError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn failed_probe_prevents_launch_and_records_evidence() {
+    let (store, _dir) = temp_store();
+    let controller = SandboxController::new(&store);
+    let plan = test_plan();
+    let backend = FailingProbeBackend;
+    let epoch = store.restore_generation().expect("generation");
+    let cmd = command(epoch.as_str(), "cmd-probe");
+
+    let err = controller
+        .provision(&cmd, "run-probe", &plan, &backend)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::sandbox::SandboxControllerError::VerificationFailed { .. }
+    ));
+
+    // The sandbox should be in Error phase.
+    let record = store.sandbox_for_run("run-probe").unwrap().unwrap();
+    assert_eq!(record.phase, SandboxPhase::Error);
+
+    // Probe evidence should be persisted.
+    let evidence = store.sandbox_probe_results(record.id.as_str()).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].probe_name, "seccomp_active");
+    assert_eq!(evidence[0].expected, "Seccomp: 2");
+    assert_eq!(evidence[0].observed, "Seccomp: 0");
+    assert!(!evidence[0].passed);
 }

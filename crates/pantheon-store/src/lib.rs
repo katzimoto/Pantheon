@@ -104,7 +104,7 @@ pub use planning::{
     Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,
     PlanningOperationRecord, PlanningState, ProposalRecord, TaskRecord,
 };
-pub use sandbox::{SandboxBinding, SandboxRecord};
+pub use sandbox::{SandboxBinding, SandboxProbeEvidence, SandboxProbeRecord, SandboxRecord};
 pub use scheduling::{
     DispatchCandidate, GoalSchedulingRow, RunIntent, RunIntentCommit, SchedulerStateRecord,
     SchedulingSnapshot,

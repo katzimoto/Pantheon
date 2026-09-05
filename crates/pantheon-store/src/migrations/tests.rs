@@ -15,7 +15,7 @@ fn applies_migrations_in_order_and_records_bookkeeping() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 15);
+    assert_eq!(user_version, 16);
 
     let mut stmt = conn
         .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
@@ -43,6 +43,7 @@ fn applies_migrations_in_order_and_records_bookkeeping() {
             (13, "create_attempt_lineage".to_string()),
             (14, "create_candidate_submission".to_string()),
             (15, "create_sandbox_instances".to_string()),
+            (16, "create_sandbox_probe_results".to_string()),
         ]
     );
 
@@ -157,7 +158,7 @@ fn unsupported_newer_schema_version_fails_closed() {
         err,
         StoreError::UnsupportedSchemaVersion {
             found: 999,
-            max_known: 15
+            max_known: 16
         }
     ));
 }

@@ -82,6 +82,7 @@ planning_record_proposal
 revision_of
 ensure_test_run
 nonreleased_sandbox_inventory
+sandbox_probe_results
 EOF
 }
 

@@ -63,6 +63,7 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "run_status".to_string(),
             "runs".to_string(),
             "sandbox_instances".to_string(),
+            "sandbox_probe_results".to_string(),
             "scheduler_state".to_string(),
             "schema_migrations".to_string(),
             "system_state".to_string(),
@@ -389,6 +390,27 @@ fn production_schema_contains_only_the_tables_this_behaviour_needs() {
             "normalization_provenance",
             "planning_operation_id",
             "proposal_digest"
+        ]
+    );
+    assert_eq!(
+        columns(&dir.db_path(), "sandbox_probe_results"),
+        [
+            "architecture",
+            "backend_descriptor",
+            "backend_version",
+            "environment_identity",
+            "expected",
+            "id",
+            "launch_decision",
+            "observed",
+            "passed",
+            "platform",
+            "probe_implementation_version",
+            "probe_name",
+            "recorded_at",
+            "run_id",
+            "sandbox_id",
+            "sandbox_plan_digest"
         ]
     );
 
