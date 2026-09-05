@@ -43,27 +43,40 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          set -eu
-          marker='<!-- pantheon-draft-checkpoint -->'
+          python3 -c '
+          import json, os, subprocess, sys
+
+          marker = "<!-- pantheon-draft-checkpoint -->"
+          repo = os.environ["REPO"]
+          pr = os.environ["PR_NUMBER"]
 
           # Idempotency: skip if a checkpoint review already exists.
-          count=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null | grep -c "$marker" || true)
-          if [ "$count" -gt 0 ]; then
-            echo "Checkpoint review already exists; skipping."
-            exit 0
-          fi
+          reviews = subprocess.run(
+              ["gh", "api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"],
+              capture_output=True, text=True
+          )
+          if marker in reviews.stdout:
+              print("Checkpoint review already exists; skipping.")
+              sys.exit(0)
 
-          body="This pull request failed the Pantheon Draft opening checkpoint.
+          body = (
+              "This pull request failed the Pantheon Draft opening checkpoint.\n\n"
+              "The opening event showed one or more of the following:\n"
+              "- not opened as Draft\n"
+              "- does not target the default branch\n"
+              "- has tracked changes at opening (non-empty tree diff)\n"
+              "- missing or empty required body sections (Mission, Change, Evidence)\n"
+              "- Mission section does not identify a mission relationship\n\n"
+              "Later edits, reverts, or force-pushes cannot erase this record "
+              "because the check evaluates only the immutable opening-event facts. "
+              "To establish a compliant history, open a new Draft pull request "
+              "from a tree-equivalent checkpoint.\n\n"
+              f"{marker}"
+          )
 
-The opening event showed one or more of the following:
-- not opened as Draft
-- does not target the default branch
-- has tracked changes at opening (non-empty tree diff)
-- missing or empty required body sections (Mission, Change, Evidence)
-- Mission section does not identify a mission relationship
-
-Later edits, reverts, or force-pushes cannot erase this record because the check evaluates only the immutable opening-event facts. To establish a compliant history, open a new Draft pull request from a tree-equivalent checkpoint.
-
-$marker"
-
-          printf '%s' "$body" | python3 -c 'import json, sys; print(json.dumps({"event": "REQUEST_CHANGES", "body": sys.stdin.read()}))' | gh api --input - "repos/$REPO/pulls/$PR_NUMBER/reviews"
+          payload = json.dumps({"event": "REQUEST_CHANGES", "body": body})
+          subprocess.run(
+              ["gh", "api", "--input", "-", f"repos/{repo}/pulls/{pr}/reviews"],
+              input=payload, text=True, check=True
+          )
+          '
