@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "opening violation followed by force-push (original event had changes)",
+  "action": "opened",
+  "number": 13,
+  "pull_request": {
+    "draft": true,
+    "additions": 8,
+    "deletions": 2,
+    "changed_files": 1,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nSome change.\n\n## Evidence\n\nSome evidence.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

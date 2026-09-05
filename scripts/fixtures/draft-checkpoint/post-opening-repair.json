@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "opening violation followed by a body repair (original event still shows the violation)",
+  "action": "opened",
+  "number": 11,
+  "pull_request": {
+    "draft": false,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nSome change.\n\n## Evidence\n\nSome evidence.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "heading containing only whitespace or template comments",
+  "action": "opened",
+  "number": 7,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nSome change.\n\n## Evidence\n\n<!-- placeholder -->\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

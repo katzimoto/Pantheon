@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "non-default base branch",
+  "action": "opened",
+  "number": 4,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nSome change.\n\n## Evidence\n\nSome evidence.\n",
+    "base": {
+      "ref": "feature-branch",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

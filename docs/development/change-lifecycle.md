@@ -448,6 +448,13 @@ signal to enforce.
 `scripts/check-docs-links.sh` verifies that `.github/pull_request_template.md`
 exists and keeps its stable headings.
 
+`.github/workflows/draft-checkpoint.yml` enforces the structural opening
+checkpoint for mission pull requests: Draft state, default-branch target,
+tree-equivalent head, and non-placeholder `Mission`, `Change`, and `Evidence`
+sections with a mission relationship. It evaluates only the immutable `opened`
+event facts; a failed opening leaves a durable review record that later body
+edits, reverts, or force-pushes cannot erase.
+
 It does not grade PR evidence, reviewer judgment, or handoff quality. Those are
 semantic judgments, and pretending a shell check can make them reliably would
 create false confidence.

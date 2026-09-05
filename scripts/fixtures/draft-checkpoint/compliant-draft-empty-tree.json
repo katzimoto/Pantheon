@@ -1,0 +1,23 @@
+{
+  "_expected": "pass",
+  "_description": "compliant Draft with an empty tree difference",
+  "action": "opened",
+  "number": 1,
+  "pull_request": {
+    "draft": true,
+    "additions": 0,
+    "deletions": 0,
+    "changed_files": 0,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nIntroduce the draft checkpoint workflow and validator.\n\n## Evidence\n\nFixtures cover every required scenario and verify.sh runs them.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}

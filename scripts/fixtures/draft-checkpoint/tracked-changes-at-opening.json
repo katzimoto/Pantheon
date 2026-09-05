@@ -1,0 +1,23 @@
+{
+  "_expected": "fail",
+  "_description": "tracked files already changed at opening",
+  "action": "opened",
+  "number": 3,
+  "pull_request": {
+    "draft": true,
+    "additions": 12,
+    "deletions": 3,
+    "changed_files": 2,
+    "body": "## Mission\n\nCloses #119\n\n## Change\n\nSome change.\n\n## Evidence\n\nSome evidence.\n",
+    "base": {
+      "ref": "main",
+      "sha": "base000",
+      "repo": {
+        "default_branch": "main"
+      }
+    },
+    "head": {
+      "sha": "head000"
+    }
+  }
+}
