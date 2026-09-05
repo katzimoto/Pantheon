@@ -57,6 +57,11 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Verify a supported container runtime is present so isolation tests
+      # cannot silently pass merely because the runner lacks one.
+      - name: Verify container runtime
+        run: docker --version || podman --version
+
       # Exactly the command a developer runs locally. Docs checks, crate
       # boundary checks, formatting, Clippy with warnings denied, tests and
       # rustdoc with warnings denied. If this drifts from local verification,

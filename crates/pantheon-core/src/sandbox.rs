@@ -269,6 +269,15 @@ impl SandboxPlan {
     }
 }
 
+/// One controller-owned probe result with expected-versus-observed facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxProbeResult {
+    pub name: String,
+    pub expected: String,
+    pub observed: String,
+    pub passed: bool,
+}
+
 /// Facts established by Sandbox verification before execution is permitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxVerification {
@@ -282,12 +291,44 @@ pub struct SandboxVerification {
     pub agent_control_route_verified: bool,
     pub workspace_binding_verified: bool,
     pub resource_limits_verified: bool,
+    /// Whether the runtime's seccomp filter is active inside the Sandbox.
+    pub seccomp_active_verified: bool,
+    /// Whether host PID 1 is hidden from the Sandbox.
+    pub host_pid_hidden_verified: bool,
+    /// Whether the Sandbox runs in a distinct user namespace.
+    pub host_user_namespace_verified: bool,
+    /// Whether the Sandbox runs in a distinct mount namespace.
+    pub host_mount_namespace_verified: bool,
+    /// Whether cloud metadata endpoints (e.g. 169.254.169.254) are unreachable.
+    pub cloud_metadata_unreachable_verified: bool,
+    /// Whether DNS resolution is denied where the plan requires no network.
+    pub dns_resolution_denied_verified: bool,
+    /// Whether forbidden mounts (runtime sockets, host secrets) are absent.
+    pub forbidden_mounts_absent_verified: bool,
+    /// Whether the container-management socket is not mounted.
+    pub runtime_socket_absent_verified: bool,
+    /// Whether one Sandbox cannot read or mutate another Attempt's state.
+    pub cross_attempt_isolation_verified: bool,
+    /// Whether control-plane surfaces (pantheon.db, operator socket) are unreachable.
+    pub control_plane_unreachable_verified: bool,
+    /// Individual probe results for controller-owned evidence.
+    pub probe_results: Vec<SandboxProbeResult>,
+    /// Backend descriptor (e.g. "podman", "docker").
+    pub backend_descriptor: String,
+    /// Backend version string.
+    pub backend_version: String,
+    /// Platform (e.g. "linux").
+    pub platform: String,
+    /// Architecture (e.g. "x86_64").
+    pub architecture: String,
+    /// Probe implementation version for evidence lineage.
+    pub probe_implementation_version: String,
 }
 
 impl SandboxVerification {
     /// Whether every required verification fact passed.
     #[must_use]
-    pub const fn all_passed(&self) -> bool {
+    pub fn all_passed(&self) -> bool {
         self.mounts_verified
             && self.network_mode_verified
             && self.privilege_verified
@@ -295,6 +336,16 @@ impl SandboxVerification {
             && self.agent_control_route_verified
             && self.workspace_binding_verified
             && self.resource_limits_verified
+            && self.seccomp_active_verified
+            && self.host_pid_hidden_verified
+            && self.host_user_namespace_verified
+            && self.host_mount_namespace_verified
+            && self.cloud_metadata_unreachable_verified
+            && self.dns_resolution_denied_verified
+            && self.forbidden_mounts_absent_verified
+            && self.runtime_socket_absent_verified
+            && self.cross_attempt_isolation_verified
+            && self.control_plane_unreachable_verified
     }
 }
 

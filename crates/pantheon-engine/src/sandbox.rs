@@ -7,9 +7,12 @@
 
 use std::fmt;
 
-pub use pantheon_core::sandbox::{SandboxKey, SandboxPlan, SandboxPresence, SandboxVerification};
+pub use pantheon_core::sandbox::{
+    SandboxKey, SandboxPlan, SandboxPresence, SandboxProbeResult, SandboxVerification,
+};
 use pantheon_store::{
-    Command, Committed, Revision, SandboxBinding, SandboxRecord, Store, StoreError,
+    Command, Committed, Revision, SandboxBinding, SandboxProbeEvidence, SandboxRecord, Store,
+    StoreError,
 };
 
 /// Why a sandbox operation failed.
@@ -198,6 +201,7 @@ impl<'store> SandboxController<'store> {
                     })?;
 
                     if !verified.all_passed() {
+                        let _ = self.record_probe_evidence(command, &key, &verified);
                         let cmd_fail = Command {
                             epoch: epoch.as_str(),
                             id: &format!("{}-fail", command.id),
@@ -374,6 +378,37 @@ impl<'store> SandboxController<'store> {
                     ))
                 })?,
         })
+    }
+
+    /// Records controller-owned probe evidence for every probe result.
+    fn record_probe_evidence(
+        &self,
+        command: &Command<'_>,
+        sandbox_key: &SandboxKey,
+        verification: &SandboxVerification,
+    ) -> Result<(), SandboxControllerError> {
+        for result in &verification.probe_results {
+            let evidence = SandboxProbeEvidence {
+                sandbox_id: sandbox_key.as_str(),
+                probe_name: &result.name,
+                expected: &result.expected,
+                observed: &result.observed,
+                passed: result.passed,
+                backend_descriptor: &verification.backend_descriptor,
+                backend_version: &verification.backend_version,
+                platform: &verification.platform,
+                architecture: &verification.architecture,
+                probe_implementation_version: &verification.probe_implementation_version,
+            };
+            let cmd = Command {
+                epoch: command.epoch,
+                id: &format!("{}-probe-{}", command.id, result.name),
+                request_hash: command.request_hash,
+                event_type: "sandbox.probe.recorded",
+            };
+            let _ = self.store.record_sandbox_probe_evidence(&cmd, &evidence);
+        }
+        Ok(())
     }
 }
 

@@ -90,12 +90,34 @@ fn sandbox_verification_all_passed() {
         agent_control_route_verified: true,
         workspace_binding_verified: true,
         resource_limits_verified: true,
+        seccomp_active_verified: true,
+        host_pid_hidden_verified: true,
+        host_user_namespace_verified: true,
+        host_mount_namespace_verified: true,
+        cloud_metadata_unreachable_verified: true,
+        dns_resolution_denied_verified: true,
+        forbidden_mounts_absent_verified: true,
+        runtime_socket_absent_verified: true,
+        cross_attempt_isolation_verified: true,
+        control_plane_unreachable_verified: true,
+        probe_results: Vec::new(),
+        backend_descriptor: "test".to_string(),
+        backend_version: "0.0.0".to_string(),
+        platform: "linux".to_string(),
+        architecture: "x86_64".to_string(),
+        probe_implementation_version: "1".to_string(),
     };
     assert!(ok.all_passed());
 
     let bad = SandboxVerification {
         mounts_verified: false,
-        ..ok
+        ..ok.clone()
     };
     assert!(!bad.all_passed());
+
+    let bad_seccomp = SandboxVerification {
+        seccomp_active_verified: false,
+        ..ok
+    };
+    assert!(!bad_seccomp.all_passed());
 }

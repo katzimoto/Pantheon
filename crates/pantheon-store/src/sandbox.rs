@@ -46,6 +46,38 @@ pub struct SandboxBinding<'a> {
     pub environment_identity: &'a str,
 }
 
+/// One controller-owned probe evidence record to persist.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxProbeEvidence<'a> {
+    pub sandbox_id: &'a str,
+    pub probe_name: &'a str,
+    pub expected: &'a str,
+    pub observed: &'a str,
+    pub passed: bool,
+    pub backend_descriptor: &'a str,
+    pub backend_version: &'a str,
+    pub platform: &'a str,
+    pub architecture: &'a str,
+    pub probe_implementation_version: &'a str,
+}
+
+/// One durable row from `sandbox_probe_results`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxProbeRecord {
+    pub id: i64,
+    pub sandbox_id: String,
+    pub probe_name: String,
+    pub expected: String,
+    pub observed: String,
+    pub passed: bool,
+    pub backend_descriptor: String,
+    pub backend_version: String,
+    pub platform: String,
+    pub architecture: String,
+    pub probe_implementation_version: String,
+    pub recorded_at: i64,
+}
+
 impl Store {
     /// Commits durable Sandbox identity and intention for a Run, before any
     /// container-runtime side effect.
@@ -442,6 +474,82 @@ impl Store {
                     })?,
                     revision: Revision::new(revision),
                 });
+            }
+            Ok(out)
+        })
+    }
+
+    /// Records one controller-owned probe evidence row durably.
+    ///
+    /// Appends an Event and commits in the same authoritative transaction.
+    pub fn record_sandbox_probe_evidence(
+        &self,
+        command: &Command<'_>,
+        evidence: &SandboxProbeEvidence<'_>,
+    ) -> Result<Committed<()>, StoreError> {
+        self.execute_command(command, |writer| {
+            let recorded_at: i64 = writer
+                .query_optional("SELECT unixepoch()", &[], |row| row.get(0))?
+                .ok_or_else(|| {
+                    StoreError::InvariantViolated("could not read the current time".to_string())
+                })?;
+            writer.execute(
+                "INSERT INTO sandbox_probe_results (
+                     sandbox_id, probe_name, expected, observed, passed,
+                     backend_descriptor, backend_version, platform, architecture,
+                     probe_implementation_version, recorded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                &[
+                    Value::from(evidence.sandbox_id),
+                    Value::from(evidence.probe_name),
+                    Value::from(evidence.expected),
+                    Value::from(evidence.observed),
+                    Value::Integer(i64::from(evidence.passed)),
+                    Value::from(evidence.backend_descriptor),
+                    Value::from(evidence.backend_version),
+                    Value::from(evidence.platform),
+                    Value::from(evidence.architecture),
+                    Value::from(evidence.probe_implementation_version),
+                    Value::Integer(recorded_at),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every probe evidence row for a given Sandbox, oldest first.
+    pub fn sandbox_probe_results(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Vec<SandboxProbeRecord>, StoreError> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, sandbox_id, probe_name, expected, observed, passed,
+                        backend_descriptor, backend_version, platform, architecture,
+                        probe_implementation_version, recorded_at
+                 FROM sandbox_probe_results
+                 WHERE sandbox_id = ?1
+                 ORDER BY recorded_at ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![sandbox_id], |row| {
+                Ok(SandboxProbeRecord {
+                    id: row.get(0)?,
+                    sandbox_id: row.get(1)?,
+                    probe_name: row.get(2)?,
+                    expected: row.get(3)?,
+                    observed: row.get(4)?,
+                    passed: row.get::<_, i64>(5)? != 0,
+                    backend_descriptor: row.get(6)?,
+                    backend_version: row.get(7)?,
+                    platform: row.get(8)?,
+                    architecture: row.get(9)?,
+                    probe_implementation_version: row.get(10)?,
+                    recorded_at: row.get(11)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
             }
             Ok(out)
         })

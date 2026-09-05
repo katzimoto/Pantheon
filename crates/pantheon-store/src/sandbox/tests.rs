@@ -5,7 +5,7 @@ use pantheon_core::sandbox::{
     SandboxKey, SandboxMount, SandboxNetworkMode, SandboxPhase, SandboxPlan, SandboxPresence,
 };
 
-use crate::{Command, Committed, Store, StoreError};
+use crate::{Command, Committed, SandboxProbeEvidence, Store, StoreError};
 
 use super::*;
 
@@ -277,4 +277,47 @@ fn nonreleased_inventory_excludes_released() {
     let inventory = store.nonreleased_sandbox_inventory().unwrap();
     assert_eq!(inventory.len(), 1);
     assert_eq!(inventory[0].id, "sandbox-f1");
+}
+
+#[test]
+fn record_probe_evidence_persists() {
+    let (store, _dir) = temp_store();
+    let epoch = store.restore_generation().expect("generation");
+    let cmd = command(epoch.as_str(), "cmd-1");
+    let key = SandboxKey::new("sandbox-probe").unwrap();
+    let plan = test_plan();
+    let digest = plan.digest();
+    let binding = SandboxBinding {
+        run_id: "run-1",
+        sandbox_plan_digest: digest.as_bytes(),
+        environment_identity: &plan.environment_identity,
+    };
+    store.create_sandbox(&cmd, &key, &binding).unwrap();
+
+    let evidence = SandboxProbeEvidence {
+        sandbox_id: key.as_str(),
+        probe_name: "test_probe",
+        expected: "true",
+        observed: "false",
+        passed: false,
+        backend_descriptor: "podman",
+        backend_version: "4.0.0",
+        platform: "linux",
+        architecture: "x86_64",
+        probe_implementation_version: "1",
+    };
+    let cmd2 = command(epoch.as_str(), "cmd-2");
+    store
+        .record_sandbox_probe_evidence(&cmd2, &evidence)
+        .unwrap();
+
+    let results = store.sandbox_probe_results(key.as_str()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].probe_name, "test_probe");
+    assert_eq!(results[0].expected, "true");
+    assert_eq!(results[0].observed, "false");
+    assert!(!results[0].passed);
+    assert_eq!(results[0].backend_descriptor, "podman");
+    assert_eq!(results[0].platform, "linux");
+    assert_eq!(results[0].architecture, "x86_64");
 }
