@@ -226,9 +226,9 @@ mod integration {
         let plan = test_plan();
         backend.ensure_sandbox(&key, &plan).unwrap();
 
-        // Now verify against a deliberately different plan (wrong network).
+        // Now verify against a deliberately different plan (wrong image).
         let weakened_plan = SandboxPlan {
-            network_mode: SandboxNetworkMode::Brokered,
+            environment_identity: "busybox:latest".to_string(),
             ..plan
         };
         let verified = backend.verify_sandbox(&key, &weakened_plan).unwrap();
@@ -237,8 +237,8 @@ mod integration {
             "verification must fail when plan does not match actual container config"
         );
         assert!(
-            !verified.network_mode_verified,
-            "network mode mismatch must be detected"
+            !verified.mounts_verified,
+            "environment identity mismatch must be detected"
         );
 
         backend.release_sandbox(&key).unwrap();
