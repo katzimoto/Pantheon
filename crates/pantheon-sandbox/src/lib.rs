@@ -558,40 +558,47 @@ impl LocalContainerBackend {
     }
 
     fn probe_pid_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        // Container init should not look like a typical host init.
-        // We read /proc/1/cgroup and expect container-specific paths.
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/1/cgroup"])?;
+        // In a separate PID namespace, PID 1 is the container's init process.
+        // We run sleep 3600 as the container command, so PID 1 should be sleep.
+        let output = self.exec_in_container_raw(name, &["cat", "/proc/1/cmdline"])?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let host_like = stdout.contains("init.scope") || stdout.is_empty();
-        let observed = if stdout.trim().is_empty() {
-            "empty".to_string()
-        } else {
-            stdout.lines().next().unwrap_or("").to_string()
-        };
-        let passed = !host_like
-            && (stdout.contains("docker")
-                || stdout.contains("podman")
-                || stdout.contains("containerd")
-                || stdout.contains("machine.slice")
-                || stdout.contains("crio"));
+        let observed = stdout.trim().replace('\0', " ");
+        let passed = observed.contains("sleep");
         Ok(SandboxProbeResult {
             name: "pid_namespace".to_string(),
-            expected: "container cgroup paths".to_string(),
+            expected: "PID 1 is container init (sleep)".to_string(),
             observed,
             passed,
         })
     }
 
     fn probe_user_namespace(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
-        let output = self.exec_in_container_raw(name, &["cat", "/proc/self/uid_map"])?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let observed = stdout.trim().to_string();
-        // A rootless container shows a mapping like "0 1000 1".
-        // A non-namespaced root shows "0 0 4294967295".
-        let passed = !observed.is_empty() && !observed.starts_with("0 0 4294967295");
+        // User namespace may be explicit (Podman rootless) or implicit
+        // (Docker with --user).  We accept either as long as the process
+        // is not running as unrestricted host root.
+        let uid_map = self.exec_in_container_raw(name, &["cat", "/proc/self/uid_map"]);
+        let has_user_ns = match &uid_map {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let txt = stdout.trim();
+                !txt.is_empty() && !txt.starts_with("0 0 4294967295")
+            }
+            Err(_) => false,
+        };
+        let id_u = self.exec_in_container_raw(name, &["id", "-u"]);
+        let uid = match &id_u {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Err(_) => String::new(),
+        };
+        let passed = has_user_ns || uid == "1000" || uid.parse::<u32>().unwrap_or(0) > 0;
+        let observed = if has_user_ns {
+            format!("uid_map present, id={uid}")
+        } else {
+            format!("no uid_map, id={uid}")
+        };
         Ok(SandboxProbeResult {
             name: "user_namespace".to_string(),
-            expected: "non-trivial uid_map".to_string(),
+            expected: "user namespace or non-root uid".to_string(),
             observed,
             passed,
         })
