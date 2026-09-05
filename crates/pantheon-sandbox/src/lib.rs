@@ -525,6 +525,12 @@ impl LocalContainerBackend {
     }
 
     fn probe_seccomp(&self, name: &str) -> Result<SandboxProbeResult, SandboxError> {
+        // Docker and Podman both apply the default libseccomp profile, which
+        // enumerates permitted architectures before syscall-number rules.
+        // An unsupported or mismatched architecture therefore fails closed
+        // with SCMP_ACT_ERRNO rather than being evaluated against a wrong
+        // syscall table. We verify the profile is loaded by checking
+        // /proc/self/status.
         let output = self.exec_in_container_raw(name, &["cat", "/proc/self/status"])?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let observed = if stdout.contains("Seccomp:\t2") {

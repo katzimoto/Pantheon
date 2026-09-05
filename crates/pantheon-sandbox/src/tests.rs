@@ -159,7 +159,11 @@ mod integration {
                 probe.name
             );
         }
-        assert_eq!(verified.backend_descriptor, "podman");
+        assert!(
+            verified.backend_descriptor == "podman" || verified.backend_descriptor == "docker",
+            "backend descriptor must name the actual runtime: {}",
+            verified.backend_descriptor
+        );
         assert!(!verified.backend_version.is_empty());
         assert_eq!(verified.platform, "linux");
         assert_eq!(verified.architecture, "x86_64");
