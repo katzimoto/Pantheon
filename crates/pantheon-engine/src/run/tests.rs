@@ -25,10 +25,13 @@ use pantheon_store::{Command, Revision, Store};
 
 use super::{
     ExecutionLauncher, LaunchPackage, LauncherFailure, MinRecoveryPolicy, RandomBytes,
-    RandomFailure, RunController, RunOutcome, SandboxCheck, SandboxReadiness,
+    RandomFailure, RunController, RunOutcome,
 };
 use crate::configuration::{ConfigurationAuthority, SourceSet};
 use crate::routing::{ExecutorBackend, ExecutorBackendPort};
+use crate::sandbox::{
+    SandboxBackend, SandboxError, SandboxKey, SandboxPlan, SandboxPresence, SandboxVerification,
+};
 use crate::scheduling::{ScheduleOutcome, SchedulingController};
 
 const SOUL_V1: &str = "Careful coding agent identity.";
@@ -502,13 +505,46 @@ struct FakeSandbox {
     refuses: bool,
 }
 
-impl SandboxReadiness for FakeSandbox {
-    fn verify_ready(&self, _check: SandboxCheck<'_>) -> Result<(), String> {
+impl SandboxBackend for FakeSandbox {
+    fn ensure_sandbox(
+        &self,
+        _key: &SandboxKey,
+        _plan: &SandboxPlan,
+    ) -> Result<SandboxPresence, SandboxError> {
         if self.refuses {
-            Err("injected sandbox failure".to_string())
+            Err(SandboxError {
+                detail: "injected sandbox failure".to_string(),
+            })
         } else {
-            Ok(())
+            Ok(SandboxPresence::Present)
         }
+    }
+
+    fn inspect_sandbox(&self, _key: &SandboxKey) -> Result<SandboxPresence, SandboxError> {
+        Ok(SandboxPresence::Present)
+    }
+
+    fn verify_sandbox(
+        &self,
+        key: &SandboxKey,
+        plan: &SandboxPlan,
+    ) -> Result<SandboxVerification, SandboxError> {
+        Ok(SandboxVerification {
+            sandbox_key: key.clone(),
+            holder_id: "fake".to_string(),
+            environment_identity: plan.environment_identity.clone(),
+            mounts_verified: true,
+            network_mode_verified: true,
+            privilege_verified: true,
+            capability_verified: true,
+            agent_control_route_verified: true,
+            workspace_binding_verified: true,
+            resource_limits_verified: true,
+        })
+    }
+
+    fn release_sandbox(&self, _key: &SandboxKey) -> Result<(), SandboxError> {
+        Ok(())
     }
 }
 

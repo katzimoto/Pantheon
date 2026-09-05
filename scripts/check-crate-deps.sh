@@ -72,9 +72,10 @@ pantheon-store pantheon-core
 pantheon-engine pantheon-core pantheon-store
 pantheon-git pantheon-core pantheon-engine
 pantheon-cas pantheon-core pantheon-engine
+pantheon-sandbox pantheon-core pantheon-engine
 pantheon-operator-protocol
 pantheon-operator-api pantheon-core pantheon-engine pantheon-operator-protocol
-pantheond pantheon-core pantheon-store pantheon-engine pantheon-git pantheon-cas pantheon-operator-api pantheon-operator-protocol
+pantheond pantheon-core pantheon-store pantheon-engine pantheon-git pantheon-cas pantheon-sandbox pantheon-operator-api pantheon-operator-protocol
 pantheon-cli pantheon-operator-protocol
 EOF
 }

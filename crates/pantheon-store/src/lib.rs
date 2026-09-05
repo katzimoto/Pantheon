@@ -69,6 +69,7 @@ mod migrations;
 mod operator;
 mod planning;
 mod policy;
+mod sandbox;
 mod scheduling;
 mod seal;
 mod store;
@@ -103,6 +104,7 @@ pub use planning::{
     Cancellation, GoalRecord, GraphRecord, MaterializedPlan, PlanningDecision,
     PlanningOperationRecord, PlanningState, ProposalRecord, TaskRecord,
 };
+pub use sandbox::{SandboxBinding, SandboxRecord};
 pub use scheduling::{
     DispatchCandidate, GoalSchedulingRow, RunIntent, RunIntentCommit, SchedulerStateRecord,
     SchedulingSnapshot,

@@ -327,6 +327,20 @@ pub enum StoreError {
     /// caller could have observed differently would help — authority itself
     /// is gone. Nothing is written.
     SubmissionStaleAuthority { attempt_id: String, detail: String },
+    /// The Run named as a Sandbox holder does not exist, or is not in a
+    /// phase from which it may acquire a new Sandbox.
+    ///
+    /// Typed rather than a generic conflict because Sandbox ownership is
+    /// Run-scoped: a caller has to be able to tell "this Run may not own a
+    /// Sandbox" apart from "this Run already owns one". `phase` is
+    /// `"Absent"` when no such Run exists.
+    SandboxHolderIneligible { run_id: String, phase: String },
+    /// The Run already owns a current, non-`Released` Sandbox.
+    ///
+    /// A Run owns at most one current Sandbox. This is the typed form of the
+    /// `sandbox_one_current_per_run` partial unique index, which remains the
+    /// database's own backstop.
+    SandboxAlreadyCurrent { run_id: String, sandbox_id: String },
 }
 
 impl fmt::Display for StoreError {
@@ -538,6 +552,12 @@ impl fmt::Display for StoreError {
                 f,
                 "candidate submission for attempt {attempt_id} lost current authority: {detail}"
             ),
+            Self::SandboxHolderIneligible { run_id, phase } => {
+                write!(f, "run {run_id} is {phase} and may not acquire a sandbox")
+            }
+            Self::SandboxAlreadyCurrent { run_id, sandbox_id } => {
+                write!(f, "run {run_id} already owns current sandbox {sandbox_id}")
+            }
         }
     }
 }
@@ -578,6 +598,8 @@ impl std::error::Error for StoreError {
             | Self::CandidateInvalid { .. }
             | Self::CandidateProvenanceInvalid { .. }
             | Self::SubmissionStaleAuthority { .. }
+            | Self::SandboxHolderIneligible { .. }
+            | Self::SandboxAlreadyCurrent { .. }
             | Self::InvariantViolated(_)
             | Self::ConnectionUnavailable(_) => None,
         }

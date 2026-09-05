@@ -24,6 +24,7 @@ members = [
     "crates/pantheon-git",
     "crates/pantheon-operator-api",
     "crates/pantheon-operator-protocol",
+    "crates/pantheon-sandbox",
     "crates/pantheon-store",
     "crates/pantheond",
 ]

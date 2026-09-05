@@ -31,10 +31,10 @@ use pantheon_core::attempt::Observation;
 use pantheon_core::execution::{
     BackendDescriptor, ControllerSafetyFacts, ExecutionOffer, ExecutionRequest, LaunchSemantics,
 };
+use pantheon_core::sandbox::{SandboxKey, SandboxPlan, SandboxPresence, SandboxVerification};
 use pantheon_engine::routing::{BackendError, ExecutorBackend, ExecutorBackendPort};
-use pantheon_engine::run::{
-    ExecutionLauncher, LaunchPackage, LauncherFailure, SandboxCheck, SandboxReadiness,
-};
+use pantheon_engine::run::{ExecutionLauncher, LaunchPackage, LauncherFailure};
+use pantheon_engine::sandbox::{SandboxBackend, SandboxError};
 
 /// One logical external execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,11 +160,39 @@ impl ExecutionLauncher for FakeExecutor {
     }
 }
 
-impl SandboxReadiness for FakeExecutor {
-    fn verify_ready(&self, _check: SandboxCheck<'_>) -> Result<(), String> {
-        // The fake Sandbox is always factually ready. It proves nothing
-        // about production isolation, and must never be described as doing
-        // so.
+impl SandboxBackend for FakeExecutor {
+    fn ensure_sandbox(
+        &self,
+        _key: &SandboxKey,
+        _plan: &SandboxPlan,
+    ) -> Result<SandboxPresence, SandboxError> {
+        Ok(SandboxPresence::Present)
+    }
+
+    fn inspect_sandbox(&self, _key: &SandboxKey) -> Result<SandboxPresence, SandboxError> {
+        Ok(SandboxPresence::Present)
+    }
+
+    fn verify_sandbox(
+        &self,
+        key: &SandboxKey,
+        plan: &SandboxPlan,
+    ) -> Result<SandboxVerification, SandboxError> {
+        Ok(SandboxVerification {
+            sandbox_key: key.clone(),
+            holder_id: "fake".to_string(),
+            environment_identity: plan.environment_identity.clone(),
+            mounts_verified: true,
+            network_mode_verified: true,
+            privilege_verified: true,
+            capability_verified: true,
+            agent_control_route_verified: true,
+            workspace_binding_verified: true,
+            resource_limits_verified: true,
+        })
+    }
+
+    fn release_sandbox(&self, _key: &SandboxKey) -> Result<(), SandboxError> {
         Ok(())
     }
 }

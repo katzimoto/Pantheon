@@ -474,5 +474,101 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Test-only: creates a minimal run and run_status row so sandbox
+    /// tests can exercise store operations without the full scheduling
+    /// pipeline.  Not part of the production API.
+    #[doc(hidden)]
+    pub fn ensure_test_run(&self, run_id: &str) -> Result<(), StoreError> {
+        use crate::transaction::Value;
+        self.write(|writer| {
+            let now = writer
+                .query_optional("SELECT unixepoch()", &[], |row| row.get::<_, i64>(0))?
+                .ok_or_else(|| StoreError::InvariantViolated("could not read the current time".to_string()))?;
+            let task_id = format!("test-task-{run_id}");
+            let goal_id = format!("test-goal-{run_id}");
+            let spec_digest: [u8; 32] = [0u8; 32];
+            let binding_digest: [u8; 32] = [0u8; 32];
+            let snapshot_digest: [u8; 32] = [0u8; 32];
+            let acceptance_digest: [u8; 32] = [0u8; 32];
+            let evaluator_registry_digest: [u8; 32] = [0u8; 32];
+
+            // Insert minimal goal if needed
+            writer.execute(
+                "INSERT OR IGNORE INTO goals (id, phase, current_revision, revision, created_at)
+                 VALUES (?1, 'Active', 1, 1, ?2)",
+                &[Value::from(goal_id.as_str()), Value::Integer(now)],
+            )?;
+
+            // Insert goal revision if needed
+            let content_digest: [u8; 32] = [0u8; 32];
+            writer.execute(
+                "INSERT OR IGNORE INTO goal_revisions (goal_id, revision, content_digest, canonical_json, created_at)
+                 VALUES (?1, 1, ?2, '{}', ?3)",
+                &[Value::from(goal_id.as_str()), Value::Blob(content_digest.to_vec()), Value::Integer(now)],
+            )?;
+
+            // Insert task spec if needed
+            writer.execute(
+                "INSERT OR IGNORE INTO task_specs (digest, goal_id, goal_revision, canonical_json, acceptance_digest, evaluator_registry_digest, configuration_activation_sequence)
+                 VALUES (?1, ?2, 1, '{}', ?3, ?4, 0)",
+                &[
+                    Value::Blob(spec_digest.to_vec()),
+                    Value::from(goal_id.as_str()),
+                    Value::Blob(acceptance_digest.to_vec()),
+                    Value::Blob(evaluator_registry_digest.to_vec()),
+                ],
+            )?;
+
+            // Insert minimal task if needed
+            writer.execute(
+                "INSERT OR IGNORE INTO tasks (id, goal_id, created_graph_revision, phase, revision, spec_digest)
+                 VALUES (?1, ?2, 1, 'Ready', 1, ?3)",
+                &[
+                    Value::from(task_id.as_str()),
+                    Value::from(goal_id.as_str()),
+                    Value::Blob(spec_digest.to_vec()),
+                ],
+            )?;
+
+            // Insert execution binding if needed
+            writer.execute(
+                "INSERT OR IGNORE INTO execution_bindings (digest, canonical_json)
+                 VALUES (?1, '{}')",
+                &[Value::Blob(binding_digest.to_vec())],
+            )?;
+
+            // Insert context source snapshot if needed
+            writer.execute(
+                "INSERT OR IGNORE INTO context_source_snapshots (digest, canonical_json)
+                 VALUES (?1, '{}')",
+                &[Value::Blob(snapshot_digest.to_vec())],
+            )?;
+
+            // Insert run
+            writer.execute(
+                "INSERT OR IGNORE INTO runs (id, task_id, binding_digest, context_source_snapshot_digest, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                &[
+                    Value::from(run_id),
+                    Value::from(task_id.as_str()),
+                    Value::Blob(binding_digest.to_vec()),
+                    Value::Blob(snapshot_digest.to_vec()),
+                    Value::Integer(now),
+                ],
+            )?;
+
+            // Insert run_status
+            writer.execute(
+                "INSERT OR IGNORE INTO run_status (run_id, task_id, phase, revision, active_slot, updated_at)
+                 VALUES (?1, ?2, 'Active', 1, 'global', ?3)",
+                &[Value::from(run_id), Value::from(task_id.as_str()), Value::Integer(now)],
+            )?;
+
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
